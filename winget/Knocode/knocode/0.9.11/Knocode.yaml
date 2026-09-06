@@ -1,6 +1,6 @@
 # Created by the Knocode release pipeline. Submit to microsoft/winget-pkgs - see winget/README.md.
 PackageIdentifier: Knocode.knocode
-PackageVersion: 0.9.9
+PackageVersion: 0.9.11
 DefaultLocale: en-US
 ManifestType: version
 ManifestVersion: 1.6.0
