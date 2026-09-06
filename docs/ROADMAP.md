@@ -155,11 +155,13 @@ See [Architecture](01-architecture/ARCHITECTURE.md), [Components](01-architectur
 
 ```
 Coding Agent → Adapter Layer (UDS/MessagePack) → Context Engine → Context Pack (YAML)
-                ↓                                      ↓
-          Execution Optimizer              Repository Intel
-          (tool output compression)        Knowledge Hub
-                                            Retrieval Engine
-                                            (intent → expansion → BM25 + structural → graph → ranking)
+                                                       ↓
+                                               Repository Intel
+                                               Knowledge Hub
+                                               Retrieval Engine
+                                        (intent → expansion → BM25 + structural → graph → ranking)
+
+Tool-output compression: delegated to RTK (external binary, wired by installers)
 ```
 
 ### Workspace Crates
@@ -172,7 +174,7 @@ Coding Agent → Adapter Layer (UDS/MessagePack) → Context Engine → Context 
 | `knocode-context` | BuildContext pipeline, token budgeting |
 | `knocode-repo-intel` | tree-sitter, ripgrep, tantivy, graph, watcher |
 | `knocode-knowledge` | Knowledge Hub, retrieval |
-| `knocode-optimizer` | RTK compression, tool output optimization |
+| `knocode-optimizer` | ❌ removed — RTK compression, tool output optimization (see REMOVED_TOOLS.md) |
 | `knocode-events` | Event bus (in-memory ring buffer) |
 | `knocode-storage` | SQLite + tantivy persistence |
 | `knocode-bench` | Criterion benchmarks |
@@ -186,7 +188,7 @@ Coding Agent → Adapter Layer (UDS/MessagePack) → Context Engine → Context 
 | ast-grep | Structural search (in-process `AstGrepBackend`) | ✅ First-class |
 | tantivy | BM25 full-text index | ✅ First-class |
 | tiktoken-rs | Local token counting | ✅ First-class |
-| RTK | Tool output compression | ✅ Optional (binary, built-in fallback) |
+| RTK | Tool output compression | ✅ External binary, installed + wired by installers (not embedded) |
 | git2 | Commit-based auto-indexing | ✅ First-class (non-optional) |
 | notify | Filesystem watcher (real-time mode) | ✅ Optional |
 

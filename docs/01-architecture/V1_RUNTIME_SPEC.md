@@ -143,11 +143,9 @@ V1 trace questions the Runtime must answer:
 
 ### 3.3 Execution Optimization
 
-- Tool-output compression/filtering (`knocode-optimizer`): built-in compressors,
-  optional RTK binary; tee-on-failure; honest savings reporting
-  (reduction in the thing measured ≠ reduction in your bill).
-- Inputs: `tool_name`, `output_type`, `content`, `context`. Output:
-  `original_tokens`/`compressed_tokens` + compressed body.
+- **Delegated to RTK** (github.com/rtk-ai/rtk): the runtime does not compress
+  tool outputs. Installers offer RTK as an opt-in external resource and wire
+  RTK's own agent integrations (`rtk init`).
 
 ### 3.4 Local Runtime
 
@@ -166,7 +164,7 @@ V1 trace questions the Runtime must answer:
 | A2 | Speedup vs `grep -rE` | 27–106× | ≥ 20× |
 | A3 | BuildContext total overhead (target budget) | — | < 160ms typical; 30s hard fail-open |
 | A4 | Retrieval recall@5 on 50-task eval | ~0.29 | ≥ 0.4 |
-| A5 | Compression ratio on compressible tool output | > 1.2× (e2e) | ≥ 1.2× |
+| A5 | ~~Compression ratio on compressible tool output~~ — delegated to RTK | — | — |
 | A6 | Fail-open: agent always gets a response (never blocks) | ✅ | invariant |
 | A7 | Every request emits a complete trace (tool/retrieval/context/model sections) | partial (metrics-first) | full |
 | A8 | Per-request cost attribution | ❌ (gap) | ✅ |
@@ -178,11 +176,10 @@ V1 trace questions the Runtime must answer:
 | Transport | Endpoint / message | Purpose |
 |-----------|--------------------|---------|
 | UDS/MessagePack | `RequestPayload::MessageRewrite` | Pre-generation: enrich message with context |
-| UDS/MessagePack | `RequestPayload::ToolOutput` | Pre-tool: compress output |
 | UDS/MessagePack | `RequestPayload::Probe` | Readiness: `state`, `index_files`, `version` |
 | HTTP | `GET /health` | Readiness + version + index count |
 | HTTP | `GET /metrics` | Prometheus exposition incl. `knocode_daemon_ready` |
-| HTTP | `POST /hook` | JSON fallback for the two hooks; `503 daemon_indexing` while not ready |
+| HTTP | `POST /hook` | JSON fallback for the pre-generation hook; `503 daemon_indexing` while not ready |
 
 ## 6. Evolution Path
 

@@ -12,9 +12,9 @@ Define the complete v1 architecture of the AI Runtime for Coding Agents. This do
 
 ## System Overview
 
-The runtime is a single-process local daemon written in Rust. It receives coding tasks from a coding agent via native hooks (pre-generation and pre-tool-call), processes them through a pipeline of modules, and returns token-efficient context and compressed tool output. All processing happens on the developer's machine. The runtime makes **no external LLM calls**: it is model-agnostic, and the coding agent talks to its model provider directly.
+The runtime is a single-process local daemon written in Rust. It receives coding tasks from a coding agent via native hooks (pre-generation), processes them through a pipeline of modules, and returns token-efficient context. All processing happens on the developer's machine. The runtime makes **no external LLM calls**: it is model-agnostic, and the coding agent talks to its model provider directly. Tool-output compression is delegated to RTK (external binary) — see `REMOVED_TOOLS.md`.
 
-The runtime exposes one clean API: `BuildContext(task)` → `ContextPack` (plus a readiness probe and tool-output compression). The workflow engine (DBOS) is removed — the runtime is a single tokio daemon (see `REMOVED_TOOLS.md`).
+The runtime exposes one clean API: `BuildContext(task)` → `ContextPack` (plus a readiness probe). The workflow engine (DBOS) is removed — the runtime is a single tokio daemon (see `REMOVED_TOOLS.md`).
 
 ## Architecture Diagram
 
@@ -30,7 +30,6 @@ graph TB
             CE[Context Engine]
             RI[Repository Intelligence]
             KH[Knowledge Hub]
-            EO[Execution Optimizer]
             EB[Event Bus]
         end
 
@@ -44,8 +43,6 @@ graph TB
     AD --> CE
     CE --> RI
     CE --> KH
-
-    CA <-->|UDS / MessagePack| EO
 
     RI --> DB
     RI --> TV
@@ -69,7 +66,7 @@ graph TB
 | Context Engine | Build token-budgeted Context Packs | BuildContext(task) |
 | Repository Intelligence | Incremental AST parsing and search | index_repository, search_code, search_symbols |
 | Knowledge Hub | Store and retrieve all knowledge | store, retrieve |
-| Execution Optimizer | Compress tool outputs via RTK | compress_output |
+| Execution Optimizer | ❌ removed — compression delegated to RTK | — |
 | Event Bus | Async observability events | emit(event) |
 
 ## Dependency Graph
@@ -77,7 +74,6 @@ graph TB
 ```mermaid
 graph TD
     AD[Adapter Layer] --> CE[Context Engine]
-    AD --> EO[Execution Optimizer]
 
     CE --> RI[Repository Intelligence]
     CE --> KH[Knowledge Hub]
@@ -114,9 +110,9 @@ The runtime runs as a single Rust daemon process. All modules execute within thi
 │  └──────────────────┘  └──────────────────────────────┘  │
 │                                                          │
 │  ┌──────────────────┐  ┌──────────────────────────────┐  │
-│  │  RTK Integration │  │     Local Storage             │  │
-│  │  (tool output    │  │  - SQLite connection pool     │  │
-│  │   compression)   │  │  - SQLite+tantivy local         │  │
+│  │  HTTP Surface    │  │     Local Storage             │  │
+│  │  /health /metrics│  │  - SQLite connection pool     │  │
+│  │  /hook /mcp      │  │  - SQLite+tantivy local       │  │
 │  │                  │  │  - Tantivy index handles      │  │
 │  │                  │  │  - Filesystem handles         │  │
 │  └──────────────────┘  └──────────────────────────────┘  │
@@ -165,13 +161,9 @@ Adapter Layer
                     │               └──returns──→ Vec<KnowledgeEntry>
                     │
                     └──returns──→ ContextPack
-
-Adapter Layer
-    │
-    └──calls──→ Execution Optimizer
-                    │
-                    └──returns──→ CompressedOutput
 ```
+
+Tool-output compression is **not** part of the daemon pipeline — it is delegated to RTK (external binary) wired by the installers (see `REMOVED_TOOLS.md`).
 
 ### Event Bus (Async Only)
 
@@ -278,7 +270,7 @@ This enables the daemon to report structured diagnostics instead of generic "no 
 |-------|------------|------|
 | Language | Rust (>= 1.75) | Context Engine, daemon, all modules |
 | Agent IPC | UDS + MessagePack primary (`rmp-serde`+`tokio::net::UnixListener`) + HTTP/JSON fallback (`axum`) on `127.0.0.1:9527` | Daemon ↔ Agent; `POST /hook`, UDS `Probe` payload (readiness), `GET /health` (readiness `state: indexing\|ready`), `GET /metrics` |
-| MCP (Model Context Protocol) | JSON-RPC 2.0 over HTTP (`POST /mcp`) on the same axum listener (`127.0.0.1:9527`) | Daemon-hosted MCP - `initialize` / `ping` / `tools/list` / `tools/call`; tools `knocode_context` + `knocode_compress`; JSON-RPC `-32001 daemon_indexing` while indexing; client = opencode plugin (`no-conversion` tool path, `/hook` fallback) |
+| MCP (Model Context Protocol) | JSON-RPC 2.0 over HTTP (`POST /mcp`) on the same axum listener (`127.0.0.1:9527`) | Daemon-hosted MCP - `initialize` / `ping` / `tools/list` / `tools/call`; tool `knocode_context` (compression = RTK, external); JSON-RPC `-32001 daemon_indexing` while indexing; client = opencode plugin (`no-conversion` tool path, `/hook` fallback) |
 | AST Parsing | tree-sitter **111 languages** via arborium bundle (no feature flags) | `repo-intel/src/parser.rs` |
 | Structural Search | In-process `AstGrepBackend` (ast-grep-core + tree-sitter-language-pack) via `StructuralRetriever` | `retrieval/structural.rs` + `repo-intel/src/structural/` |
 | Text Search | ripgrep (`grep-searcher`+`grep-regex`+`ignore`) | `search_text()` |

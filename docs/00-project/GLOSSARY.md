@@ -8,7 +8,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Runtime
 
-**Definition:** The AI Runtime system itself — a local application that improves coding agents by providing repository intelligence, context optimization, and tool-output compression.
+**Definition:** The AI Runtime system itself — a local application that improves coding agents by providing repository intelligence and context optimization. Tool-output compression is delegated to RTK.
 
 **Scope:** Everything that runs as the daemon process. Excludes the coding agent and model providers.
 
@@ -50,9 +50,9 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Pre-Tool Hook
 
-**Definition:** A hook that fires before a tool executes. The runtime can intercept the tool output and compress it before it re-enters the model's context.
+**Definition:** [REMOVED from the runtime] A hook that fires before a tool executes. The daemon no longer compresses tool outputs — compression is delegated to RTK (external binary), which installs its own hooks. See REMOVED_TOOLS.md.
 
-**Examples:** opencode `tool.execute.before`, Claude Code `PreToolUse`.
+**Examples:** opencode `tool.execute.before`, Claude Code `PreToolUse` (now owned by RTK, not the knocode daemon).
 
 ### Fail-Open
 
@@ -124,9 +124,9 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Execution Optimizer
 
-**Definition:** The component that compresses and optimizes tool outputs before they re-enter the model's context. Uses RTK directly rather than building an equivalent.
+**Definition:** [REMOVED from the runtime] Formerly the component that compressed tool outputs. Tool-output compression is now delegated entirely to RTK (see REMOVED_TOOLS.md).
 
-**Scope:** Intercepts tool outputs via pre-tool-call hooks.
+**Scope:** None — removed from the daemon; RTK's own integrations handle compression.
 
 ### RTK
 
@@ -138,11 +138,11 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 **Definition:** The result of a tool execution by the coding agent. Includes: file contents read by the agent, search results, shell command output, and any other structured output returned to the model.
 
-**Scope:** Compressed by the Execution Optimizer via pre-tool hooks.
+**Scope:** Compressed by RTK (external binary) — the runtime no longer touches tool outputs.
 
 ### Event Bus
 
-**Definition:** An async-only system for observability events. Events: ContextBuilt, RepositoryUpdated, ToolExecuted, ResponseGenerated, MemorySaved. Never in the `BuildContext` call path.
+**Definition:** An async-only system for observability events. Events: ContextBuilt, RepositoryUpdated, ResponseGenerated, MemorySaved. Never in the `BuildContext` call path.
 
 **Scope:** Consumed by CLI inspection, metrics, and future orchestrators.
 

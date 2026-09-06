@@ -5,15 +5,17 @@
 # Idempotent. Usage: bash scripts/install.sh [--skip-build] [--agents a,b,c|--all-agents|--no-agents] [--skip-prereqs]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SKIP_BUILD=false; AGENTS=""; ALL_AGENTS=false; NO_AGENTS=false; SKIP_PREREQS=false
+SKIP_BUILD=false; AGENTS=""; ALL_AGENTS=false; NO_AGENTS=false; WITH_RTK=false; NO_RTK=false; SKIP_PREREQS=false
 for arg in "$@"; do case "$arg" in
   --skip-build) SKIP_BUILD=true;;
   --agents) AGENTS="$2"; shift;;
   --agents=*) AGENTS="${arg#--agents=}";;
   --all-agents) ALL_AGENTS=true;;
   --no-agents) NO_AGENTS=true;;
+  --with-rtk) WITH_RTK=true;;
+  --no-rtk) NO_RTK=true;;
   --skip-prereqs) SKIP_PREREQS=true;;
-  -h|--help) echo "Usage: $0 [--skip-build] [--agents opencode,copilot | --all-agents | --no-agents] [--skip-prereqs]"; exit 0;;
+  -h|--help) echo "Usage: $0 [--skip-build] [--agents opencode,copilot | --all-agents | --no-agents] [--with-rtk|--no-rtk] [--skip-prereqs]"; exit 0;;
 esac; done
 info(){ echo -e "\033[36m[knocode]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; } ; skip(){ echo -e "  \033[90m[SKIP]\033[0m $*"; }
 
@@ -84,40 +86,6 @@ if ! command -v git >/dev/null 2>&1; then
   else echo "git not found - install manually: https://git-scm.com"; exit 1; fi
 else ok "$(git --version)"; fi
 
-info "Installing external tools..."
-   # RTK - download prebuilt release for this platform -> ~/.knocode/bin/rtk (NO COMPILE). Unified bin.
-   RTK_BIN="$HOME/.knocode/bin/rtk"
-   if [ -f "$HOME/bin/rtk" ] && [ ! -f "$RTK_BIN" ]; then mkdir -p "$(dirname "$RTK_BIN")"; cp -f "$HOME/bin/rtk" "$RTK_BIN" 2>/dev/null && chmod +x "$RTK_BIN" 2>/dev/null && ok "migrated legacy ~/bin/rtk -> $RTK_BIN" || true; fi
-   if command -v rtk >/dev/null 2>&1; then ok "rtk $(rtk --version 2>/dev/null | head -1)"
-   elif [ -f "$RTK_BIN" ]; then ok "rtk binary at $RTK_BIN"
-   else
-     RTK_OS="$(uname -s 2>/dev/null | tr "[:upper:]" "[:lower:]")"; RTK_ARCH="$(uname -m 2>/dev/null | tr "[:upper:]" "[:lower:]")"
-     case "$RTK_OS:$RTK_ARCH" in
-       linux:x86_64|linux:amd64) RTK_ASSET="rtk-x86_64-unknown-linux-musl.tar.gz";;
-       linux:aarch64|linux:arm64) RTK_ASSET="rtk-aarch64-unknown-linux-gnu.tar.gz";;
-       darwin:x86_64) RTK_ASSET="rtk-x86_64-apple-darwin.tar.gz";;
-       darwin:aarch64|darwin:arm64) RTK_ASSET="rtk-aarch64-apple-darwin.tar.gz";;
-       *) RTK_ASSET="";;
-     esac
-     if [ -z "$RTK_ASSET" ]; then warn "rtk: unsupported platform ($RTK_OS/$RTK_ARCH) - install manually from https://github.com/rtk-ai/rtk/releases"
-     else
-       RTK_URL="https://github.com/rtk-ai/rtk/releases/latest/download/$RTK_ASSET"
-       RTK_TMP="$(mktemp -d 2>/dev/null || echo "$HOME/.cache/tmp/rtk_dl")"; mkdir -p "$RTK_TMP"
-       info "  downloading rtk release ($RTK_ASSET)..."
-       if { command -v curl >/dev/null 2>&1 && curl -fsSL "$RTK_URL" -o "$RTK_TMP/$RTK_ASSET"; } || { command -v wget >/dev/null 2>&1 && wget -q "$RTK_URL" -O "$RTK_TMP/$RTK_ASSET"; }; then
-         tar -xzf "$RTK_TMP/$RTK_ASSET" -C "$RTK_TMP" 2>/dev/null
-         RTK_SRC="$(find "$RTK_TMP" -name rtk -type f 2>/dev/null | head -1 || true)"
-         if [ -n "$RTK_SRC" ] && [ -f "$RTK_SRC" ]; then
-           mkdir -p "$(dirname "$RTK_BIN")"
-           cp -f "$RTK_SRC" "$RTK_BIN" 2>/dev/null && chmod +x "$RTK_BIN" 2>/dev/null && ok "rtk installed to $RTK_BIN (from GitHub release)" || warn "rtk copy failed"
-         else warn "rtk release archive did not contain the rtk binary"
-         fi
-       else warn "rtk download failed - install manually from https://github.com/rtk-ai/rtk/releases"
-       fi
-       rm -rf "$RTK_TMP" 2>/dev/null
-     fi
-   fi
-
 
 # 1. Use prebuilt knocode (no compile/test - use repository binary)
 if [ "$SKIP_BUILD" = true ]; then info "Skipping build check (--skip-build)"; fi
@@ -157,21 +125,6 @@ info "Verifying installation (doctor)..."
 # =====================================================================================
 if [ -n "$AGENT_SEL" ]; then
   OC_GLOBAL="$HOME/.config/opencode"
-  MCP_DIST="$ROOT/packages/knocode-mcp/dist/index.js"
-  WANT_MCP=false
-  for a in $AGENT_SEL; do case "$a" in copilot) WANT_MCP=true;; esac; done
-
-  # --- shared MCP server build (Copilot uses knocode-mcp) ---
-  if [ "$WANT_MCP" = true ]; then
-    if [ -d "$ROOT/packages/knocode-mcp" ]; then
-      if [ ! -f "$MCP_DIST" ]; then
-        if command -v npm >/dev/null 2>&1; then
-          info "Building knocode-mcp MCP server..."
-          (cd "$ROOT/packages/knocode-mcp" && npm install --silent 2>/dev/null && npm run build --silent 2>/dev/null && ok "knocode-mcp built to packages/knocode-mcp/dist") || warn "knocode-mcp build failed - run: cd packages/knocode-mcp && npm install && npm run build"
-        else warn "npm not found - cannot build knocode-mcp (MCP agents need Node.js)"; fi
-      else ok "knocode-mcp dist at packages/knocode-mcp/dist/index.js"; fi
-    else warn "packages/knocode-mcp not found - skipping MCP server build"; fi
-  fi
 
   # --- OpenCode: global plugin + skill (~/.config/opencode) ---
   if echo "$AGENT_SEL" | grep -qw opencode; then
@@ -223,18 +176,55 @@ EOF
     info "Restart opencode to load global plugin 'opencode-knocode' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527). Plugin loads in EVERY project (global ~/.config/opencode)."
   fi
 
-  # --- Copilot (VS Code): user-level mcp.json (~/.config/Code/User/mcp.json) ---
+  # --- Copilot (VS Code): NO user-level MCP registration ---
+  # The knocode MCP is internal to the Copilot Agent Plugin (plugin mcp.json ->
+  # ${PLUGIN_ROOT}/servers/knocode-mcp.mjs) and is never exposed globally.
+  # Clean up any knocode entry left in VS Code's user mcp.json by previous installs.
   if echo "$AGENT_SEL" | grep -qw copilot; then
     CODE_USER_DIR="$HOME/.config/Code/User"; VSCODE_MCP="$CODE_USER_DIR/mcp.json"
-    mkdir -p "$CODE_USER_DIR"
-    if [ ! -f "$VSCODE_MCP" ]; then
-      printf '{\n  "servers": {\n    "knocode": { "command": "node", "args": ["%s"], "env": { "KNOCODE_DAEMON_URL": "http://127.0.0.1:9527" } }\n  }\n}\n' "$MCP_DIST" > "$VSCODE_MCP"
-      ok "VS Code Copilot MCP at $VSCODE_MCP (user scope)"
-    else
-      if command -v node >/dev/null 2>&1; then
-        VSCODE_MCP_PATH="$VSCODE_MCP" MCP_DIST="$MCP_DIST" node -e "const fs=require('fs');const p=process.env.VSCODE_MCP_PATH;let j={};try{j=JSON.parse(fs.readFileSync(p,'utf8'))}catch(e){};j.servers=j.servers||{};j.servers.knocode={command:'node',args:[process.env.MCP_DIST],env:{KNOCODE_DAEMON_URL:'http://127.0.0.1:9527'}};fs.writeFileSync(p,JSON.stringify(j,null,2))" 2>/dev/null && ok "VS Code Copilot MCP updated at $VSCODE_MCP" || skip "VS Code mcp.json exists but could not merge knocode into $VSCODE_MCP"
-      else skip "VS Code mcp.json exists but could not merge knocode (node missing)"; fi
+    if [ -f "$VSCODE_MCP" ] && command -v node >/dev/null 2>&1; then
+      VSCODE_MCP_PATH="$VSCODE_MCP" node -e "const fs=require('fs');const p=process.env.VSCODE_MCP_PATH;let j={};try{j=JSON.parse(fs.readFileSync(p,'utf8'))}catch(e){};if(j.servers&&j.servers.knocode){delete j.servers.knocode;fs.writeFileSync(p,JSON.stringify(j,null,2));console.log('removed')}" 2>/dev/null | grep -q removed && ok "removed legacy knocode MCP entry from $VSCODE_MCP (MCP is plugin-internal only)" || true
     fi
+
+    # --- Copilot hooks (user-level ~/.copilot/hooks) ---
+    # VS Code/Copilot does NOT discover agent plugins from ~/.knocode — the bundle
+    # at $pluginDst is only the hook-script home. Registration happens by writing a
+    # hooks file into ~/.copilot/hooks/ (the same mechanism RTK uses), with an
+    # absolute script path.
+    if [ -f "$pluginDst/scripts/knocode-hook.mjs" ]; then
+      HOOK_SCRIPT="$pluginDst/scripts/knocode-hook.mjs"
+      mkdir -p "$HOME/.copilot/hooks"
+      cat > "$HOME/.copilot/hooks/knocode-context.json" <<EOF
+{
+  "version": 1,
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node \"$HOOK_SCRIPT\" session-start",
+        "timeout": 15
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "node \"$HOOK_SCRIPT\" user-prompt-submit",
+        "timeout": 10
+      }
+    ]
+  }
+}
+EOF
+      ok "Copilot hooks registered at ~/.copilot/hooks/knocode-context.json (SessionStart + UserPromptSubmit)"
+    else
+      warn "knocode-hook.mjs not deployed - skipping Copilot hooks registration"
+    fi
+
+    # --- Knocode agent skill (Copilot global skills folder: ~/.copilot/skills) ---
+    CP_SKILL_SRC="$ROOT/.knocode/skills/knocode"
+    if [ -f "$CP_SKILL_SRC/SKILL.md" ]; then
+      mkdir -p "$HOME/.copilot/skills" && cp -rf "$CP_SKILL_SRC" "$HOME/.copilot/skills/" 2>/dev/null && ok "knocode skill installed to $HOME/.copilot/skills/knocode (Copilot global skills)" || warn "knocode skill copy (Copilot) failed (source: $CP_SKILL_SRC)"
+    else warn ".knocode/skills/knocode not found - skipping Copilot agent skill install"; fi
   fi
 
   # --- Copilot Agent Plugin (hooks: SessionStart/PreToolUse/PostToolUse) ---
@@ -285,6 +275,124 @@ EOF
   fi
 fi
 
+# 3a. RTK (optional external tool) - DEPENDS ON AGENT SELECTION
+#     Offered AFTER agent wiring and ONLY when agent integrations were selected
+#     (RTK without a wired agent has nothing to integrate with). Opt-in: --with-rtk
+#     forces, --no-rtk skips, otherwise asked interactively (default No). RTK ships
+#     its own OpenCode/Copilot integrations - knocode only installs the binary and
+#     wires them via `rtk init -g` in section 3b (no reimplementation).
+RTK_BIN="$HOME/.knocode/bin/rtk"
+RTK_CMD=""
+RTK_STATUS=""
+if [ "$NO_RTK" = true ]; then
+  RTK_STATUS="skipped (--no-rtk)"
+elif [ -z "$AGENT_SEL" ]; then
+  RTK_STATUS="skipped (no agent integrations selected)"
+  if [ "$WITH_RTK" = true ]; then
+    warn "--with-rtk was set but no agent integrations were selected - RTK not installed (re-run with --agents opencode,copilot)"
+  fi
+else
+  WANT_RTK=false
+  if [ "$WITH_RTK" = true ]; then WANT_RTK=true; fi
+  if [ "$WANT_RTK" = false ]; then
+    if [ -t 0 ]; then
+      printf "  Also install RTK for the selected agents (%s)? [y/N] " "$(echo $AGENT_SEL | tr ' ' ',')"
+      read -r r || true
+      case "$r" in y|Y|yes|YES) WANT_RTK=true;; esac
+    else
+      RTK_STATUS="skipped (non-interactive, use --with-rtk)"
+    fi
+  fi
+  if [ "$WANT_RTK" = true ]; then
+    if [ -f "$HOME/bin/rtk" ] && [ ! -f "$RTK_BIN" ]; then mkdir -p "$(dirname "$RTK_BIN")"; cp -f "$HOME/bin/rtk" "$RTK_BIN" 2>/dev/null && chmod +x "$RTK_BIN" 2>/dev/null && ok "migrated legacy ~/bin/rtk -> $RTK_BIN" || true; fi
+    # Identity probe: the REAL rtk-ai/rtk has an `init` subcommand; name-collision
+    # binaries on crates.io (e.g. "Rust Type Kit") fail on it. Never trust a bare
+    # `rtk` on PATH without this check.
+    is_real_rtk() { "$1" init --help >/dev/null 2>&1; }
+    if command -v rtk >/dev/null 2>&1 && is_real_rtk rtk; then RTK_CMD="rtk"; ok "rtk $(rtk --version 2>/dev/null | head -1)"
+    elif [ -f "$RTK_BIN" ] && is_real_rtk "$RTK_BIN"; then RTK_CMD="$RTK_BIN"; ok "rtk binary at $RTK_BIN"
+    else
+      if command -v rtk >/dev/null 2>&1; then
+        BAD_RTK="$(command -v rtk)"
+        warn "'rtk' found on PATH but it is NOT rtk-ai/rtk (name collision, e.g. Rust Type Kit) - removing it so it cannot shadow the real RTK"
+        case "$BAD_RTK" in
+          *\.cargo*) cargo uninstall rtk >/dev/null 2>&1 || true ;;
+        esac
+        rm -f "$BAD_RTK" 2>/dev/null || true
+        hash -r 2>/dev/null || true
+        if [ -f "$BAD_RTK" ]; then
+          warn "could not remove $BAD_RTK - delete it manually or 'rtk' will still resolve to the wrong binary"
+        fi
+      fi
+      RTK_OS="$(uname -s 2>/dev/null | tr "[:upper:]" "[:lower:]")"; RTK_ARCH="$(uname -m 2>/dev/null | tr "[:upper:]" "[:lower:]")"
+      case "$RTK_OS:$RTK_ARCH" in
+        linux:x86_64|linux:amd64) RTK_ASSET="rtk-x86_64-unknown-linux-musl.tar.gz";;
+        linux:aarch64|linux:arm64) RTK_ASSET="rtk-aarch64-unknown-linux-gnu.tar.gz";;
+        darwin:x86_64) RTK_ASSET="rtk-x86_64-apple-darwin.tar.gz";;
+        darwin:aarch64|darwin:arm64) RTK_ASSET="rtk-aarch64-apple-darwin.tar.gz";;
+        *) RTK_ASSET="";;
+      esac
+      if [ -z "$RTK_ASSET" ]; then warn "rtk: unsupported platform ($RTK_OS/$RTK_ARCH) - install manually from https://github.com/rtk-ai/rtk/releases"
+      else
+        RTK_URL="https://github.com/rtk-ai/rtk/releases/latest/download/$RTK_ASSET"
+        RTK_TMP="$(mktemp -d 2>/dev/null || echo "$HOME/.cache/tmp/rtk_dl")"; mkdir -p "$RTK_TMP"
+        info "  downloading rtk release ($RTK_ASSET)..."
+        if { command -v curl >/dev/null 2>&1 && curl -fsSL "$RTK_URL" -o "$RTK_TMP/$RTK_ASSET"; } || { command -v wget >/dev/null 2>&1 && wget -q "$RTK_URL" -O "$RTK_TMP/$RTK_ASSET"; }; then
+          tar -xzf "$RTK_TMP/$RTK_ASSET" -C "$RTK_TMP" 2>/dev/null
+          RTK_SRC="$(find "$RTK_TMP" -name rtk -type f 2>/dev/null | head -1 || true)"
+          if [ -n "$RTK_SRC" ] && [ -f "$RTK_SRC" ]; then
+            mkdir -p "$(dirname "$RTK_BIN")"
+            cp -f "$RTK_SRC" "$RTK_BIN" 2>/dev/null && chmod +x "$RTK_BIN" 2>/dev/null && RTK_CMD="$RTK_BIN" && ok "rtk installed to $RTK_BIN (from GitHub release)" || warn "rtk copy failed"
+          else warn "rtk release archive did not contain the rtk binary"
+          fi
+        else warn "rtk download failed - install manually from https://github.com/rtk-ai/rtk/releases"
+        fi
+        rm -rf "$RTK_TMP" 2>/dev/null
+      fi
+    fi
+    if [ -n "$RTK_CMD" ]; then RTK_STATUS="installed"; elif [ -z "$RTK_STATUS" ]; then RTK_STATUS="failed"; fi
+  elif [ -z "$RTK_STATUS" ]; then
+    RTK_STATUS="declined"
+  fi
+fi
+
+# 3b. RTK agent wiring - RTK ships its own OpenCode (--opencode) and Copilot
+#     (--copilot) integrations. For every agent the user selected, hand off to
+#     RTK's own `rtk init -g`. Fail-open: never blocks the knocode install.
+if [ -n "$AGENT_SEL" ] && [ -n "$RTK_CMD" ]; then
+  info "Wiring RTK integrations for selected agents (external tool)..."
+  if ! command -v rg >/dev/null 2>&1; then
+    warn "ripgrep (rg) not on PATH - some rtk filters need it (apt/dnf/brew install ripgrep)"
+  fi
+  n=0
+  total=$(echo $AGENT_SEL | wc -w | tr -d ' ')
+  for a in $AGENT_SEL; do
+    n=$((n + 1))
+    info "  [$n/$total] wiring rtk for $a (runs: rtk init -g --$a --auto-patch - usually takes a few seconds)..."
+    # stdin closed + output shown: rtk never waits silently on the installer's stdin,
+    # and the user sees progress instead of a frozen prompt if it needs time.
+    rtk_out=$("$RTK_CMD" init -g "--$a" --auto-patch </dev/null 2>&1)
+    if [ $? -eq 0 ]; then
+      ok "rtk integration wired for $a (rtk init -g --$a)"
+      echo "$rtk_out" | grep -v '^[[:space:]]*$' | head -3 | sed 's/^/    /'
+      # PATCH: RTK's generated plugin probes with `which rtk`, which does not
+      # exist on Windows — swap the probe to `rtk --version` (portable). Must
+      # run after EVERY `rtk init --opencode` (RTK regenerates the file).
+      if [ "$a" = "opencode" ]; then
+        RTK_OC_PLUGIN="$HOME/.config/opencode/plugins/rtk.ts"
+        if [ -f "$RTK_OC_PLUGIN" ] && grep -q '`which rtk`' "$RTK_OC_PLUGIN"; then
+          sed -i.bak 's/`which rtk`/`rtk --version`/' "$RTK_OC_PLUGIN" && rm -f "$RTK_OC_PLUGIN.bak"
+          info "  [PATCH] opencode plugin probe: which rtk -> rtk --version (Windows-safe)"
+        fi
+      fi
+    else
+      warn "rtk init failed for $a (exit $?) - run manually: rtk init -g --$a"
+      echo "$rtk_out" | head -5 | sed 's/^/    /'
+    fi
+  done
+  info "RTK wiring done."
+fi
+
 # 4. Start daemon - knocode must be in RUNNING state after installation
 # TASK-037: launch from ~/.knocode/bin (installed copy), repo-independent working dir.
 daemon_health() { curl -s -o /dev/null -m 2 http://127.0.0.1:9527/health; }
@@ -312,5 +420,5 @@ else
   if [ "$DAEMON_UP" = yes ]; then ok "knocode daemon RUNNING (http://127.0.0.1:9527, from $INSTALLED_DAEMON)"; else warn "daemon not responding on :9527 within 20s - start manually: $INSTALLED_DAEMON"; fi
 fi
 
-info "Done - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | agents: $(if [ -n "$AGENT_SEL" ]; then echo "$AGENT_SEL"; else echo none; fi) | knocode doctor"
+info "Done - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | agents: $(if [ -n "$AGENT_SEL" ]; then echo "$AGENT_SEL"; else echo none; fi) | rtk: ${RTK_STATUS:-unknown} | knocode doctor"
 info "Docs: docs/*.md | knocode doctor"

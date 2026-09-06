@@ -7,25 +7,25 @@ all backed by the local Knocode daemon (`knocode serve` on `http://127.0.0.1:952
 
 This is the Copilot analog of [`packages/opencode-knocode`](../opencode-knocode). It
 reuses the exact same daemon surface — it never reimplements retrieval or compression.
-For true per-turn prompt enrichment (on every prompt, not just tool-use turns), install
-the companion **`@knocode` chat participant** extension at
-[`packages/vscode-copilot-knocode`](../vscode-copilot-knocode) alongside this plugin.
+(Context is injected per prompt via `UserPromptSubmit`; the companion **`@knocode` chat
+participant** extension at [`packages/vscode-copilot-knocode`](../vscode-copilot-knocode)
+adds an on-demand `@knocode` command on top.)
 
 ## What it does
 
-Because VS Code's agent hooks can inject context but cannot rewrite the user's prompt
-or replace a tool's output (unlike OpenCode's `chat.message` / `tool.execute.before`),
-this plugin maps the two OpenCode behaviors onto the Copilot hook surface:
+Because VS Code's agent hooks can inject context but cannot rewrite the user's prompt,
+this plugin maps the context behavior onto the Copilot hook surface:
 
 | Hook | OpenCode analog | What Knocode does |
 |------|-----------------|-------------------|
 | `SessionStart` | prompt enrichment (warm) | injects a repository-context digest via `knocode_context` |
-| `PreToolUse` | `chat.message` (per-turn) | injects relevant context for read/search tools |
-| `PostToolUse` | `tool.execute.before` | compresses large read/bash outputs via `knocode_compress` and injects the digest |
+| `UserPromptSubmit` | `session.prompt` (per-prompt) | injects context retrieved from the user's actual prompt via `knocode_context` |
+
+> **Tool-output compression?** That is [RTK](https://github.com/rtk-ai/rtk)'s job now —
+> the knocode installer can install RTK and wire its own Copilot integration for you.
 
 Plus a bundled MCP server (`servers/knocode-mcp.mjs`) that exposes
-`knocode_context` / `knocode_compress` to Copilot's agent mode, so the model can call
-them directly on demand.
+`knocode_context` to Copilot's agent mode, so the model can call it directly on demand.
 
 **Fail-open everywhere:** if the daemon is unreachable, mid-index, or errors, every
 hook returns `{}` and exits `0` — Copilot proceeds untouched. Hooks never stall or
@@ -40,7 +40,7 @@ knocode-copilot/
 ├── servers/
 │   └── knocode-mcp.mjs          # GENERATED from packages/knocode-mcp (edits ignored)
 ├── com.github.copilot/
-│   └── hooks/hooks.json         # SessionStart / PreToolUse / PostToolUse wiring
+│   └── hooks/hooks.json         # SessionStart / UserPromptSubmit wiring
 └── scripts/
     ├── knocode-hook.mjs         # cross-platform hook handler (fail-open)
     └── build.mjs                # regenerates servers/knocode-mcp.mjs
@@ -80,7 +80,6 @@ The hook handler and MCP server read the same env vars as the OpenCode plugin:
 | `KNOCODE_DAEMON_URL` | `http://127.0.0.1:9527` | hooks + MCP server |
 | `KNOCODE_TIMEOUT_MS` | `15000` | per MCP call timeout |
 | `KNOCODE_READY_TIMEOUT_MS` | `5000` (`0` disables) | `SessionStart` readiness wait |
-| `KNOCODE_HOOK_COMPRESS_MIN_CHARS` | `2000` | min tool response length to compress |
 
 ## Development
 

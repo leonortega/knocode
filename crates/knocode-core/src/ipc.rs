@@ -274,6 +274,19 @@ pub struct ContextPack {
     /// Per-query retrieval diagnostic (when KNOCODE_RETRIEVAL_DIAG=1)
     #[serde(default)]
     pub retrieval_diagnostic: Option<RetrievalDiagnostic>,
+    /// Retrieval-stage stats (search only, excluding packing) — always computed,
+    /// lets callers record retrieval-vs-packing latency without extra plumbing.
+    #[serde(default)]
+    pub retrieval_stats: Option<RetrievalStats>,
+}
+
+/// Retrieval-stage timing + candidate count (search only, excluding context packing).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct RetrievalStats {
+    /// Code-search stage duration in ms (the dominant retrieval stage)
+    pub retrieval_ms: u64,
+    /// Candidate results returned by the retrieval pipeline before packing/budgeting
+    pub candidates: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -518,6 +531,7 @@ mod tests {
             repository_state: String::new(),
             code_retrieval_status: RetrievalStatus::Found(5),
             retrieval_diagnostic: None,
+            retrieval_stats: None,
         };
         let json = serde_json::to_string(&pack).unwrap();
         let parsed: ContextPack = serde_json::from_str(&json).unwrap();

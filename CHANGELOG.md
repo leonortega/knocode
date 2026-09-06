@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Copilot integration registered via user-level hooks, not plugin discovery** — VS Code/Copilot never scans `~/.knocode/copilot-plugin` (only marketplaces, `Chat: Install Plugin From Source`, or `~/.copilot/installed-plugins/`), so the deployed bundle was invisible. All four installers now write `~/.copilot/hooks/knocode-context.json` (SessionStart + UserPromptSubmit, absolute script path, forward slashes) — the same registration mechanism RTK uses. The `~/.knocode/copilot-plugin` bundle remains the hook-script home; its bundled stdio MCP server is no longer auto-registered (context flows through the hooks).
+- **`knocode-copilot-plugin` hook surface moved to `UserPromptSubmit`** — the `PreToolUse` hook (context for read/search tools) is removed: RTK owns Copilot's `PreToolUse` layer for command rewriting, and a second PreToolUse duplicated daemon calls per tool. `UserPromptSubmit` now injects repository context retrieved from the **user's actual prompt** (the faithful analog of the OpenCode plugin's `session.prompt` admission hook); `SessionStart` keeps seeding a warm repository overview. Hook handler, `hooks.json`, smoke test, and README updated; smoke test passes (`session-start` + `user-prompt-submit`).
+
+### Fixed
+- **Installers now remove a non-RTK `rtk` name-collision binary instead of just warning** — when the identity probe (`rtk init --help`) fails (e.g. the unrelated crates.io "Rust Type Kit" `rtk` in `~/.cargo/bin`), all four installers (`installers/knocode-install.{ps1,sh}`, `scripts/install.{ps1,sh}`) now `cargo uninstall rtk`/delete the impostor before downloading the real [rtk-ai/rtk](https://github.com/rtk-ai/rtk) release, so the wrong binary can no longer shadow the real one on PATH. If removal fails, an explicit manual-removal warning is shown.
+
+### Added
+- **Lightweight integration-boundary metrics** — daemon `ContextPack` now carries `retrieval_stats` (code-search duration + candidate/result counts from the engine where the data lives), observed as `knocode_context_files`, `knocode_retrieval_candidates`, and `knocode_retrieval_duration_seconds` histograms/counters on `GET /metrics`; no I/O or serialization on the hot path. The plugin measures its integration boundary with a single `Date.now()` pair and logs one INFO line per prompt: `[knocode] context latency=<ms> tokens=<n> files=<n>` (plus a `context passthrough latency=<ms>ms` line on fail-open), reading `total_tokens`/`provenance` from the existing MCP `structuredContent` — no metrics pipeline, no network, no duplicate daemon metrics.
+
+### Changed
+- **`opencode-knocode` ported to the OpenCode V2 plugin spec** — `Plugin.define({ id, setup })` + `ctx.session.hook("prompt")` replaces the V1 `chat.message` hook: enrichment now runs during prompt admission, mutating the owned `event.prompt.text` draft (edits become the canonical persisted user input). Adds an idempotency guard against hook replays and clears stale attachment-mention offsets when a rewrite breaks the original-text prefix. Dependency moved to `@opencode-ai/plugin` `beta` (V2 API is beta). The plugin's legacy `POST /hook` client (`callKnocodeDaemon`, `KnocodeRequest`/`KnocodeResponse`, `hashRepositoryId`) was removed — MCP `knocode_context` is the only enrichment path.
+- **Legacy `/hook` ToolOutput contract and `ExecutionOptimizer` removed from the daemon** — `POST /hook` now serves the pre-generation hook only; `PreToolCall` payloads answer HTTP `400`. `RequestPayload::ToolOutput`, `ResponsePayload::CompressedOutput`, `HookType::PreToolCall`, the `tokens_saved` metric, and the orphaned `.claude/hooks/knocode-pretool.sh` were deleted. Tool-output compression lives exclusively in [RTK](https://github.com/rtk-ai/rtk).
+- **`knocode_compress` removed from the daemon MCP surface** — `POST /mcp` now exposes a single tool, `knocode_context`; tool-output compression lives exclusively in [RTK](https://github.com/rtk-ai/rtk) (installed/wired by the knocode installers on request). Calling `knocode_compress` answers the standard JSON-RPC `-32602` unknown-tool error.
+- **OpenCode plugin is context-only** — `tool.execute.after` (compression) removed from `opencode-knocode`; the Copilot agent plugin's `PostToolUse` compression hook removed likewise. RTK ships its own OpenCode/Copilot integrations and the knocode installers now offer RTK as an opt-in external resource (`--with-rtk`), wiring it via `rtk init -g` for each selected agent.
+- **Docs updated** — RUNTIME / ARCHITECTURE / COMPONENTS / DATA_FLOW / REQUEST_LIFECYCLE / V1_RUNTIME_SPEC / REMOVED_TOOLS / ROADMAP and `00-project` docs now reflect the daemon being context-only.
+
 ## [0.9.11] - 2026-09-04 — Doctor index-path fix
 
 ### Fixed

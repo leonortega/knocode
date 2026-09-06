@@ -7,17 +7,10 @@
         "timeout": 15
       }
     ],
-    "PreToolUse": [
+    "UserPromptSubmit": [
       {
         "type": "command",
-        "command": "node \"${PLUGIN_ROOT}/scripts/knocode-hook.mjs\" pre-tool-use",
-        "timeout": 10
-      }
-    ],
-    "PostToolUse": [
-      {
-        "type": "command",
-        "command": "node \"${PLUGIN_ROOT}/scripts/knocode-hook.mjs\" post-tool-use",
+        "command": "node \"${PLUGIN_ROOT}/scripts/knocode-hook.mjs\" user-prompt-submit",
         "timeout": 10
       }
     ]

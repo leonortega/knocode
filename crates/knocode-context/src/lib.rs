@@ -404,6 +404,13 @@ impl ContextEngine {
             }
         }
 
+        // Retrieval-stage stats (search only, excluding packing) — additive metadata
+        // for daemon metrics without extra plumbing.
+        context_pack.retrieval_stats = Some(knocode_core::ipc::RetrievalStats {
+            retrieval_ms: code_search_duration_ms,
+            candidates: code_scored.len() + knowledge_scored.len(),
+        });
+
         // Step 5: Emit ContextBuilt event (async-only, never blocks hot path)
         let latency_ms = start.elapsed().as_millis() as u64;
         self.event_bus.emit(RuntimeEvent::ContextBuilt {
@@ -521,6 +528,7 @@ impl ContextEngine {
             repository_state: String::new(),
             code_retrieval_status,
             retrieval_diagnostic: None,
+            retrieval_stats: None,
         };
 
         (context_pack, total_tokens)
@@ -1052,6 +1060,7 @@ mod tests {
             repository_state: String::new(),
             code_retrieval_status: knocode_core::RetrievalStatus::NoMatch,
             retrieval_diagnostic: None,
+            retrieval_stats: None,
         };
 
         let yaml = ContextEngine::to_yaml(&pack).unwrap();
@@ -1220,6 +1229,7 @@ mod tests {
             repository_state: String::new(),
             code_retrieval_status: knocode_core::RetrievalStatus::NoMatch,
             retrieval_diagnostic: None,
+            retrieval_stats: None,
         };
         assert_eq!(ContextEngine::to_yaml(&pack).unwrap(), "");
     }
@@ -1237,6 +1247,7 @@ mod tests {
             repository_state: String::new(),
             code_retrieval_status: knocode_core::RetrievalStatus::Found(1),
             retrieval_diagnostic: None,
+            retrieval_stats: None,
         };
         let yaml = ContextEngine::to_yaml(&pack).unwrap();
         assert!(yaml.contains("code_context"));

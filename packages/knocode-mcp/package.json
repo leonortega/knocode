@@ -1,7 +1,7 @@
 {
   "name": "knocode-mcp",
   "version": "0.9.11",
-  "description": "Knocode MCP server — stdio → HTTP pass-through proxy to the daemon-hosted MCP (POST /mcp). Exposes the daemon's canonical tools (knocode_context, knocode_compress) to any stdio MCP agent: Codex, VS Code Copilot, Claude.",
+  "description": "Knocode MCP server — stdio → HTTP pass-through proxy to the daemon-hosted MCP (POST /mcp). Exposes the daemon's canonical tool (knocode_context) to any stdio MCP agent: Codex, VS Code Copilot, Claude.",
   "type": "module",
   "bin": {
     "knocode-mcp": "dist/index.js"

@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Knocode installer v0.9.11 minimal (Windows PowerShell 5.1)
@@ -22,6 +22,12 @@
 .PARAMETER NoAgents
   Skip agent integrations entirely (binaries + config + doctor only).
 
+.PARAMETER WithRtk
+  Install and wire RTK without prompting.
+
+.PARAMETER NoRtk
+  Skip RTK entirely (binary download + per-agent wiring).
+
 .PARAMETER SkipPrereqs
   Do not auto-install missing prerequisites (Node.js, Git) - only warn/fail.
 
@@ -31,7 +37,7 @@
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -AllAgents
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -NoAgents
 #>
-param([switch]$SkipBuild, [string]$Agents = "", [switch]$AllAgents, [switch]$NoAgents, [switch]$SkipPrereqs)
+param([switch]$SkipBuild, [string]$Agents = "", [switch]$AllAgents, [switch]$NoAgents, [switch]$WithRtk, [switch]$NoRtk, [switch]$SkipPrereqs)
 
 $ErrorActionPreference = "Stop"
 # Always English in scripts (avoid localized ShouldProcess/WhatIf)
@@ -174,40 +180,6 @@ if (-not (Test-Cmd git)) {
   if ($SkipPrereqs) { Fail "git not found" } else { Install-GitIfMissing; if (-not (Test-Cmd git)) { Fail "git not found after auto-install" } }
 } else { Ok "git $(git --version)" }
 
-# RTK - download prebuilt release -> ~\.knocode\bin\rtk.exe (NO COMPILE). Unified bin.
-Info "Installing external tools..."
-$rtkBinPath = Join-Path $env:USERPROFILE ".knocode\bin\rtk.exe"
-if (Test-Cmd rtk) { Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1)" }
-elseif (Test-Path $rtkBinPath) { $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"; Ok "rtk binary at $rtkBinPath" }
-else {
-  $legacyRtk = "$env:USERPROFILE\bin\rtk.exe"
-  if ((Test-Path $legacyRtk) -and -not (Test-Path $rtkBinPath)) {
-    try { Copy-Item -LiteralPath $legacyRtk -Destination $rtkBinPath -Force; Ok "migrated legacy $legacyRtk -> $rtkBinPath" } catch {}
-  }
-  else {
-    $rtkAsset = "rtk-x86_64-pc-windows-msvc.zip"
-    $rtkUrl = "https://github.com/rtk-ai/rtk/releases/latest/download/$rtkAsset"
-    $rtkTmp = Join-Path $env:TEMP "rtk_dl"
-    try {
-      New-Item -ItemType Directory -Force -Path (Split-Path $rtkBinPath -Parent) | Out-Null
-      if (Test-Path $rtkTmp) { Remove-Item -LiteralPath $rtkTmp -Recurse -Force -ErrorAction SilentlyContinue }
-      New-Item -ItemType Directory -Force -Path $rtkTmp | Out-Null
-      $rtkZip = Join-Path $rtkTmp $rtkAsset
-      Info "  downloading rtk release ($rtkAsset)..."
-      Invoke-WebRequest -Uri $rtkUrl -OutFile $rtkZip -UseBasicParsing
-      $rtkExtract = Join-Path $rtkTmp "x"
-      Expand-Archive -LiteralPath $rtkZip -DestinationPath $rtkExtract -Force
-      $srcExe = Get-ChildItem -LiteralPath $rtkExtract -Recurse -Filter "rtk.exe" | Select-Object -First 1
-      if ($srcExe) {
-        Copy-Item -LiteralPath $srcExe.FullName -Destination $rtkBinPath -Force
-        $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"
-        Ok "rtk installed to $rtkBinPath (from GitHub release)"
-      } else { Warn "rtk release archive did not contain rtk.exe" }
-    } catch { Warn "rtk download failed: $_ - install manually from https://github.com/rtk-ai/rtk/releases" }
-    finally { if (Test-Path $rtkTmp) { Remove-Item -LiteralPath $rtkTmp -Recurse -Force -ErrorAction SilentlyContinue } }
-  }
-}
-
 
 # 1. Use prebuilt knocode (no compile/test - use repository binary)
 if ($SkipBuild) { Info "Skipping build check (--SkipBuild)" }
@@ -287,29 +259,6 @@ $ErrorActionPreference = $prevEA2
 # =====================================================================================
 if ($agentSel.Count -gt 0) {
   $ocGlobalDir = Join-Path $env:USERPROFILE ".config\opencode"
-  $mcpDist = Join-Path $Root "packages\knocode-mcp\dist\index.js"
-  $wantMcp = @($agentSel | Where-Object { $_ -in @("copilot") }).Count -gt 0
-
-  # --- shared MCP server build (Copilot uses knocode-mcp) ---
-  if ($wantMcp) {
-    $mcpDir = Join-Path $Root "packages\knocode-mcp"
-    if (Test-Path $mcpDir) {
-      if (-not (Test-Path $mcpDist)) {
-        if (Test-Cmd npm) {
-          Info "Building knocode-mcp MCP server..."
-          Push-Location $mcpDir
-          try {
-            & npm install --silent 2>&1 | Out-Null
-            & npm run build --silent 2>&1 | Out-Null
-            if (Test-Path $mcpDist) { Ok "knocode-mcp built to packages/knocode-mcp/dist" } else { Warn "knocode-mcp build failed - run: cd packages/knocode-mcp; npm install; npm run build" }
-          } catch { Warn "knocode-mcp build failed: $_" }
-          Pop-Location
-        } else { Warn "npm not found - cannot build knocode-mcp (MCP agents need Node.js)" }
-      } else { Ok "knocode-mcp dist at packages/knocode-mcp/dist/index.js" }
-    } else { Warn "packages/knocode-mcp not found - skipping MCP server build" }
-  }
-
-  $mcpServer = @{ command = "node"; args = @($mcpDist); env = @{ KNOCODE_DAEMON_URL = "http://127.0.0.1:9527" } }
 
   # --- OpenCode: global plugin + skill (~/.config/opencode) ---
   if ($agentSel -contains "opencode") {
@@ -350,19 +299,31 @@ if ($agentSel.Count -gt 0) {
       if (Test-Cmd npm) {
         $pkgJson = Join-Path $ocGlobalDir "package.json"
         $pluginFileRef = "file:" + ((Join-Path $Root "packages\opencode-knocode") -replace '\\','/')
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        $pkgJsonContent = $null
         if (-not (Test-Path $pkgJson)) {
-          try { Set-Content -LiteralPath $pkgJson -Value (@{ dependencies = @{ "@opencode-ai/plugin" = "1.18.22"; "opencode-knocode" = $pluginFileRef } } | ConvertTo-Json -Depth 10) -Encoding UTF8 } catch {}
+          $pkgJsonContent = (@{ dependencies = @{ "@opencode-ai/plugin" = "1.18.22"; "opencode-knocode" = $pluginFileRef } } | ConvertTo-Json -Depth 10)
+          try { [IO.File]::WriteAllText($pkgJson, $pkgJsonContent, $utf8NoBom) } catch { Warn "failed to write $pkgJson : $_" }
         } else {
           try {
             $j = Get-Content -LiteralPath $pkgJson -Raw | ConvertFrom-Json
             if (-not $j.dependencies) { $j | Add-Member -NotePropertyName dependencies -NotePropertyValue @{} }
-            $j.dependencies."opencode-knocode" = $pluginFileRef
+            # PS 5.1: dot-assignment of a NEW property on PSCustomObject throws -
+            # must use Add-Member (mirrors the @opencode-ai/plugin handling below).
+            if ($j.dependencies.PSObject.Properties["opencode-knocode"]) {
+              $j.dependencies."opencode-knocode" = $pluginFileRef
+            } else {
+              $j.dependencies | Add-Member -NotePropertyName "opencode-knocode" -NotePropertyValue $pluginFileRef
+            }
             if (-not $j.dependencies.PSObject.Properties["@opencode-ai/plugin"]) { $j.dependencies | Add-Member -NotePropertyName "@opencode-ai/plugin" -NotePropertyValue "1.18.22" }
-            $j | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $pkgJson -Encoding UTF8
-          } catch {}
+            [IO.File]::WriteAllText($pkgJson, ($j | ConvertTo-Json -Depth 10), $utf8NoBom)
+          } catch { Warn "failed to update $pkgJson : $_" }
         }
         Push-Location $ocGlobalDir
-        try { & npm install --silent 2>&1 | Out-Null; if (Test-Path "node_modules\opencode-knocode\dist\index.js") { Ok "opencode-knocode plugin installed" } else { Warn "opencode-knocode npm install failed" } } catch { Warn "opencode-knocode npm install failed: $_" }
+        try {
+          $npmOut = & npm install 2>&1 | Out-String
+          if (Test-Path "node_modules\opencode-knocode\dist\index.js") { Ok "opencode-knocode plugin installed" } else { Warn "opencode-knocode npm install failed - npm output:"; $npmOut.TrimEnd() -split "`n" | Select-Object -Last 10 | ForEach-Object { Write-Host "    $_" -ForegroundColor DarkGray } }
+        } catch { Warn "opencode-knocode npm install failed: $_" }
         Pop-Location
       }
     } else { Warn "packages/opencode-knocode not found - skipping npm plugin install" }
@@ -378,26 +339,24 @@ if ($agentSel.Count -gt 0) {
     Info "Restart opencode to load the plugin (daemon http://127.0.0.1:9527)"
   }
 
-  # --- Copilot (VS Code): user-level mcp.json (%APPDATA%\Code\User\mcp.json) ---
+  # --- Copilot (VS Code): NO user-level MCP registration ---
+  # The knocode MCP is internal to the Copilot Agent Plugin (plugin mcp.json ->
+  # ${PLUGIN_ROOT}/servers/knocode-mcp.mjs) and is never exposed globally.
+  # Clean up any knocode entry left in VS Code's user mcp.json by previous installs.
   if ($agentSel -contains "copilot") {
     try {
-      $codeUserDir = Join-Path $env:APPDATA "Code\User"
-      $vscodeMcp = Join-Path $codeUserDir "mcp.json"
-      $mcpJson = @{ servers = @{ knocode = $mcpServer } } | ConvertTo-Json -Depth 10
-      New-Item -ItemType Directory -Force -Path $codeUserDir | Out-Null
-      if (-not (Test-Path $vscodeMcp)) {
-        Set-Content -LiteralPath $vscodeMcp -Value $mcpJson -Encoding UTF8
-        Ok "VS Code Copilot MCP at $vscodeMcp (user scope)"
-      } else {
+      $vscodeMcp = Join-Path $env:APPDATA "Code\User\mcp.json"
+      if (Test-Path $vscodeMcp) {
         try {
           $existing = Get-Content -LiteralPath $vscodeMcp -Raw | ConvertFrom-Json
-          if (-not $existing.servers) { $existing | Add-Member -NotePropertyName servers -NotePropertyValue @{} }
-          $existing.servers.knocode = $mcpServer
-          $existing | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $vscodeMcp -Encoding UTF8
-          Ok "VS Code Copilot MCP updated at $vscodeMcp"
-        } catch { Skip "VS Code mcp.json exists but could not merge knocode into $vscodeMcp" }
+          if ($existing.servers -and $existing.servers.knocode) {
+            $existing.servers.PSObject.Properties.Remove('knocode')
+            $existing | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $vscodeMcp -Encoding UTF8
+            Ok "removed legacy knocode MCP entry from $vscodeMcp (MCP is plugin-internal only)"
+          }
+        } catch { Skip "could not clean knocode entry from $vscodeMcp" }
       }
-    } catch { Warn "failed to write VS Code Copilot MCP config: $_" }
+    } catch { Warn "failed to clean VS Code Copilot MCP config: $_" }
 
     # --- Copilot Agent Plugin (hooks: SessionStart/PreToolUse/PostToolUse) ---
     # Deploy to %USERPROFILE%\.knocode\copilot-plugin (repo-independent, survives repo moves).
@@ -413,6 +372,54 @@ if ($agentSel.Count -gt 0) {
         Ok "Copilot Agent Plugin deployed to $pluginDst (hooks + MCP)"
       } catch { Warn "failed to deploy Copilot Agent Plugin: $_" }
     } else { Warn "packages/knocode-copilot-plugin not found - skipping Agent Plugin deploy" }
+
+    # --- Copilot hooks (user-level ~/.copilot/hooks) ---
+    # VS Code/Copilot does NOT discover agent plugins from ~/.knocode — the bundle
+    # below is only the hook-script home. Registration happens by writing a hooks
+    # file into ~/.copilot/hooks/ (same mechanism RTK uses for rtk-rewrite.json),
+    # with an absolute script path (forward slashes: JSON-safe, Windows-fine).
+    if (Test-Path (Join-Path $pluginDst "scripts\knocode-hook.mjs")) {
+      try {
+        $hookScript = (Join-Path $pluginDst "scripts\knocode-hook.mjs") -replace '\\', '/'
+        $knocodeHooksJson = @"
+{
+  "version": 1,
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node \"$hookScript\" session-start",
+        "timeout": 15
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "node \"$hookScript\" user-prompt-submit",
+        "timeout": 10
+      }
+    ]
+  }
+}
+"@
+        $copilotHooksDir = Join-Path $env:USERPROFILE ".copilot\hooks"
+        New-Item -ItemType Directory -Force -Path $copilotHooksDir | Out-Null
+        $knocodeHooksFile = Join-Path $copilotHooksDir "knocode-context.json"
+        [IO.File]::WriteAllText($knocodeHooksFile, $knocodeHooksJson, (New-Object System.Text.UTF8Encoding($false)))
+        Ok "Copilot hooks registered at $knocodeHooksFile (SessionStart + UserPromptSubmit)"
+      } catch { Warn "failed to write Copilot hooks file: $_" }
+    } else { Warn "knocode-hook.mjs not deployed - skipping Copilot hooks registration" }
+
+    # --- Knocode agent skill (Copilot global skills folder: ~/.copilot/skills) ---
+    $cpSkillSrc = Join-Path $Root ".knocode\skills\knocode"
+    if (Test-Path (Join-Path $cpSkillSrc "SKILL.md")) {
+      try {
+        $cpSkillDst = Join-Path $env:USERPROFILE ".copilot\skills"
+        New-Item -ItemType Directory -Force -Path $cpSkillDst | Out-Null
+        Copy-Item -LiteralPath $cpSkillSrc -Destination (Join-Path $cpSkillDst "knocode") -Recurse -Force
+        Ok "knocode skill installed to $cpSkillDst\knocode (Copilot global skills)"
+      } catch { Warn "knocode skill copy (Copilot) failed: $_" }
+    } else { Warn ".knocode\skills\knocode not found - skipping Copilot agent skill install" }
 
     # --- @knocode chat participant extension (VSIX via `code` CLI) ---
     $extDir = Join-Path $Root "packages\vscode-copilot-knocode"
@@ -449,6 +456,128 @@ if ($agentSel.Count -gt 0) {
       } else { Warn "vscode-copilot-knocode VSIX not built - open packages/vscode-copilot-knocode in VS Code and press F5, or run: npx @vscode/vsce package" }
     } else { Warn "packages/vscode-copilot-knocode not found - skipping @knocode extension install" }
   }
+}
+
+# 3a. RTK (optional external tool) - DEPENDS ON AGENT SELECTION
+#     Offered AFTER agent wiring and ONLY when agent integrations were selected
+#     (RTK without a wired agent has nothing to integrate with). Opt-in: -WithRtk
+#     forces, -NoRtk skips, otherwise asked interactively (default No). RTK ships
+#     its own OpenCode/Copilot integrations - knocode only installs the binary and
+#     wires them via `rtk init -g` in section 3b (no reimplementation).
+$rtkBinPath = Join-Path $env:USERPROFILE ".knocode\bin\rtk.exe"
+$rtkCmd = $null
+$rtkStatus = ""
+if ($NoRtk) {
+  $rtkStatus = "skipped (-NoRtk)"
+}
+elseif ($agentSel.Count -eq 0) {
+  $rtkStatus = "skipped (no agent integrations selected)"
+  if ($WithRtk) { Warn "-WithRtk was set but no agent integrations were selected - RTK not installed (re-run with -Agents opencode,copilot)" }
+}
+else {
+  $wantRtk = [bool]$WithRtk
+  if (-not $wantRtk) {
+    $interactive = $true
+    try { if ([Console]::IsInputRedirected) { $interactive = $false } } catch { $interactive = $false }
+    if ($interactive) {
+      $r = Read-Host "  Also install RTK for the selected agents ($($agentSel -join ', '))? [y/N]"
+      $wantRtk = ($r -match "^(y|yes)$")
+    }
+    else { $rtkStatus = "skipped (non-interactive, use -WithRtk)" }
+  }
+  if ($wantRtk) {
+    # Identity probe: the REAL rtk-ai/rtk has an `init` subcommand; name-collision
+    # binaries on crates.io (e.g. "Rust Type Kit") exit 2 on it. Never trust a bare
+    # `rtk` on PATH without this check.
+    function Test-RealRtk([string]$cmd) {
+      try { & $cmd init --help 2>&1 | Out-Null; return ($LASTEXITCODE -eq 0) } catch { return $false }
+    }
+    if ((Test-Cmd rtk) -and (Test-RealRtk "rtk")) { $rtkCmd = "rtk"; Ok "rtk $(rtk --version 2>&1 | Select-Object -First 1)" }
+    elseif ((Test-Path $rtkBinPath) -and (Test-RealRtk $rtkBinPath)) { $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"; $rtkCmd = $rtkBinPath; Ok "rtk binary at $rtkBinPath" }
+    else {
+      $cmdInfo = Get-Command rtk -ErrorAction SilentlyContinue
+      if ($cmdInfo) {
+        $badRtk = $cmdInfo.Source
+        Warn "'rtk' found on PATH but it is NOT rtk-ai/rtk (name collision, e.g. Rust Type Kit) - removing it so it cannot shadow the real RTK"
+        if ($badRtk -like "*\.cargo\*") { cargo uninstall rtk 2>&1 | Out-Null }
+        try { Remove-Item -LiteralPath $badRtk -Force -ErrorAction Stop } catch {}
+        if (Test-Path $badRtk) { Warn "could not remove $badRtk - delete it manually or 'rtk' will still resolve to the wrong binary" }
+      }
+      $legacyRtk = "$env:USERPROFILE\bin\rtk.exe"
+      if ((Test-Path $legacyRtk) -and -not (Test-Path $rtkBinPath)) {
+        try { Copy-Item -LiteralPath $legacyRtk -Destination $rtkBinPath -Force; $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"; $rtkCmd = $rtkBinPath; Ok "migrated legacy $legacyRtk -> $rtkBinPath" } catch {}
+      }
+      else {
+        $rtkAsset = "rtk-x86_64-pc-windows-msvc.zip"
+        $rtkUrl = "https://github.com/rtk-ai/rtk/releases/latest/download/$rtkAsset"
+        $rtkTmp = Join-Path $env:TEMP "rtk_dl"
+        try {
+          New-Item -ItemType Directory -Force -Path (Split-Path $rtkBinPath -Parent) | Out-Null
+          if (Test-Path $rtkTmp) { Remove-Item -LiteralPath $rtkTmp -Recurse -Force -ErrorAction SilentlyContinue }
+          New-Item -ItemType Directory -Force -Path $rtkTmp | Out-Null
+          $rtkZip = Join-Path $rtkTmp $rtkAsset
+          Info "  downloading rtk release ($rtkAsset)..."
+          Invoke-WebRequest -Uri $rtkUrl -OutFile $rtkZip -UseBasicParsing
+          $rtkExtract = Join-Path $rtkTmp "x"
+          Expand-Archive -LiteralPath $rtkZip -DestinationPath $rtkExtract -Force
+          $srcExe = Get-ChildItem -LiteralPath $rtkExtract -Recurse -Filter "rtk.exe" | Select-Object -First 1
+          if ($srcExe) {
+            Copy-Item -LiteralPath $srcExe.FullName -Destination $rtkBinPath -Force
+            $env:Path = "$(Split-Path $rtkBinPath -Parent);$env:Path"
+            $rtkCmd = $rtkBinPath
+            Ok "rtk installed to $rtkBinPath (from GitHub release)"
+          } else { Warn "rtk release archive did not contain rtk.exe" }
+        } catch { Warn "rtk download failed: $_ - install manually from https://github.com/rtk-ai/rtk/releases" }
+        finally { if (Test-Path $rtkTmp) { Remove-Item -LiteralPath $rtkTmp -Recurse -Force -ErrorAction SilentlyContinue } }
+      }
+    }
+    if ($rtkCmd) { $rtkStatus = "installed" } elseif ($rtkStatus -eq "") { $rtkStatus = "failed" }
+  }
+  elseif ($rtkStatus -eq "") { $rtkStatus = "declined" }
+}
+
+# 3b. RTK agent wiring - RTK ships its own OpenCode (--opencode) and Copilot
+#     (--copilot) integrations. For every agent the user selected, hand off to
+#     RTK's own `rtk init -g`. Fail-open: never blocks the knocode install.
+if ($agentSel.Count -gt 0 -and $rtkCmd) {
+  Info "Wiring RTK integrations for selected agents (external tool)..."
+  if (-not (Test-Cmd rg)) {
+    Warn "ripgrep (rg) not on PATH - some rtk filters need it (winget install BurntSushi.ripgrep.MSVC)"
+  }
+  foreach ($a in $agentSel) {
+    Info "  [$($agentSel.IndexOf($a) + 1)/$($agentSel.Count)] wiring rtk for $a (runs: rtk init -g --$a --auto-patch - usually takes a few seconds)..."
+    $prevEA = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try {
+      # stdin closed + output shown: rtk never waits silently on the installer's stdin,
+      # and the user sees progress instead of a frozen prompt if it needs time.
+      $out = & $rtkCmd init -g --$a --auto-patch 2>&1
+      if ($LASTEXITCODE -eq 0) {
+        Ok "rtk integration wired for $a (rtk init -g --$a)"
+        $out | Where-Object { $_ -and $_.ToString().Trim() } | Select-Object -First 3 | ForEach-Object { Info "    $_" }
+      }
+      else { Warn "rtk init failed for $a (exit $LASTEXITCODE) - run manually: rtk init -g --$a"; $out | Select-Object -First 5 | ForEach-Object { Info "    $_" } }
+    } catch { Warn "rtk init failed for $a : $_" }
+    $ErrorActionPreference = $prevEA
+  }
+
+  # ── PATCH: rtk.ts binary probe - `which rtk` is Unix-only ───────────────
+  # RTK's generated OpenCode plugin (rtk init --opencode) probes with `which`,
+  # which does not exist on Windows - the plugin would disable itself even
+  # though rtk is installed. Replace the probe with a portable `rtk --version`
+  # call (idempotent: only rewrites when the old probe is still present).
+  $rtkPlugin = Join-Path $env:USERPROFILE ".config\opencode\plugins\rtk.ts"
+  if (Test-Path $rtkPlugin) {
+    try {
+      $content = Get-Content -LiteralPath $rtkPlugin -Raw
+      if ($content -match 'which rtk') {
+        $content = $content -replace '`which rtk`', '`rtk --version`'
+        Set-Content -LiteralPath $rtkPlugin -Value $content -NoNewline -Encoding UTF8
+        Ok "PATCH: rtk.ts probe now uses 'rtk --version' (Windows-safe)"
+      }
+    } catch { Warn "PATCH of rtk.ts failed: $($_.Exception.Message)" }
+  }
+
+  Info "RTK wiring done."
 }
 
 # 4. Start daemon - knocode must be in RUNNING state after installation
@@ -488,5 +617,5 @@ if ($daemonUp) {
   $ErrorActionPreference = $prevEA3
 }
 
-Info "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | agents: $(if ($agentSel.Count -gt 0) { $agentSel -join ', ' } else { 'none' }) | knocode doctor"
+Info "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | agents: $(if ($agentSel.Count -gt 0) { $agentSel -join ', ' } else { 'none' }) | rtk: $rtkStatus | knocode doctor"
 Info "Docs: docs/*.md | knocode doctor"

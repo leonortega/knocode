@@ -7,12 +7,8 @@ use axum::{
     routing::post,
     Router,
 };
-use knocode_core::{
-    AgentRequest, CorrelationId, HookType, OutputType,
-    RequestPayload, TaskRequest,
-};
+use knocode_core::{AgentRequest, CorrelationId, HookType, RequestPayload, TaskRequest};
 use knocode_context::ContextEngine;
-use knocode_optimizer::ExecutionOptimizer;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
 
@@ -37,18 +33,12 @@ pub enum HttpRequestPayload {
         #[serde(default)]
         repository_path: Option<String>,
     },
-    #[serde(rename = "ToolOutput")]
-    ToolOutput {
-        tool_name: String,
-        output_type: Option<String>,
-        content: String,
-        context: Option<String>,
-        /// Agent workspace root (TASK-036)
-        #[serde(default)]
-        repository_path: Option<String>,
-    },
     #[serde(rename = "Probe")]
     Probe,
+    /// Removed wire contracts (e.g. `ToolOutput` — compression = RTK) land here so
+    /// the daemon answers with a structured JSON 400 instead of a deserialization 422.
+    #[serde(other)]
+    Removed,
 }
 
 #[derive(serde::Deserialize)]
@@ -77,13 +67,6 @@ pub enum HttpResponsePayload {
         #[serde(skip_serializing_if = "Option::is_none")]
         context_pack: Box<Option<knocode_core::ContextPack>>,
     },
-    #[serde(rename = "CompressedOutput")]
-    CompressedOutput {
-        original: String,
-        compressed: String,
-        original_tokens: u32,
-        compressed_tokens: u32,
-    },
     #[serde(rename = "OriginalPassthrough")]
     OriginalPassthrough {
         original: String,
@@ -102,7 +85,6 @@ pub enum HttpResponsePayload {
 #[derive(Clone)]
 pub struct HttpServerState {
     pub context_engine: Arc<Mutex<ContextEngine>>,
-    pub optimizer: Arc<ExecutionOptimizer>,
 }
 
 // ── Server Setup ─────────────────────────────────────────────────────────
@@ -206,6 +188,23 @@ async fn handle_hook(
         };
         return Ok(Json(resp));
     }
+    // Removed wire contracts (PreToolCall/ToolOutput, compression) — RTK owns that layer.
+    // Answered with a structured 400 (same shape as the legacy unknown-hook-type error).
+    if matches!(request.payload, HttpRequestPayload::Removed) {
+        let hook_type_str = request.hook_type.clone();
+        tracing::info!(correlation_id = %correlation_id, hook_type = %hook_type_str, "HTTP /hook rejected — removed contract (compression = RTK)");
+        let resp = HttpResponse {
+            correlation_id: correlation_id.clone(),
+            hook_type: hook_type_str.clone(),
+            payload: HttpResponsePayload::OriginalPassthrough {
+                original: String::new(),
+                reason: format!("Unknown hook type: {}", hook_type_str),
+            },
+            latency_ms: start.elapsed().as_millis() as u64,
+            error: Some("Unknown hook type".to_string()),
+        };
+        return Err((StatusCode::BAD_REQUEST, Json(resp)));
+    }
     // Readiness gate: while the initial index (or an auto-reindex) is running, the
     // engine lock is held — reject fast with 503 so clients can back off and retry
     // instead of queueing on the lock. Poll GET /health (`state: "ready"`) before
@@ -227,8 +226,8 @@ async fn handle_hook(
     // Rate limiting (HTTP fallback) — shared TokenBucket
     let session_key = match &request.payload {
         HttpRequestPayload::MessageRewrite { session_id, .. } => session_id.clone().unwrap_or_else(|| correlation_id.clone()),
-        HttpRequestPayload::ToolOutput { tool_name, .. } => tool_name.clone(),
         HttpRequestPayload::Probe => "probe".to_string(),
+        HttpRequestPayload::Removed => correlation_id.clone(),
     };
     if http_rate_limiter().is_rate_limited(&session_key) {
         crate::metrics::global().inc_fail_open();
@@ -270,8 +269,8 @@ async fn handle_hook(
     // Convert to internal request
     let hook_type = match request.hook_type.as_str() {
         "PreGeneration" => HookType::PreGeneration,
-        "PreToolCall" => HookType::PreToolCall,
         "Probe" => HookType::Probe,
+        // "PreToolCall"/ToolOutput (compression) was removed — RTK owns that layer.
         _ => {
             let hook_type_str = request.hook_type.clone();
             let resp = HttpResponse {
@@ -293,8 +292,7 @@ async fn handle_hook(
     // daemon CWD is only the fallback for direct API callers (curl, tests).
     let repository_path: Option<String> = match &request.payload {
         HttpRequestPayload::MessageRewrite { repository_path, .. } => repository_path.clone(),
-        HttpRequestPayload::ToolOutput { repository_path, .. } => repository_path.clone(),
-        HttpRequestPayload::Probe => None,
+        HttpRequestPayload::Probe | HttpRequestPayload::Removed => None,
     };
     let repository_id = {
         use sha2::{Digest, Sha256};
@@ -326,23 +324,10 @@ async fn handle_hook(
                     repository_path,
                 }
             }
-            HttpRequestPayload::ToolOutput { tool_name, output_type, content, context, repository_path } => {
-                let ot = match output_type.as_deref() {
-                    Some("FileRead") => OutputType::FileRead,
-                    Some("SearchResult") => OutputType::SearchResult,
-                    Some("ShellOutput") => OutputType::ShellOutput,
-                    _ => OutputType::Other,
-                };
-                RequestPayload::ToolOutput {
-                    tool_name,
-                    output_type: ot,
-                    content,
-                    context,
-                    repository_path,
-                }
-            }
             // Probes are intercepted above (before the readiness gate); never converted.
             HttpRequestPayload::Probe => unreachable!("probe handled before hook_type conversion"),
+            // Removed contracts are intercepted above (structured 400); never converted.
+            HttpRequestPayload::Removed => unreachable!("removed contract handled before hook_type conversion"),
         },
     };
 
@@ -387,17 +372,12 @@ async fn handle_request(
                 &state.context_engine,
             ).await?
         }
-        RequestPayload::ToolOutput { tool_name, output_type, content, context, .. } => {
-            handle_pre_tool_call(
-                tool_name.clone(),
-                output_type.clone(),
-                content.clone(),
-                context.clone(),
-                &state.optimizer,
-            )?
-        }
+        // RequestPayload::ToolOutput (compression) was removed — RTK owns that layer.
         // Unreachable over HTTP (intercepted in handle_hook before conversion), but
-        // harmless to answer honestly if an AgentRequest is built directly by a caller.
+        // answered honestly if an AgentRequest is built directly by a caller.
+        RequestPayload::ToolOutput { .. } => {
+            return Err("ToolOutput removed from the daemon: tool-output compression is delegated to RTK".to_string())
+        }
         RequestPayload::Probe => http_probe_payload(),
     };
 
@@ -435,6 +415,12 @@ pub(crate) async fn handle_pre_generation(
     crate::metrics::global().inc_requests("PreGeneration");
     // TASK-022: wire metrics — context tokens + retrieval recall (was dead_code)
     crate::metrics::global().observe_context_tokens(context_pack.token_usage.total_tokens);
+    // Retrieval-stage stats (files in pack, search latency, candidates before packing)
+    crate::metrics::global().observe_context_files(context_pack.provenance.len());
+    if let Some(stats) = context_pack.retrieval_stats {
+        crate::metrics::global().observe_retrieval_duration(stats.retrieval_ms as f64 / 1000.0);
+        crate::metrics::global().observe_retrieval_candidates(stats.candidates);
+    }
     let recall = if !context_pack.code_context.is_empty() { 0.85 } else { 0.0 };
     crate::metrics::global().set_retrieval_recall(recall);
     tracing::info!(correlation_id=%context_pack.metadata.correlation_id, repository_state=%context_pack.repository_state, total_tokens=%context_pack.token_usage.total_tokens, recall=%recall, "trace: context built");
@@ -460,33 +446,6 @@ pub(crate) async fn handle_pre_generation(
         original: message,
         rewritten,
         context_pack: Box::new(Some(context_pack)),
-    })
-}
-
-pub(crate) fn handle_pre_tool_call(
-    tool_name: String,
-    output_type: OutputType,
-    content: String,
-    context: Option<String>,
-    optimizer: &Arc<ExecutionOptimizer>,
-) -> Result<HttpResponsePayload, String> {
-    let result = optimizer.compress_output(
-        &tool_name,
-        output_type,
-        content.clone(),
-        context.as_deref(),
-    );
-    // TASK-022: wire metrics — tokens saved (was dead_code)
-    if result.original_tokens > result.compressed_tokens {
-        crate::metrics::global().add_tokens_saved(result.original_tokens - result.compressed_tokens);
-    }
-    tracing::info!(tool=%tool_name, original_tokens=%result.original_tokens, compressed_tokens=%result.compressed_tokens, saved=%(result.original_tokens.saturating_sub(result.compressed_tokens)), "trace: optimizer compressed");
-
-    Ok(HttpResponsePayload::CompressedOutput {
-        original: content,
-        compressed: result.compressed,
-        original_tokens: result.original_tokens as u32,
-        compressed_tokens: result.compressed_tokens as u32,
     })
 }
 

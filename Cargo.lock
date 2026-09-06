@@ -1789,7 +1789,6 @@ dependencies = [
  "knocode-core",
  "knocode-events",
  "knocode-knowledge",
- "knocode-optimizer",
  "knocode-repo-intel",
  "knocode-storage",
  "prometheus",

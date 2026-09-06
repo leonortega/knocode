@@ -1,11 +1,11 @@
-//! TASK-035 / F-6: E2E regression net for the two hook contracts.
+//! TASK-035 / F-6: E2E regression net for the hook contracts.
 //!
 //! Boots the real HTTP router on an ephemeral port against a temp-seeded global tantivy
 //! index (`KNOCODE_INDEX_DIR`) and asserts:
-//!   (a) tool-output compression ratio > 1.2x,
-//!   (b) provenance rows are unique,
-//!   (c) zero cross-repo leakage with a second seeded repo,
-//!   (d) passthrough on an empty-hit prompt.
+//!   (a) provenance rows are unique,
+//!   (b) zero cross-repo leakage with a second seeded repo,
+//!   (c) passthrough on an empty-hit prompt,
+//!   (d) readiness probe + PreToolCall/ToolOutput rejection (compression = RTK).
 //!
 //! Runs as ONE test fn because it mutates process-global env vars.
 
@@ -16,7 +16,6 @@ use knocode_context::{ContextConfig, ContextEngine};
 use knocode_daemon::http_server::{create_router, HttpServerState};
 use knocode_events::EventBus;
 use knocode_knowledge::KnowledgeHub;
-use knocode_optimizer::ExecutionOptimizer;
 use knocode_repo_intel::RepositoryIntelligence;
 use knocode_storage::Database;
 
@@ -67,7 +66,6 @@ async fn e2e_hook_contracts() {
     );
     let state = HttpServerState {
         context_engine: Arc::new(tokio::sync::Mutex::new(engine)),
-        optimizer: Arc::new(ExecutionOptimizer::new(knocode_optimizer::OptimizerConfig::default())),
     };
 
     // ── Boot HTTP server on an ephemeral port ────────────────────────────
@@ -184,11 +182,7 @@ async fn e2e_hook_contracts() {
         "F-2: prompt must be byte-identical on passthrough"
     );
 
-    // ── (a) PreToolCall compression ratio > 1.2x (F-5/F-6) ────────────────
-    let log_lines: Vec<String> = (0..300)
-        .map(|i| format!("2026-08-25T10:00:{:02} INFO request {} handled ok", i % 60, i))
-        .collect();
-    let big_output = format!("{}\n\n\n{}", log_lines.join("\n"), log_lines[..50].join("\n"));
+    // ── (e) removed contract: PreToolCall/ToolOutput (compression = RTK) must be rejected ──
     let body = serde_json::json!({
         "correlation_id": "e2e_ptc_001",
         "hook_type": "PreToolCall",
@@ -196,19 +190,12 @@ async fn e2e_hook_contracts() {
             "type": "ToolOutput",
             "tool_name": "bash",
             "output_type": "ShellOutput",
-            "content": big_output,
+            "content": "some tool output",
             "repository_path": repo_eshop.to_string_lossy()
         }
     });
     let json = post_hook(&port, &body).await;
-    assert_eq!(json["payload"]["type"], "CompressedOutput", "{json}");
-    let orig = json["payload"]["original_tokens"].as_u64().unwrap();
-    let comp = json["payload"]["compressed_tokens"].as_u64().unwrap();
-    assert!(orig > 0);
-    assert!(
-        (comp as f64) < (orig as f64) / 1.2,
-        "(a) compression ratio must exceed 1.2x — original={orig}, compressed={comp}"
-    );
+    assert_eq!(json["payload"]["reason"], "Unknown hook type: PreToolCall", "{json}");
 
     // Cleanup best-effort
     std::env::remove_var("KNOCODE_INDEX_DIR");

@@ -21,7 +21,6 @@ sequenceDiagram
     participant RI as Repository Intelligence
     participant KH as Knowledge Hub
     participant Model as LLM Model
-    participant EO as Execution Optimizer
 
     Dev->>Agent: "Add rate limiting to the API"
 
@@ -79,15 +78,10 @@ sequenceDiagram
     end
 
     rect rgb(240, 255, 240)
-    Note over Agent,EO: Stage 9: Tool Execution + Compression
+    Note over Agent: Stage 9: Tool Execution
     loop Tool calls
         Agent->>Agent: Execute tool
-        Agent->>AD: PreToolCall(tool_output)
-        AD->>EO: compress_output(tool_output)
-        EO->>EO: RTK compress
-        EO-->>AD: CompressedOutput
-        AD-->>Agent: CompressedOutput
-        Agent->>Agent: Send compressed to model
+        Agent->>Agent: Output re-enters model context (compression = RTK, external)
     end
     end
 
@@ -492,11 +486,11 @@ Model response with code changes, explanations, and tool calls.
 
 ---
 
-## Stage 9: Tool Execution + Compression
+## Stage 9: Tool Execution
 
 ### Entry Point
 
-Model response contains tool calls (file reads, search, shell). Agent executes tools and the runtime compresses outputs before they re-enter context.
+Model response contains tool calls (file reads, search, shell). Tool outputs are **not** compressed by the runtime — compression lives entirely in RTK (external binary, wired by the installers via `rtk init`); see `REMOVED_TOOLS.md`.
 
 ### Tool Execution Loop
 
@@ -506,46 +500,10 @@ flowchart TD
     B -->|No| C[Return to Developer]
     B -->|Yes| D[Execute tool]
     D --> E[Get raw output]
-    E --> F[PreToolCall hook fires]
-    F --> G[RTK compress]
-    G --> H{Compression succeeded?}
-    H -->|Yes| I[Send compressed to model]
-    H -->|No| J[Tee-on-failure: save full output]
-    J --> I
-    I --> K[Get next model response]
+    E --> F[Output re-enters model context]
+    F --> K[Get next model response]
     K --> B
 ```
-
-### Compression Request
-
-```json
-{
-  "tool_name": "read_file",
-  "output_type": "file_read",
-  "content": "import { Router } from 'express';\n// ... 500 lines ...",
-  "context": "Looking for rate limiting middleware"
-}
-```
-
-### Compression Response
-
-```json
-{
-  "original": "// full content...",
-  "compressed": "// src/router.ts (compressed)\nexport function setupRoutes(router: Router) {...}",
-  "original_tokens": 2400,
-  "compressed_tokens": 800
-}
-```
-
-### Compression Example
-
-| Output Type | Original Tokens | Compressed Tokens | Reduction |
-|-------------|-----------------|-------------------|-----------|
-| File read (large file) | 2,400 | 800 | 67% |
-| Search results (20 matches) | 1,800 | 600 | 67% |
-| Shell output (build log) | 3,200 | 400 | 87% |
-| File read (small file) | 200 | 200 | 0% |
 
 ---
 
@@ -675,6 +633,6 @@ The following rules are **mandatory** for any coding AI implementing this specif
 
 23. **Deterministic retrieval.** No neural rerankers in v1 — retrieval quality comes from index representation (PascalCase splitting, symbol fields, path tokenization).
 
-24. **Implement tee-on-failure for RTK.** On compression failure, save full output to log and return original.
+24. **Tool-output compression is delegated to RTK.** The runtime does not compress tool outputs; installers wire RTK's own integrations.
 
 25. **Report savings honestly.** Separate "reduction in the specific thing measured" from "reduction in your bill."

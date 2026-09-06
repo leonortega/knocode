@@ -8,12 +8,12 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 
 | Area | What Is Included |
 |------|------------------|
-| **Agent Interception** | Pre-generation and pre-tool-call hooks for Tier 1 agents (opencode, Claude Code, Cursor, Gemini CLI, Copilot, OpenClaw, Pi, Factory Droid). Tier 2 agents supported as best-effort via convention-based integration. |
+| **Agent Interception** | Pre-generation hooks for Tier 1 agents (opencode, Claude Code, Cursor, Gemini CLI, Copilot, OpenClaw, Pi, Factory Droid). Tier 2 agents supported as best-effort via convention-based integration. |
 | **Repository Intelligence** | Incremental AST parsing (tree-sitter), structural search (ast-grep), text search (ripgrep), git-change-triggered incremental updates, metadata storage. Optional LSP enrichment via agent's own language server. |
 | **Knowledge Hub** | Unified organizational surface for docs, ADRs, templates, and memory. BM25/tantivy for lexical retrieval. FlashRank and engram removed (see REMOVED_TOOLS.md, REMOVED_TOOLS.md); memory is SQLite+tantivy local. The Skill Engine was removed — agents own skill discovery natively (see `docs/01-architecture/REMOVED_TOOLS.md`). |
 | **Context Engine** | `BuildContext(task)` — the one public API. Retrieve → rank → deduplicate → compress → cache-order → token-budget → emit YAML Context Pack. Runs as a long-lived local daemon with Unix socket IPC. Local token counting via `tiktoken-rs`. |
-| **Execution Optimizer** | RTK adopted directly for tool-output compression. Intercepts tool outputs via pre-tool-call hooks. |
-| **Event Bus** | Async-only observability events: ContextBuilt, RepositoryUpdated, ToolExecuted, ResponseGenerated, MemorySaved. Consumed by CLI inspection, metrics, and future orchestrators. |
+| **Execution Optimizer** | ❌ removed — tool-output compression delegated to RTK (external binary); installers wire RTK's own integrations. See REMOVED_TOOLS.md. |
+| **Event Bus** | Async-only observability events: ContextBuilt, RepositoryUpdated, ResponseGenerated, MemorySaved. Consumed by CLI inspection, metrics, and future orchestrators. |
 | **Local Persistence** | SQLite for repository index, metadata, and memory (engram removed). Filesystem for configuration and logs. |
 | **CLI** | Start daemon, initialize repository, preview BuildContext, health check. |
 | **Configuration** | TOML-based configuration for token budgets, retrieval settings, daemon settings, and logging. |
@@ -54,13 +54,13 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 
 | Responsibility | Details |
 |----------------|---------|
-| Agent interception | Pre-generation and pre-tool-call hooks |
+| Agent interception | Pre-generation hooks |
 | Repository parsing | tree-sitter AST parsing, incremental updates on git change |
 | Code indexing | Structural search (ast-grep), text search (ripgrep), metadata storage |
 | Knowledge storage | Docs, ADRs, templates, memory (SQLite+tantivy local; engram removed) |
 | Knowledge retrieval | BM25/tantivy lexical search (FlashRank removed) |
 | Context assembly | Token-budgeted YAML Context Pack with cache-aware ordering |
-| Tool-output compression | RTK-based compression via pre-tool-call hooks |
+| Tool-output compression | ❌ delegated to RTK (external binary) — not a daemon responsibility |
 | Token accounting | Local token counting via tiktoken-rs |
 | Observability | Event bus for async metrics and inspection |
 
@@ -122,7 +122,7 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 │                              │                               │ │
 │  ┌───────────────────────────▼──────────────────────────────┐ │
 │  │                    Event Bus (async)                      │   │
-│  │  ContextBuilt, RepositoryUpdated, ToolExecuted,          │   │
+│  │  ContextBuilt, RepositoryUpdated,                        │   │
 │  │  ResponseGenerated, MemorySaved                          │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
@@ -147,7 +147,7 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 
 | Path | Protocol | Direction | Purpose |
 |------|----------|-----------|---------|
-| Agent → Daemon | Unix Domain Socket (MessagePack) | Bidirectional | Pre-generation hooks, pre-tool hooks |
+| Agent → Daemon | Unix Domain Socket (MessagePack) | Bidirectional | Pre-generation hooks, readiness probes |
 | Daemon → engram | *Removed* — memory is SQLite local (see REMOVED_TOOLS.md) | — |
 | Daemon → SQLite | In-process (rusqlite) | Bidirectional | Index and metadata |
 | Daemon → Event Bus | Internal async channel | Outbound only | Observability events |

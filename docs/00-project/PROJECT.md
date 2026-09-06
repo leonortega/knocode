@@ -2,7 +2,7 @@
 
 ## Purpose
 
-A local AI Runtime that improves existing coding agents by providing repository intelligence, optimized context construction, and tool-output compression. It sits between coding agents and LLM providers, making every agent interaction more efficient and contextually aware — without replacing the agent itself and without choosing the agent's model.
+A local AI Runtime that improves existing coding agents by providing repository intelligence and optimized context construction. Tool-output compression is delegated to RTK. It sits between coding agents and LLM providers, making every agent interaction more efficient and contextually aware — without replacing the agent itself and without choosing the agent's model.
 
 ## Problem Statement
 
@@ -18,7 +18,7 @@ Current coding agents (opencode, Claude Code, Cursor, Gemini CLI, etc.) operate 
 
 ## Goal
 
-Build a local runtime that solves these four problems, without becoming a coding agent itself. The runtime exposes one clean API: `BuildContext(task)` (plus a readiness probe and tool-output compression). It works standalone for solo developers and can be extended with external orchestration for teams needing approvals and audit trails.
+Build a local runtime that solves these four problems, without becoming a coding agent itself. The runtime exposes one clean API: `BuildContext(task)` (plus a readiness probe). Tool-output compression is delegated to RTK, an external binary the installer can install and wire. It works standalone for solo developers and can be extended with external orchestration for teams needing approvals and audit trails.
 
 ## Target Users
 
@@ -34,10 +34,10 @@ Build a local runtime that solves these four problems, without becoming a coding
 
 These agents expose true programmatic hooks that fire unconditionally on every message/tool call:
 
-| Agent | Pre-Generation Hook | Pre-Tool Hook |
+| Agent | Pre-Generation Hook | Pre-Tool Hook (RTK-owned) |
 |-------|---------------------|---------------|
-| opencode | `chat.message` | `tool.execute.before` |
-| Claude Code | `UserPromptSubmit` | `PreToolUse` |
+| opencode | `chat.message` | `tool.execute.before` (via RTK's plugin) |
+| Claude Code | `UserPromptSubmit` | `PreToolUse` (via RTK's hooks) |
 | Cursor | (TBD) | (TBD) |
 | Gemini CLI | (TBD) | (TBD) |
 | GitHub Copilot | (TBD) | (TBD) |
@@ -74,7 +74,7 @@ The runtime is model-agnostic: the agent / provider / user selects the model for
 
 ### Use Case 4: Tool-Output Compression
 
-The coding agent reads a large log file or search result. The runtime intercepts the tool output before it re-enters the context, compresses it via RTK, and passes the compact version — reducing token consumption by 50–80% while preserving the information the model needs.
+The coding agent reads a large log file or search result. RTK (installed alongside knocode via the installer) intercepts the tool output before it re-enters the context and compresses it — reducing token consumption by 50–80% while preserving the information the model needs. The knocode daemon itself does not touch tool outputs.
 
 ### Use Case 5: Knowledge Accumulation
 
@@ -98,7 +98,7 @@ Over multiple interactions, the runtime builds persistent knowledge about the re
 |-----------|-------------|--------|
 | Token reduction | Tokens sent vs. naive context packing | 30–50% reduction |
 | First-pass accuracy | Correct output on first attempt (Promptfoo eval) | 20–40% improvement over baseline |
-| Tool-output compression | Token reduction in tool outputs | 50–80% reduction |
+| Tool-output compression (via RTK, external) | Token reduction in tool outputs | 50–80% reduction |
 | Cache hit rate | Prompt cache hit rate with cache-aware ordering | > 80% on repeat tasks |
 | Latency overhead | Added latency from runtime processing | < 30s hard limit, < 5s typical |
 | Fail-open reliability | Requests pass through unmodified on error | 100% fail-open compliance |
@@ -109,13 +109,13 @@ Over multiple interactions, the runtime builds persistent knowledge about the re
 
 | Capability | Description |
 |------------|-------------|
-| Agent interception | Pre-generation and pre-tool-call hooks for Tier 1 agents |
+| Agent interception | Pre-generation hooks for Tier 1 agents |
 | Repository indexing | Incremental AST parsing with tree-sitter, structural search with ast-grep, text search with ripgrep |
 | Knowledge retrieval | BM25/tantivy lexical search (FlashRank removed — see REMOVED_TOOLS.md, reranker is passthrough) |
 | Memory | Persistent memory via SQLite+tantivy local (engram removed — see REMOVED_TOOLS.md) |
 | Context construction | Token-budgeted YAML context pack with cache-aware ordering |
-| Tool-output optimization | RTK-based compression for tool outputs |
-| Event bus | Async observability events (ContextBuilt, RepositoryUpdated, ToolExecuted, ResponseGenerated, MemorySaved) |
+| Tool-output optimization | Delegated to RTK (external binary, wired by installers) — not a daemon capability |
+| Event bus | Async observability events (ContextBuilt, RepositoryUpdated, ResponseGenerated, MemorySaved) |
 | Local persistence | SQLite for index, metadata, and memory (engram removed) |
 
 ## v1 Limitations

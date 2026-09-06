@@ -198,6 +198,18 @@ impl RepositoryIntelligence {
 
     /// Index the repository (full or incremental) — wires tantivy BM25 in-process, incremental + MkDocs ingestion (v0.5.0)
     pub fn index_repository(&mut self) -> Result<IndexStats, String> {
+        self.index_repository_with_progress(None)
+    }
+
+    /// Same as `index_repository`, with an optional progress callback
+    /// `(files_done, files_total, phase_label)` invoked periodically.
+    /// `files_total` is 0 while unknown (during the initial walk), then the
+    /// number of files being indexed. Lets UIs show a done/total counter
+    /// instead of appearing frozen during long index runs.
+    pub fn index_repository_with_progress(
+        &mut self,
+        on_progress: Option<&(dyn Fn(usize, usize, &str) + Sync)>,
+    ) -> Result<IndexStats, String> {
         let start = Instant::now();
         let mut files_indexed = 0usize;
         let mut symbols_extracted = 0usize;
@@ -252,6 +264,13 @@ impl RepositoryIntelligence {
 
         let mut file_jobs: Vec<FileJob> = Vec::new();
 
+        let report = |done: usize, total: usize, l: &str| {
+            if let Some(cb) = on_progress {
+                cb(done, total, l);
+            }
+        };
+        let mut walk_count = 0usize;
+
         for entry in self.walk_directory(&self.repo_path)? {
             let path = entry;
             let path_str = path.strip_prefix(&self.repo_path)
@@ -260,6 +279,10 @@ impl RepositoryIntelligence {
                 .to_string();
 
             seen_paths.insert(path_str.clone());
+            walk_count += 1;
+            if walk_count % 128 == 0 {
+                report(walk_count, 0, "scanning files");
+            }
 
             // Classify file using unified registry
             let file_class = classify_file(&path);
@@ -398,7 +421,10 @@ impl RepositoryIntelligence {
 
         let extraction_results: Vec<ExtractedResult> = if file_jobs.len() < 100 || thread_count == 1 {
             // Small repo or single-thread: sequential extraction (no thread overhead)
-            file_jobs.iter().map(|job| {
+            file_jobs.iter().enumerate().map(|(i, job)| {
+                if i % 32 == 0 {
+                    report(i, file_jobs.len(), "extracting symbols");
+                }
                 let extracted = if matches!(job.file_class, FileClass::Documentation | FileClass::Config) {
                     Vec::new()
                 } else {
@@ -417,10 +443,17 @@ impl RepositoryIntelligence {
             // Results are collected in order (same index as file_jobs).
             let chunk_size = (file_jobs.len() / thread_count).max(1);
             let patterns = &self.patterns;
+            let extract_total = file_jobs.len();
+            let extract_progress = &std::sync::atomic::AtomicUsize::new(0);
 
             std::thread::scope(|s| {
                 let handles: Vec<_> = file_jobs.chunks(chunk_size).map(|chunk| {
                     s.spawn(move || {
+                        if let Some(cb) = on_progress {
+                            let done = extract_progress.fetch_add(chunk.len(), std::sync::atomic::Ordering::Relaxed)
+                                + chunk.len();
+                            cb(done, extract_total, "extracting symbols");
+                        }
                         chunk.iter().map(|job| {
                             let extracted = if matches!(job.file_class, FileClass::Documentation | FileClass::Config) {
                                 Vec::new()
@@ -460,6 +493,7 @@ impl RepositoryIntelligence {
         let t_write = Instant::now();
         let batch_enabled = self.db.begin_batch().is_ok();
         let mut batch_ops: usize = 0;
+        let mut write_count = 0usize;
 
         for (job, extract_result) in file_jobs.iter().zip(extraction_results.iter()) {
             let file_id = job.existing_file_id.unwrap_or(0);
@@ -505,6 +539,10 @@ impl RepositoryIntelligence {
 
             files_indexed += 1;
             batch_ops += 1;
+            write_count += 1;
+            if write_count % 128 == 0 {
+                report(write_count, file_jobs.len(), "writing index");
+            }
 
             // Batch commit every 1000 files — keeps WAL small, limits transaction size
             if batch_enabled && batch_ops >= 1000 {

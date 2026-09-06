@@ -18,6 +18,7 @@ explains why the rest is gone.
 | `knocode replay` CLI | v0.9.0 | Event-replay command over the event log | Replay off the hot path; `tracing` + metrics retained | — |
 | Skill Engine (runtime) | **current change** | `knocode-skills` crate: tag-based skill matching + full-instruction injection (`.knocode/skills`, `~/.knocode/skills`) | Agents already have native skill discovery (`.claude/skills`, `.agents/skills`, `.cursor/rules`); a second discovery+conflict system added complexity with no demonstrated outcome lift | V1_RUNTIME_SPEC.md §2 |
 | Model map / tier config | **current change** | `ModelConfig { default_tier, routing_enabled }`, "fast/balanced/capable" validation, `KNOCODE_MODEL_DEFAULT`, metrics request counter keyed `hook+tier`, `token_usage.model`/`tier` columns | Vestigial after the Model Router removal — nothing reads a tier anymore | — |
+| Built-in tool-output compression (Execution Optimizer, MCP `knocode_compress`, `/hook` `ToolOutput`) | **current change** | `ExecutionOptimizer` daemon state, `/hook` `ToolOutput`/`CompressedOutput` contract, MCP `knocode_compress` tool, `tokens_saved` metric, `.claude/hooks/knocode-pretool.sh` | Compression is RTK's job — the installer wires RTK's own integrations (`rtk init`) instead of the daemon reimplementing it | — |
 
 ## Why things were removed — the reasoning
 
@@ -108,7 +109,7 @@ Skill Engine as a V1 primitive. See `V1_RUNTIME_SPEC.md`.
 | Repository Intelligence (tree-sitter + tantivy + graph + watcher) | ✅ core |
 | Retrieval + Context Engine (deterministic, local) | ✅ core |
 | Knowledge (SQLite + tantivy local; docs + code context) | ✅ core |
-| Execution Optimizer (tool-output compression) | ✅ core |
+| Tool-output compression | ❌ delegated to RTK (external binary, wired by installers) |
 | Observability (`/metrics`, `/health`, trace logs) | ✅ core |
 | Daemon IPC: HTTP `/hook` + **MCP `POST /mcp`** | ✅ core |
 | Readiness (`/health`, `/metrics` gauge, HTTP probe, MCP `-32001`) | ✅ core |

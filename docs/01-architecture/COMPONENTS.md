@@ -22,8 +22,8 @@ Bridge the coding agent and the daemon. One thin adapter per agent CLI, implemen
 
 - **HTTP server** (axum) on port 9527 with JSON IPC
 - **Fail-open** on timeout or error: returns OriginalPassthrough
-- **OpenCode plugin** (TypeScript) for pre-generation and pre-tool hooks
-- **Claude Code hooks** (shell scripts) for UserPromptSubmit and PreToolUse
+- **OpenCode plugin** (TypeScript) for pre-generation hooks
+- **Claude Code hooks** (shell scripts) for UserPromptSubmit
 
 ### Responsibilities
 
@@ -31,7 +31,7 @@ Bridge the coding agent and the daemon. One thin adapter per agent CLI, implemen
 - Parse JSON-encoded requests
 - Validate request format and content
 - Generate correlation IDs
-- Route requests to the appropriate handler (Context Engine or Execution Optimizer)
+- Route requests to the appropriate handler (Context Engine)
 - Format responses in agent-consumable JSON
 - Implement fail-open on timeout or error
 - Handle agent-specific hook differences
@@ -41,7 +41,6 @@ Bridge the coding agent and the daemon. One thin adapter per agent CLI, implemen
 | Input | Type | Description |
 |-------|------|-------------|
 | PreGeneration | MessageRewrite | Session ID, message, optional context hints |
-| PreToolCall | ToolOutput | Tool name, output type, content, optional context |
 | Probe | Readiness | (no fields) — answered before rate-limiting, no engine lock |
 
 ### Outputs
@@ -49,14 +48,12 @@ Bridge the coding agent and the daemon. One thin adapter per agent CLI, implemen
 | Output | Type | Description |
 |--------|------|-------------|
 | RewrittenMessage | ContextPack | Rewritten message with injected context |
-| CompressedOutput | Compressed tool output | Token-reduced tool output |
 | OriginalPassthrough | Original message + reason | Fail-open: unmodified message |
 | Probe | state, index_files, version | Readiness answer (while indexing: HTTP `503 daemon_indexing`) |
 
 ### Dependencies
 
 - Context Engine (for pre-generation)
-- Execution Optimizer (for pre-tool-call)
 - tokio (async I/O)
 - rmp-serde (MessagePack)
 
@@ -73,7 +70,6 @@ None. The Adapter Layer is stateless.
 5. Start tracing span with correlation ID
 6. Route to appropriate handler:
    - PreGeneration → Context Engine `BuildContext`
-   - PreToolCall → Execution Optimizer `compress_output`
 7. On success: return formatted response
 8. On timeout (> 30s) or error: return OriginalPassthrough
 9. Log request received and response sent
@@ -102,14 +98,14 @@ None. The Adapter Layer is stateless.
 | Hook | Runtime Operation |
 |------|-------------------|
 | `chat.message` (pre-generation) | Call Context Engine, rewrite message |
-| `tool.execute.before` (pre-tool) | Call Execution Optimizer, compress output |
+| `tool.execute.after` | ❌ removed — output compression delegated to RTK |
 
 #### Claude Code Adapter
 
 | Hook | Runtime Operation |
 |------|-------------------|
 | `UserPromptSubmit` (pre-generation) | Call Context Engine, rewrite message. **Hard 30s timeout.** |
-| `PreToolUse` (pre-tool) | Call Execution Optimizer, compress output |
+| `PreToolUse` | ❌ removed — output compression delegated to RTK |
 
 ### Implementation Requirements
 
@@ -515,127 +511,24 @@ One organizational surface for project docs, ADRs, templates, and long-term memo
 
 ---
 
-## 6. Execution Optimizer
+## 6. Execution Optimizer (removed)
 
-### Purpose
+> **Removed from the daemon.** Tool-output compression lives entirely in RTK
+> (github.com/rtk-ai/rtk), an external binary the installers download opt-in and
+> wire into the selected agents via `rtk init`. The daemon serves
+> `knocode_context` only — see `REMOVED_TOOLS.md`.
 
-Compress and optimize tool outputs to reduce token consumption without losing information needed by the model. Uses RTK directly rather than building an equivalent.
+### What changed
 
-### Responsibilities
+- The daemon's `PreToolCall`/`ToolOutput`/`CompressedOutput` IPC variants, the
+  `/hook` `ToolOutput` contract, and the `ExecutionOptimizer` state were deleted.
+- Agents that want output compression should run RTK's own plugin/hook for the
+  selected agent (`rtk init -g --auto-patch --opencode` / `--copilot`).
 
-- Compress file read outputs
-- Compress search results
-- Compress shell command outputs
-- Deduplicate repeated content
-- Truncate irrelevant sections
-- Apply RTK compression
-- Implement tee-on-failure pattern
-- Track compression statistics
+### Pointer
 
-### Inputs
-
-| Input | Type | Description |
-|-------|------|-------------|
-| compress_output | ToolOutput | Raw tool output with type and content |
-
-### Outputs
-
-| Output | Type | Description |
-|--------|------|-------------|
-| CompressedOutput | Compressed content | Token-reduced output |
-| CompressionStats | Statistics | Original tokens, compressed tokens, ratio |
-
-### Dependencies
-
-- RTK (Rust binary, adopted directly)
-- tiktoken-rs (token counting)
-
-### Persistent Data
-
-None. Compression is per-request and stateless.
-
-### Runtime Behavior
-
-#### Compression Pipeline
-
-```mermaid
-flowchart TD
-    A[Receive ToolOutput] --> B{Output type?}
-    B -->|File Read| C[Compress file content]
-    B -->|Search Result| D[Compress search results]
-    B -->|Shell Output| E[Compress shell output]
-    B -->|Other| F[Truncate to max tokens]
-
-    C --> G[RTK compress]
-    D --> G
-    E --> G
-    F --> G
-
-    G --> H{Compression succeeded?}
-    H -->|Yes| I[Return CompressedOutput]
-    H -->|No| J[Tee-on-failure: save full output to log]
-    J --> K[Return OriginalPassthrough]
-```
-
-#### Tee-on-Failure Pattern
-
-On compression failure:
-1. Save the full uncompressed output to a local log file
-2. Point the compressed summary at the log file location
-3. Return the original output (fail-open)
-4. Log the failure for debugging
-
-#### File Read Compression
-
-1. Identify the query or task context
-2. Remove lines that are clearly irrelevant (boilerplate, imports only)
-3. Preserve function/class definitions and their bodies
-4. Preserve comments that explain intent
-5. Deduplicate repeated patterns
-6. Truncate to configured max lines
-
-#### Search Result Compression
-
-1. Group results by file
-2. Keep top N results per file (configurable)
-3. Remove duplicate matches across files
-4. Preserve context lines around matches
-5. Truncate to configured max results
-
-#### Shell Output Compression
-
-1. Remove ANSI escape codes
-2. Remove repetitive progress indicators
-3. Preserve error messages and warnings
-4. Preserve final output
-5. Truncate to configured max lines
-
-### Errors
-
-| Error | Behavior |
-|-------|----------|
-| RTK failure | Tee-on-failure: save full output, return original |
-| Token counting failure | Use character-based estimation |
-| Unknown output type | Return truncated content |
-
-### Boundaries
-
-- Does not modify the original tool output permanently
-- Does not understand code semantics
-- Only reduces token count through pattern-based compression
-- Does not interpret or summarize content
-- Fails open: agent always gets output
-
-### Implementation Requirements
-
-- Adopt RTK directly (github.com/rtk-ai/rtk)
-- Use tiktoken-rs for token counting
-- Support compression levels: light, balanced, aggressive
-- Log compression ratio at DEBUG level
-- Return both original and compressed token counts
-- Never lose error messages or critical information
-- Implement tee-on-failure pattern
-- Report savings honestly: separate "reduction in bash output" from "reduction in your bill"
+See RTK's documentation for its compression behavior, compression levels, and
+fail-open semantics.
 
 ---
 
@@ -658,7 +551,7 @@ Async-only observability system for metrics, debugging, inspection, and future o
 |-------|---------|---------|
 | ContextBuilt | Context Engine | correlation_id, token_counts, file_count, latency_ms |
 | RepositoryUpdated | Repository Intelligence | files_indexed, symbols_extracted, duration_ms |
-| ToolExecuted | Execution Optimizer | tool_name, original_tokens, compressed_tokens, ratio |
+| ToolExecuted | ❌ removed with Execution Optimizer | — |
 | ResponseGenerated | Adapter Layer | correlation_id, hook_type, latency_ms, error |
 | MemorySaved | Knowledge Hub | entry_id, namespace, key |
 

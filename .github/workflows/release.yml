@@ -85,6 +85,13 @@ jobs:
             Copy-Item "packages/$pkg/package.json" -Destination $dst -Force
             Copy-Item "packages/$pkg/dist" -Destination $dst -Recurse -Force
           }
+          # knocode-copilot-plugin: static bundle (plugin.json, mcp.json, hooks, hook script,
+          # servers/knocode-mcp.mjs regenerated from the knocode-mcp dist built above)
+          Push-Location "packages/knocode-copilot-plugin"
+          node scripts/build.mjs
+          Pop-Location
+          New-Item -ItemType Directory -Force -Path "integrations/knocode-copilot-plugin" | Out-Null
+          Copy-Item "packages/knocode-copilot-plugin/*" -Destination "integrations/knocode-copilot-plugin" -Recurse -Force -Exclude ".gitignore"
 
       - name: Test workspace (release)
         run: cargo test --release --workspace --quiet
@@ -151,6 +158,12 @@ jobs:
             cp "packages/$pkg/package.json" "integrations/$pkg/"
             cp -r "packages/$pkg/dist" "integrations/$pkg/"
           done
+          # knocode-copilot-plugin: static bundle (plugin.json, mcp.json, hooks, hook script,
+          # servers/knocode-mcp.mjs regenerated from the knocode-mcp dist built above)
+          (cd packages/knocode-copilot-plugin && node scripts/build.mjs)
+          mkdir -p integrations/knocode-copilot-plugin
+          cp -r packages/knocode-copilot-plugin/. integrations/knocode-copilot-plugin/
+          rm -f integrations/knocode-copilot-plugin/.gitignore
 
       - name: Test workspace (release)
         run: cargo test --release --workspace --quiet
@@ -219,6 +232,12 @@ jobs:
             cp "packages/$pkg/package.json" "integrations/$pkg/"
             cp -r "packages/$pkg/dist" "integrations/$pkg/"
           done
+          # knocode-copilot-plugin: static bundle (plugin.json, mcp.json, hooks, hook script,
+          # servers/knocode-mcp.mjs regenerated from the knocode-mcp dist built above)
+          (cd packages/knocode-copilot-plugin && node scripts/build.mjs)
+          mkdir -p integrations/knocode-copilot-plugin
+          cp -r packages/knocode-copilot-plugin/. integrations/knocode-copilot-plugin/
+          rm -f integrations/knocode-copilot-plugin/.gitignore
 
       - name: Test workspace (release)
         run: cargo test --release --workspace --quiet

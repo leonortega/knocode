@@ -5,9 +5,10 @@
  * `servers/knocode-mcp.mjs`, so the Agent Plugin bundle is portable and can be
  * dropped into VS Code's agentPlugins directory without a separate install step.
  *
- * The daemon owns the canonical MCP tools (`knocode_context`, `knocode_compress`);
- * this plugin never reimplements them — the copy is byte-identical to the npm
- * package, so the surface can never drift from `packages/knocode-mcp`.
+ * The daemon owns the canonical MCP tools (`knocode_context`; compression lives in
+ * RTK, github.com/rtk-ai/rtk); this plugin never reimplements them — the copy is
+ * byte-identical to the npm package, so the surface can never drift from
+ * `packages/knocode-mcp`.
  *
  * Usage:   node scripts/build.mjs
  * Required pre-step (once):  cd packages/knocode-mcp && npm install && npm run build

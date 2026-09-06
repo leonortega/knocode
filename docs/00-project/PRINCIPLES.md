@@ -18,11 +18,11 @@ Define the engineering principles that govern every implementation decision. Whe
 
 ### 2. Interception Before the Model
 
-**Rule:** Context injection and tool-output optimization happen before the model sees anything, via each agent's own native hooks — not a reverse proxy, not an MCP tool the agent can choose to skip.
+**Rule:** Context injection happens before the model sees anything, via each agent's own native hooks — not a reverse proxy, not an MCP tool the agent can choose to skip. Tool-output optimization is delegated to RTK (external binary), not the runtime.
 
 **Implications:**
-- Use opencode's `chat.message` and `tool.execute.before` hooks
-- Use Claude Code's `UserPromptSubmit` and `PreToolUse` hooks
+- Use opencode's `chat.message` hook; output compression via RTK's own plugin
+- Use Claude Code's `UserPromptSubmit` hook; output compression via RTK's own hooks
 - Hooks fire unconditionally on every message/tool call
 - The agent cannot bypass the runtime's context injection
 - Fail-open on timeout or error: pass the raw message through unmodified
@@ -73,7 +73,7 @@ Define the engineering principles that govern every implementation decision. Whe
 - BM25/tantivy for full-text indexing and search
 - FlashRank for reranking — via `ort` (ONNX Runtime) — removed (see REMOVED_TOOLS.md / REMOVED_TOOLS.md)
 - engram for memory — SQLite+FTS5, MCP-native — removed (see REMOVED_TOOLS.md; SQLite+tantivy local)
-- RTK for tool-output compression — adopted directly
+- RTK for tool-output compression — delegated entirely (external binary, not embedded in the daemon)
 - tiktoken-rs for local token counting — never via model API round-trip
 
 ### 7. Minimal Runtime
@@ -135,7 +135,7 @@ Define the engineering principles that govern every implementation decision. Whe
 - Log levels: ERROR for failures, WARN for recoverable issues, INFO for request lifecycle, DEBUG for component decisions
 - Each request gets a unique correlation ID propagated across all components
 - Token counts are logged at every stage
-- Event bus events: ContextBuilt, RepositoryUpdated, ToolExecuted, ResponseGenerated, MemorySaved
+- Event bus events: ContextBuilt, RepositoryUpdated, ResponseGenerated, MemorySaved
 - CLI inspection command can preview what a prompt would build
 
 ### 12. Portability via Interfaces
@@ -162,7 +162,7 @@ Define the engineering principles that govern every implementation decision. Whe
 **Rule:** Separate "reduction in the specific thing measured" (e.g., bash output size) from "reduction in your bill" (diluted by system prompt, history, and output tokens). Do not oversell.
 
 **Implications:**
-- Report tool-output compression ratio separately from total cost reduction
+- Report tool-output compression ratio separately from total cost reduction (RTK owns compression; knocode owns context)
 - Report token reduction per request separately from bill impact
 - Include caveats about system prompt, history, and output tokens in cost claims
 - Use Promptfoo for objective evaluation, not cherry-picked examples

@@ -42,7 +42,6 @@ Start (knocode serve)
   │   │   Accept agent connections (UDS)                   │
   │   │   UDS Probe payload → state / index_files / version│
   │   │   Handle pre-generation hooks (BuildContext)       │
-  │   │   Handle pre-tool hooks (compress output)          │
   │   │   Emit observability events                        │
   │   │   Background: incremental indexing on git change   │
   │   │                                                    │
@@ -192,10 +191,8 @@ cache_order = ["docs_context", "code_context"]  # Fixed order
 # model-agnostic; the agent/provider/user selects the model (V1_RUNTIME_SPEC.md §2.3)
 # [skills] removed — the runtime no longer loads or matches skills (REMOVED_TOOLS.md)
 
-[rtk]
-enabled = true                        # Enable RTK compression
-max_output_tokens = 8000              # Max tokens per compressed output
-compression_level = "balanced"        # light, balanced, aggressive
+# [rtk] removed — tool-output compression lives in RTK (external binary),
+# not in the daemon (REMOVED_TOOLS.md)
 
 # [workflow] — v1 REMOVED (future/workflow only, opt-in --features workflow)
 # See future/workflow/README.md — not part of v1 runtime (TASK-001)
@@ -234,8 +231,8 @@ The daemon communicates with coding agents over a Unix domain socket using Messa
 // Request from agent to daemon
 struct AgentRequest {
     correlation_id: String,           // req_{uuid}
-    hook_type: HookType,              // PreGeneration | PreToolCall | Probe
-    payload: RequestPayload,          // MessageRewrite | ToolOutput | Probe
+    hook_type: HookType,              // PreGeneration | Probe
+    payload: RequestPayload,          // MessageRewrite | Probe
     repository_id: String,            // TASK-021: hash of repo path
     timestamp: String,                // ISO8601 request creation time
 }
@@ -244,14 +241,13 @@ struct AgentRequest {
 struct AgentResponse {
     correlation_id: String,
     hook_type: HookType,
-    payload: ResponsePayload,         // RewrittenMessage | CompressedOutput | OriginalPassthrough | Probe
+    payload: ResponsePayload,         // RewrittenMessage | OriginalPassthrough | Probe
     latency_ms: u64,
     error: Option<String>,            // Non-fatal error message
 }
 
 enum HookType {
     PreGeneration,
-    PreToolCall,
     Probe,                            // readiness probe (V1_RUNTIME_SPEC.md §5)
 }
 
@@ -262,13 +258,6 @@ enum RequestPayload {
         context_hints: Option<ContextHints>,
         repository_path: Option<String>, // agent workspace root (TASK-036)
     },
-    ToolOutput {
-        tool_name: String,
-        output_type: OutputType,      // FileRead | SearchResult | ShellOutput | Other
-        content: String,
-        context: Option<String>,      // What the agent was looking for
-        repository_path: Option<String>, // agent workspace root (TASK-036)
-    },
     Probe,                            // readiness probe
 }
 
@@ -277,12 +266,6 @@ enum ResponsePayload {
         original: String,
         rewritten: String,
         context_pack: Option<ContextPack>,
-    },
-    CompressedOutput {
-        original: String,
-        compressed: String,
-        original_tokens: usize,
-        compressed_tokens: usize,
     },
     OriginalPassthrough {
         original: String,
@@ -310,7 +293,7 @@ indexing ──(initial index completes)──► ready ──(auto-reindex star
 | HTTP `GET /health` | `{"state": "indexing", "index_files": N}` | `{"status": "ok", "state": "ready", ...}` |
 | HTTP `GET /metrics` | `knocode_daemon_ready 0` | `knocode_daemon_ready 1` |
 | HTTP `POST /hook` | HTTP `503` `reason: "daemon_indexing"` | processes the request |
-| Daemon MCP `POST /mcp` | `tools/call` -> JSON-RPC error `-32001 daemon_indexing` (HTTP `200`) | `tools/call` processes (`knocode_context` / `knocode_compress`) |
+| Daemon MCP `POST /mcp` | `tools/call` -> JSON-RPC error `-32001 daemon_indexing` (HTTP `200`) | `tools/call` processes `knocode_context` (compression = RTK, external) |
 | UDS `Probe` payload | `Probe { state: "indexing", ... }` | `Probe { state: "ready", ... }` |
 
 Wire example (UDS/MessagePack primary):
@@ -334,7 +317,7 @@ Client guidance:
    auto-reindexes; retry with backoff instead of sending real requests.
 3. HTTP `POST /hook` during indexing returns `503 daemon_indexing` — a retry
    signal, **not** a fail-open passthrough (fail-open still guarantees the agent
-   always gets a `RewrittenMessage`/`CompressedOutput` once ready).
+   always gets a `RewrittenMessage` once ready).
 
 4. **MCP clients** (`POST /mcp`) get the same signal as JSON-RPC: `initialize`/`ping`/`tools/list` answer while indexing, but `tools/call` returns error `-32001 daemon_indexing` (HTTP stays `200`) - a retry signal, never a transport failure.
 
@@ -388,27 +371,10 @@ sequenceDiagram
 
 ### Pre-Tool Request Flow
 
-```mermaid
-sequenceDiagram
-    participant Agent as Coding Agent
-    participant AD as Adapter Layer
-    participant EO as Execution Optimizer
-    participant RTK as RTK Library
-    participant EB as Event Bus
-
-    Agent->>AD: PreToolCall(tool_output)
-    AD->>AD: Validate request
-    AD->>AD: Generate correlation ID
-
-    AD->>EO: compress_output(tool_output)
-    EO->>RTK: compress(content)
-    RTK-->>EO: compressed_content
-
-    EO->>EB: emit(ToolExecuted)
-
-    EO-->>AD: CompressedOutput
-    AD-->>Agent: CompressedOutput
-```
+Tool outputs are **not** compressed by the daemon. Tool-output compression lives
+entirely in RTK (external binary, wired by the installers via `rtk init`). The
+`PreToolCall`/`ToolOutput`/`CompressedOutput` IPC variants were removed —
+see `REMOVED_TOOLS.md`.
 
 ## Shutdown
 
@@ -577,7 +543,6 @@ Structured JSON format:
 | INVALID_REQUEST | Request Error | Request body validation failed |
 | INDEX_NOT_READY | Degraded | Repository not yet indexed |
 | CONTEXT_BUILD_FAILED | Degraded | Context assembly partial failure |
-| RTK_COMPRESSION_FAILED | Degraded | Tool output compression failed, return uncompressed |
 | KNOWLEDGE_RETRIEVAL_FAILED | Degraded | Knowledge search failed, continue without knowledge |
 | DATABASE_ERROR | Fatal | SQLite operations failed |
 | INDEX_ERROR | Fatal | Tantivy operations failed |

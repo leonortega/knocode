@@ -1,7 +1,7 @@
 {
   "name": "opencode-knocode",
   "version": "0.9.11",
-  "description": "Knocode AI Runtime plugin for OpenCode — context enrichment and tool-output compression via daemon",
+  "description": "Knocode AI Runtime plugin for OpenCode (V2 plugin spec) — prompt context enrichment via daemon MCP",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -39,11 +39,10 @@
     "node": ">=18"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "^1.18.0"
+    "@opencode-ai/plugin": "beta"
   },
-  "dependencies": {},
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.22",
+    "@opencode-ai/plugin": "^0.0.0-beta-19157",
     "@types/node": "^22.7.0",
     "rimraf": "^6.0.1",
     "typescript": "^5.9.3",

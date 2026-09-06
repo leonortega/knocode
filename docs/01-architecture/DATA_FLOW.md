@@ -125,55 +125,14 @@ sequenceDiagram
 
 ## Flow 3: Pre-Tool (Tool Output Compression)
 
+> **Removed:** the daemon no longer compresses tool outputs. Compression lives
+> entirely in RTK (external binary, wired by the installers via `rtk init`); the
+> `PreToolCall`/`ToolOutput`/`CompressedOutput` IPC variants were deleted — see
+> `REMOVED_TOOLS.md`.
+
 ### Trigger
 
-- Agent's pre-tool hook fires (e.g., `tool.execute.before`, `PreToolUse`)
-
-### Sequence
-
-```mermaid
-sequenceDiagram
-    participant Agent as Coding Agent
-    participant AD as Adapter Layer
-    participant EO as Execution Optimizer
-    participant RTK as RTK Library
-    participant TC as tiktoken-rs
-    participant EB as Event Bus
-
-    Agent->>AD: PreToolCall(tool_output)
-    AD->>AD: Validate request
-    AD->>AD: Generate correlation ID
-
-    AD->>EO: compress_output(tool_output)
-
-    EO->>TC: count_tokens(raw_output)
-    TC-->>EO: original_token_count
-
-    EO->>EO: detect_output_type(content)
-
-    alt File Read
-        EO->>EO: compress_file_content(content)
-    else Search Result
-        EO->>EO: compress_search_results(content)
-    else Shell Output
-        EO->>EO: compress_shell_output(content)
-    end
-
-    EO->>RTK: compress(compressed_content)
-    RTK-->>EO: optimized_content
-
-    alt RTK succeeded
-        EO->>TC: count_tokens(optimized_content)
-        TC-->>EO: compressed_token_count
-        EO->>EB: emit(ToolExecuted)
-        EO-->>AD: CompressedOutput
-    else RTK failed
-        EO->>EO: tee-on-failure: save full output to log
-        EO-->>AD: OriginalPassthrough
-    end
-
-    AD-->>Agent: CompressedOutput or OriginalPassthrough
-```
+- None (historical). The `PreToolCall` flow was removed from the daemon.
 
 ---
 
@@ -348,14 +307,12 @@ sequenceDiagram
 sequenceDiagram
     participant CE as Context Engine
     participant RI as Repository Intelligence
-    participant EO as Execution Optimizer
     participant EB as Event Bus
     participant CLI as CLI Inspection
     participant MET as Metrics
 
     CE->>EB: emit(ContextBuilt {correlation_id, tokens, ...})
     RI->>EB: emit(RepositoryUpdated {files_indexed, ...})
-    EO->>EB: emit(ToolExecuted {tool_name, ratio, ...})
 
     EB->>CLI: dispatch(event)
     EB->>MET: dispatch(event)

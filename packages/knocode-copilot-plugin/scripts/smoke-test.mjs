@@ -37,10 +37,7 @@ const server = createServer((req, res) => {
     if (req.url === "/health") return res.end(JSON.stringify({ state: "ready" }));
     const r = JSON.parse(body);
     const name = r?.params?.name;
-    const text =
-      name === "knocode_compress"
-        ? "compressed digest"
-        : `context for: ${r?.params?.arguments?.prompt?.slice(0, 40) || "?"}`;
+    const text = `context for: ${r?.params?.arguments?.prompt?.slice(0, 40) || "?"}`;
     res.end(JSON.stringify({ jsonrpc: "2.0", id: r.id, result: { content: [{ type: "text", text }], structuredContent: {}, isError: false } }));
   });
 });
@@ -50,20 +47,17 @@ server.listen(PORT, async () => {
   results.push(await new Promise((ok) =>
     runHook("session-start", { cwd: "C:/repo", session_id: "s", hook_event_name: "SessionStart", source: "new" }, ok)));
   results.push(await new Promise((ok) =>
-    runHook("pre-tool-use", { tool_name: "read_file", tool_input: { filePath: "src/main.ts" }, cwd: "C:/repo" }, ok)));
-  results.push(await new Promise((ok) =>
-    runHook("post-tool-use", { tool_name: "bash", tool_response: "x".repeat(3000) }, ok)));
+    runHook("user-prompt-submit", { prompt: "Where is the checkout flow implemented?", cwd: "C:/repo" }, ok)));
   server.close();
 
   let failed = false;
   results.forEach((r, i) => {
-    const name = ["session-start", "pre-tool-use", "post-tool-use"][i];
+    const name = ["session-start", "user-prompt-submit"][i];
     if (r.code !== 0) { console.error(`FAIL ${name}: exit ${r.code}: ${r.err}`); failed = true; return; }
     let obj;
     try { obj = JSON.parse(r.out); } catch { console.error(`FAIL ${name}: non-JSON out: ${r.out}`); failed = true; return; }
     const ctx = obj?.hookSpecificOutput?.additionalContext;
     if (!ctx) { console.error(`FAIL ${name}: missing additionalContext: ${r.out}`); failed = true; return; }
-    if (name === "post-tool-use" && !ctx.includes("compressed digest")) { console.error(`FAIL ${name}: wrong ctx: ${ctx}`); failed = true; return; }
     console.log(`PASS ${name}: exit=0, ctx=${JSON.stringify(ctx.slice(0, 40))}`);
   });
   process.exit(failed ? 1 : 0);

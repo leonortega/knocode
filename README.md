@@ -275,9 +275,9 @@ The daemon hosts an MCP (Model Context Protocol) surface on the same HTTP listen
 
 - **Methods**: `initialize`, `ping`, `tools/list`, `tools/call` (plus `notifications/initialized` → HTTP `202`). Stateless, tools-only subset — no sampling/prompts/resources, no batches.
 - **`knocode_context(prompt, repository_path?)`** → the enriched context answer for a prompt (text + `provenance` in `structuredContent`). Same engine as the `/hook` rewrite — no message-shape conversion.
-- **`knocode_compress(content, tool_name, output_type?, context?)`** → compressed tool output (token counts in `structuredContent`).
+  *(Tool-output compression is not an MCP tool: RTK (github.com/rtk-ai/rtk) owns that layer — the knocode installer wires RTK's own integrations on request.)*
 - **Readiness**: `tools/list`/`initialize`/`ping` always answer; `tools/call` while indexing returns JSON-RPC error `-32001 daemon_indexing` (HTTP stays `200`) — parity with the `/hook` 503 gate, so clients retry instead of queueing on the engine lock.
-- **Clients**: the OpenCode plugin drives both hooks through these tools (`chat.message` → `knocode_context`, `tool.execute.before` → `knocode_compress`). Daemons that predate `/mcp` are still served via the automatic `/hook` fallback.
+- **Clients**: the OpenCode plugin drives prompt enrichment through `knocode_context` (`chat.message`). Daemons that predate `/mcp` are still served via the automatic `/hook` fallback.
 
 ### `knocode preview <prompt>`
 

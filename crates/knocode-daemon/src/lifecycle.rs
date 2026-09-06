@@ -23,7 +23,6 @@ pub struct DaemonState {
     /// Auto-reindex watcher — owned by the state so graceful shutdown can call
     /// `stop()` and end its poll loops instead of letting them run until process exit.
     pub watcher: RepoWatcher,
-    pub optimizer: knocode_optimizer::ExecutionOptimizer,
     pub shutdown_flag: Arc<AtomicBool>,
     pub force_shutdown_flag: Arc<AtomicBool>,
 }
@@ -92,17 +91,11 @@ impl DaemonState {
             context_config,
         );
 
-        // Initialize optimizer
-        let optimizer = knocode_optimizer::ExecutionOptimizer::new(
-            knocode_optimizer::OptimizerConfig::default(),
-        );
-
         Ok(Self {
             config,
             event_bus,
             context_engine: Arc::new(tokio::sync::Mutex::new(context_engine)),
             watcher,
-            optimizer,
             shutdown_flag,
             force_shutdown_flag,
         })
@@ -126,7 +119,6 @@ impl DaemonState {
         // until the index completes instead of queueing on the engine lock.
         let http_state = crate::http_server::HttpServerState {
             context_engine: self.context_engine.clone(),
-            optimizer: std::sync::Arc::new(self.optimizer.clone()),
         };
         let http_port = 9527;
         let http_handle = tokio::spawn(async move {

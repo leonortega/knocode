@@ -238,82 +238,58 @@ fn dirs_home() -> Option<PathBuf> {
     { std::env::var("HOME").ok().map(PathBuf::from) }
 }
 
-/// Print the KNOCODE logo with a pulse/glow animation.
-/// Uses ANSI escape codes for color — only called when stdout is a TTY.
-fn animate_logo() {
-    let logo = [
-        r"    _  __     __  _____  __        ",
-        r"   / |/ /__  / / / / _ \/ /___ ___",
-        r"  /    / _ \/ /_/ / // / __/ _ `(_-<",
-        r" /_/|_/\___/\____/____/\__/\_,_/___/",
-    ];
-    let subtitle = "         AI Runtime";
+/// Run indexing with a live done/total file counter so long index runs don't look frozen.
+///
+/// - TTY: single line redrawn in place — `N/M files — phase` (total shown once known).
+/// - Piped output: periodic `… N/M files (phase)` lines every 5000 files.
+/// - On completion: clears the counter line and prints a `✓` summary line.
+fn run_index_with_progress(
+    repo_intel: &mut knocode_repo_intel::RepositoryIntelligence,
+) -> Result<knocode_repo_intel::IndexStats, String> {
+    let is_tty = std::io::stdout().is_terminal();
 
-    // ANSI color codes
-    let dim_cyan    = "\x1b[2;36m";   // dim cyan
-    let bright_cyan = "\x1b[1;96m";   // bright cyan (bold)
-    let _dim_green   = "\x1b[2;32m";   // dim green
-    let bright_green= "\x1b[1;92m";   // bright green (bold)
-    let dim_white   = "\x1b[2;37m";   // dim white
-    let bright_white= "\x1b[1;97m";   // bright white (bold)
-    let reset       = "\x1b[0m";
-
-    let mut stdout = std::io::stdout();
-
-    // Phase 1: Draw logo dim
-    for line in &logo {
-        let _ = write!(stdout, "{}{}{}", dim_cyan, line, reset);
-        let _ = writeln!(stdout);
-    }
-    let _ = writeln!(stdout, "{}{}{}", dim_white, subtitle, reset);
-    let _ = stdout.flush();
-    std::thread::sleep(std::time::Duration::from_millis(150));
-
-    // Phase 2: Pulse — brighten each line sequentially
-    for (i, line) in logo.iter().enumerate() {
-        // Move cursor up to overwrite
-        if i > 0 || true {
-            let _ = write!(stdout, "\x1b[{}A", 1); // up 1 line
+    let progress_cb = move |done: usize, total: usize, phase: &str| {
+        if is_tty {
+            let mut stdout = std::io::stdout();
+            if total > 0 {
+                let _ = write!(stdout, "\r      {}/{} files — {}\x1b[K", done, total, phase);
+            } else {
+                let _ = write!(stdout, "\r      {} files — {}\x1b[K", done, phase);
+            }
+            let _ = stdout.flush();
+        } else if done > 0 && done % 5000 == 0 {
+            if total > 0 {
+                println!("      … {}/{} files ({})", done, total, phase);
+            } else {
+                println!("      … {} files ({})", done, phase);
+            }
         }
-        let _ = write!(stdout, "\r{}{}{}", bright_cyan, line, reset);
-        let _ = stdout.flush();
-        std::thread::sleep(std::time::Duration::from_millis(80));
-    }
-    // Pulse subtitle
-    let _ = write!(stdout, "\x1b[1A\r{}{}{}", bright_white, subtitle, reset);
-    let _ = writeln!(stdout);
-    let _ = stdout.flush();
-    std::thread::sleep(std::time::Duration::from_millis(120));
+    };
 
-    // Phase 3: Glow — full bright flash then settle
-    for _ in &logo {
-        let _ = write!(stdout, "\x1b[{}A", 1);
-    }
-    for line in logo.iter() {
-        let _ = write!(stdout, "\r{}{}{}", bright_green, line, reset);
-        let _ = writeln!(stdout);
-    }
-    let _ = write!(stdout, "\r{}{}{}", bright_green, subtitle, reset);
-    let _ = writeln!(stdout);
-    let _ = stdout.flush();
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    let started = Instant::now();
+    let result = repo_intel.index_repository_with_progress(Some(&progress_cb));
 
-    // Phase 4: Settle — final state with clean colors
-    for _ in &logo {
-        let _ = write!(stdout, "\x1b[{}A", 1);
+    // Erase the in-place counter line before printing the summary
+    if is_tty {
+        print!("\r\x1b[2K");
+        let _ = std::io::stdout().flush();
     }
-    for (i, line) in logo.iter().enumerate() {
-        let color = if i < 2 { bright_cyan } else { bright_green };
-        let _ = write!(stdout, "\r{}{}{}", color, line, reset);
-        let _ = writeln!(stdout);
+
+    match result {
+        Ok(stats) => {
+            println!(
+                "      ✓ indexed {} files ({} symbols) in {}ms",
+                stats.files_indexed,
+                stats.symbols_extracted,
+                started.elapsed().as_millis()
+            );
+            Ok(stats)
+        }
+        Err(e) => Err(e),
     }
-    let _ = write!(stdout, "\r{}   {}{}", bright_white, subtitle, reset);
-    let _ = writeln!(stdout);
-    let _ = writeln!(stdout);
-    let _ = stdout.flush();
 }
 
-fn cmd_init(wizard: bool, no_anim: bool) -> Result<(), String> {
+fn cmd_init(wizard: bool, _no_anim: bool) -> Result<(), String> {
     if wizard {
         println!("(wizard mode is non-interactive — defaults applied, edit .knocode/config.toml afterwards)");
         println!();
@@ -326,16 +302,10 @@ fn cmd_init(wizard: bool, no_anim: bool) -> Result<(), String> {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "repository".to_string());
 
-    // ── Logo animation ─────────────────────────────────────────────
-    let use_color = std::io::stdout().is_terminal();
-    if !no_anim && use_color {
-        animate_logo();
-    } else {
-        println!("knocode v{}", env!("CARGO_PKG_VERSION"));
-    }
-
-    println!("Bootstrap — {}", project_name);
+    // ── Header (static — animation removed, progress lives in step 5) ──
+    println!("knocode v{}", env!("CARGO_PKG_VERSION"));
     println!("═══════════════════════════════════════");
+    println!("Bootstrap — {}", project_name);
 
     // ── Step 1: Scaffold ─────────────────────────────────────────────
     println!("[1/7] Scaffold (.knocode/, config, database)");
@@ -433,9 +403,7 @@ fn cmd_init(wizard: bool, no_anim: bool) -> Result<(), String> {
         db,
         event_bus.clone(),
     );
-    let stats = repo_intel
-        .index_repository()
-        .map_err(|e| format!("Indexing failed: {}", e))?;
+    let stats = run_index_with_progress(&mut repo_intel)?;
     // Phase3: defer graph on large repos (second walk over 63k) — lazy on first query
     let dep_edges = if stats.files_indexed > 5000 && std::env::var("KNOCODE_BUILD_GRAPH").ok().as_deref() != Some("1") {
         println!("      Graph: deferred (lazy on first query, set KNOCODE_BUILD_GRAPH=1 to force during init)");
@@ -939,8 +907,7 @@ fn cmd_index(watch: bool, watch_mode: Option<&str>) -> Result<(), String> {
     );
     
     // Run indexing (wires tantivy BM25 in-process, incremental via hash, see repo-intel lib)
-    let stats = repo_intel.index_repository()
-        .map_err(|e| format!("Indexing failed: {}", e))?;
+    let stats = run_index_with_progress(&mut repo_intel)?;
     
     println!();
     println!("✓ Indexing complete!");

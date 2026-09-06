@@ -45,8 +45,8 @@ in Copilot Chat type `@knocode` followed by your prompt.
 
 The daemon client in `src/daemon.ts` reuses the exact wire contract of the OpenCode
 plugin (MCP over `POST /mcp`, `GET /health` readiness gate). Any change to the daemon
-tool surface (`knocode_context` / `knocode_compress`) is picked up automatically — the
-extension never reimplements retrieval or compression.
+tool surface (`knocode_context`) is picked up automatically — the
+extension never reimplements retrieval.
 
 ## Configuration
 

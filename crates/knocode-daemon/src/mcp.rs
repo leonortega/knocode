@@ -21,9 +21,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use crate::http_server::{
-    handle_pre_generation, handle_pre_tool_call, HttpResponsePayload, HttpServerState,
-};
+use crate::http_server::{handle_pre_generation, HttpResponsePayload, HttpServerState};
 
 /// MCP protocol version we implement (2024-11-05 — the stable tools-only revision).
 const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -97,24 +95,6 @@ fn tools_list() -> Value {
                     }
                 },
                 "required": ["prompt"]
-            }
-        },
-        {
-            "name": "knocode_compress",
-            "description": "Compress a large tool output (read/grep/bash) before it is fed back to the model.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "content": { "type": "string", "description": "The raw tool output to compress." },
-                    "tool_name": { "type": "string", "description": "e.g. read, grep, bash, exec." },
-                    "output_type": {
-                        "type": "string",
-                        "description": "FileRead | SearchResult | ShellOutput | Other",
-                        "enum": ["FileRead", "SearchResult", "ShellOutput", "Other"]
-                    },
-                    "context": { "type": "string", "description": "Optional surrounding context." }
-                },
-                "required": ["content", "tool_name"]
             }
         }
     ])
@@ -202,7 +182,6 @@ async fn handle_tools_call(
 
     match name {
         "knocode_context" => tool_context(state, id, args).await,
-        "knocode_compress" => tool_compress(state, id, args),
         other => error_response(id, -32602, &format!("Unknown tool: {other}"), StatusCode::OK),
     }
 }
@@ -334,68 +313,6 @@ async fn tool_context(
     }
 }
 
-/// `knocode_compress` — the same optimizer pass `/hook` ToolOutput runs.
-fn tool_compress(state: HttpServerState, id: Option<Value>, args: Value) -> (StatusCode, Json<Value>) {
-    let content = match args.get("content").and_then(|v| v.as_str()) {
-        Some(c) => c,
-        _ => return error_response(id, -32602, "invalid params: \"content\" (string) is required", StatusCode::OK),
-    };
-    let tool_name = match args.get("tool_name").and_then(|v| v.as_str()) {
-        Some(t) => t,
-        _ => return error_response(id, -32602, "invalid params: \"tool_name\" (string) is required", StatusCode::OK),
-    };
-    let output_type = match args.get("output_type").and_then(|v| v.as_str()) {
-        Some("FileRead") => knocode_core::OutputType::FileRead,
-        Some("SearchResult") => knocode_core::OutputType::SearchResult,
-        Some("ShellOutput") => knocode_core::OutputType::ShellOutput,
-        _ => knocode_core::OutputType::Other,
-    };
-    let context = args.get("context").and_then(|v| v.as_str()).map(|s| s.to_string());
-
-    match handle_pre_tool_call(
-        tool_name.to_string(),
-        output_type,
-        content.to_string(),
-        context,
-        &state.optimizer,
-    ) {
-        Ok(HttpResponsePayload::CompressedOutput { compressed, original_tokens, compressed_tokens, .. }) => {
-            tracing::info!(tool = %tool_name, original_tokens = %original_tokens, compressed_tokens = %compressed_tokens, "MCP knocode_compress done");
-            result_response(
-                id,
-                tool_result(
-                    compressed,
-                    json!({
-                        "type": "compress",
-                        "original_tokens": original_tokens,
-                        "compressed_tokens": compressed_tokens,
-                    }),
-                    false,
-                ),
-            )
-        }
-        Ok(_) => result_response(
-            id,
-            tool_result(
-                "internal: unexpected payload".to_string(),
-                json!({ "type": "compress", "original_tokens": 0, "compressed_tokens": 0 }),
-                true,
-            ),
-        ),
-        Err(e) => {
-            crate::metrics::global().inc_fail_open();
-            result_response(
-                id,
-                tool_result(
-                    format!("knocode compress failed: {e}"),
-                    json!({ "type": "compress", "original_tokens": 0, "compressed_tokens": 0 }),
-                    true,
-                ),
-            )
-        }
-    }
-}
-
 // ── Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -406,12 +323,11 @@ mod tests {
     use knocode_context::{ContextConfig, ContextEngine};
     use knocode_events::EventBus;
     use knocode_knowledge::KnowledgeHub;
-    use knocode_optimizer::ExecutionOptimizer;
     use knocode_repo_intel::RepositoryIntelligence;
     use knocode_storage::Database;
 
     /// Minimal engine over an empty dir — enough to satisfy HttpServerState for the
-    /// compress + envelope tests (context calls are covered by the seeded e2e).
+    /// envelope tests (context calls are covered by the seeded e2e).
     fn empty_state() -> HttpServerState {
         let dir = std::env::temp_dir().join(format!("knocode_mcp_ut_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -430,12 +346,7 @@ mod tests {
         );
         HttpServerState {
             context_engine: Arc::new(tokio::sync::Mutex::new(engine)),
-            optimizer: Arc::new(ExecutionOptimizer::new(knocode_optimizer::OptimizerConfig::default())),
         }
-    }
-
-    fn result_of(resp: &Json<Value>) -> Value {
-        resp.0["result"].clone()
     }
 
     #[tokio::test]
@@ -460,7 +371,9 @@ mod tests {
         let tools = resp.0["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"knocode_context"));
-        assert!(names.contains(&"knocode_compress"));
+        // Compression removed from the MCP surface: RTK (github.com/rtk-ai/rtk) owns
+        // tool-output compression — the daemon is context-only.
+        assert!(!names.contains(&"knocode_compress"));
     }
 
     #[tokio::test]
@@ -531,32 +444,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_compress_tool_ok() {
-        // Compression is NOT readiness-gated (only context builds touch the engine).
+    async fn test_removed_compress_tool_answers_unknown() {
+        // knocode_compress was removed from the MCP surface (RTK owns compression).
+        // Calling it must answer the standard unknown-tool error, not panic.
         let state = empty_state();
-        let content: String = (0..200)
-            .map(|i| format!("2026-08-25T10:00:{:02} INFO request {} handled ok", i % 60, i))
-            .collect::<Vec<_>>()
-            .join("\n");
         let (status, resp) = handle_mcp(
             State(state),
-            format!(
-                r#"{{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{{"name":"knocode_compress","arguments":{{"content":{}, "tool_name":"bash", "output_type":"ShellOutput"}}}}}}"#,
-                serde_json::to_string(&content).unwrap()
-            ),
+            r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"knocode_compress","arguments":{"content":"x","tool_name":"bash"}}}"#.to_string(),
         )
         .await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(resp.0["error"], Value::Null);
-        let r = result_of(&resp);
-        assert_eq!(r["isError"], false);
-        assert_eq!(r["structuredContent"]["type"], "compress");
-        let orig = r["structuredContent"]["original_tokens"].as_u64().unwrap();
-        assert!(orig > 0, "original tokens must be > 0: {r}");
-        let text = r["content"][0]["text"].as_str().unwrap();
-        assert!(!text.is_empty());
-        // The content is highly repetitive — compression must actually shrink it.
-        assert!(text.len() < content.len(), "repetitive output should compress: {r}");
+        assert_eq!(resp.0["error"]["code"], -32602);
     }
 
     #[tokio::test]

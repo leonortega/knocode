@@ -2,7 +2,7 @@
  * Knocode daemon client for the `@knocode` Copilot chat participant.
  *
  * Reuses the exact wire contract of `packages/opencode-knocode`: MCP over
- * `POST /mcp` (`knocode_context`, `knocode_compress`) with a `GET /health`
+ * `POST /mcp` (`knocode_context`; compression lives in RTK) with a `GET /health`
  * readiness gate. Fail-open: any error, timeout, indexing-in-progress, or
  * zero-hit returns `null` so the participant always runs with the bare prompt.
  */

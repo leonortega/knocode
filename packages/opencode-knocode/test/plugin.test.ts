@@ -1,42 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
-  getOutputType,
   getDaemonUrl,
   getTimeoutMs,
   getReadyTimeoutMs,
   waitForDaemonReady,
-  callKnocodeDaemon,
   mcpCall,
   requestContextEnrichment,
-  requestOutputCompression,
+  resolveRepositoryPath,
   DEFAULT_DAEMON_URL,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_READY_TIMEOUT_MS,
 } from "../src/index";
-
-describe("getOutputType", () => {
-  it("maps read variants to FileRead", () => {
-    expect(getOutputType("read")).toBe("FileRead");
-    expect(getOutputType("READ")).toBe("FileRead");
-    expect(getOutputType("readfile")).toBe("FileRead");
-  });
-
-  it("maps search variants", () => {
-    expect(getOutputType("grep")).toBe("SearchResult");
-    expect(getOutputType("search")).toBe("SearchResult");
-  });
-
-  it("maps shell variants", () => {
-    expect(getOutputType("bash")).toBe("ShellOutput");
-    expect(getOutputType("shell")).toBe("ShellOutput");
-    expect(getOutputType("exec")).toBe("ShellOutput");
-  });
-
-  it("defaults to Other", () => {
-    expect(getOutputType("unknown_tool")).toBe("Other");
-    expect(getOutputType("mytool")).toBe("Other");
-  });
-});
 
 describe("getDaemonUrl / getTimeoutMs", () => {
   const origEnv = { ...process.env };
@@ -184,95 +158,268 @@ describe("getReadyTimeoutMs", () => {
   });
 });
 
-describe("callKnocodeDaemon", () => {
+describe("requestContextEnrichment argument wiring", () => {
   beforeEach(() => vi.restoreAllMocks());
 
-  it("returns parsed json on success", async () => {
+  it("sends prompt + repository_path to knocode_context, no session id needed", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
+      status: 200,
       json: async () => ({
-        correlation_id: "req_123",
-        hook_type: "PreGeneration",
-        payload: { type: "RewrittenMessage", rewritten: "hello enriched" },
-        latency_ms: 42,
+        jsonrpc: "2.0",
+        id: 1,
+        result: { content: [{ type: "text", text: "enriched" }], structuredContent: { passthrough: false } },
       }),
     } as any);
 
-    const res = await callKnocodeDaemon(
-      { hook_type: "PreGeneration", payload: { type: "MessageRewrite", message: "hello" } },
-      { url: "http://127.0.0.1:9527", timeoutMs: 1000, fetchImpl: mockFetch as any },
-    );
+    const enriched = await requestContextEnrichment("implement auth", "/repo", {
+      url: "http://127.0.0.1:9527",
+      timeoutMs: 1000,
+      fetchImpl: mockFetch as any,
+    });
 
-    expect(mockFetch).toHaveBeenCalledWith(
-      "http://127.0.0.1:9527/hook",
-      expect.objectContaining({ method: "POST" }),
-    );
-    expect(res?.payload.rewritten).toBe("hello enriched");
-  });
-
-  it("returns null on non-ok response", async () => {
-    // Failure is the expected scenario — silence the plugin's operational console.error
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 500 } as any);
-    const res = await callKnocodeDaemon(
-      { hook_type: "PreGeneration", payload: { type: "MessageRewrite", message: "hi" } },
-      { fetchImpl: mockFetch as any },
-    );
-    expect(res).toBeNull();
-    expect(errSpy).toHaveBeenCalled(); // fail-open logging still exercised
-    errSpy.mockRestore();
-  });
-
-  it("returns null on fetch throw (fail-open)", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const mockFetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
-    const res = await callKnocodeDaemon(
-      { hook_type: "PreGeneration", payload: { type: "MessageRewrite", message: "hi" } },
-      { fetchImpl: mockFetch as any },
-    );
-    expect(res).toBeNull();
-    errSpy.mockRestore();
-  });
-
-  it("sends correct body for tool compression", async () => {
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({
-        correlation_id: "r2",
-        hook_type: "PreToolCall",
-        payload: { type: "CompressedOutput", compressed: "compressed..." },
-        latency_ms: 10,
-      }),
-    } as any);
-
-    await callKnocodeDaemon(
-      {
-        hook_type: "PreToolCall",
-        payload: { type: "ToolOutput", tool_name: "read", output_type: "FileRead", content: "big content" },
-      },
-      { fetchImpl: mockFetch as any },
-    );
-
+    expect(enriched?.enrichedText).toBe("enriched");
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-    expect(body.payload.tool_name).toBe("read");
-    expect(body.payload.output_type).toBe("FileRead");
+    expect(body.params.name).toBe("knocode_context");
+    expect(body.params.arguments.prompt).toBe("implement auth");
+    expect(body.params.arguments.repository_path).toBe("/repo");
   });
 });
 
-describe("KnocodePlugin", () => {
-  it("exposes expected hooks", async () => {
-    const { KnocodePlugin } = await import("../src/index");
-    const hooks = await KnocodePlugin({
-      project: {},
-      client: { app: { log: async () => {} } },
-      $: null as any,
-      directory: "/tmp",
-      worktree: "/tmp",
-    } as any);
+describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
+  beforeEach(() => vi.restoreAllMocks());
+  afterEach(() => vi.unstubAllGlobals());
 
-    expect(hooks).toHaveProperty("chat.message");
-    expect(hooks).toHaveProperty("message.updated");
-    expect(hooks).toHaveProperty("tool.execute.before");
+  /** Boot the plugin and capture the registered prompt-hook callback. */
+  async function makePromptHook(): Promise<{ hook: (event: any) => Promise<void> }> {
+    const { KnocodePlugin } = await import("../src/index");
+    const hooks: Array<(event: any) => Promise<void>> = [];
+    await KnocodePlugin.setup({
+      location: { directory: "/tmp", project: { canonical: "/repo/canonical" } },
+      session: {
+        hook: async (_name: string, cb: any) => {
+          hooks.push(cb);
+          return { dispose: async () => {} };
+        },
+      },
+    } as any);
+    expect(hooks.length).toBe(1);
+    return { hook: hooks[0] };
+  }
+
+  /**
+   * Stub global fetch for the full plugin lifecycle:
+   *  - `/health` → ready (readiness gate)
+   *  - `/mcp` initialize/notifications (setup handshake) → generic ok
+   *  - `/mcp` tools/call (in-hook enrichment) → the given JSON-RPC result
+   */
+  function stubDaemonFetch(mcpResult: any) {
+    return vi.fn().mockImplementation(async (url: any, init?: any) => {
+      if (String(url).includes("/health")) {
+        return { ok: true, status: 200, json: async () => ({ status: "ok", state: "ready" }) };
+      }
+      const method = JSON.parse(init?.body ?? "{}").method;
+      if (method === "initialize" || method === "notifications/initialized") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ jsonrpc: "2.0", id: 1, result: { serverInfo: { version: "0.0.0" } } }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ jsonrpc: "2.0", id: 1, result: mcpResult }),
+      };
+    });
+  }
+
+  it("registers the session.prompt hook during setup", async () => {
+    vi.stubGlobal("fetch", stubDaemonFetch({ content: [] }));
+    const { hook } = await makePromptHook();
+    expect(typeof hook).toBe("function");
+  });
+
+  it("mutates event.prompt.text with the daemon context (canonical persisted input)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      stubDaemonFetch({
+        content: [{ type: "text", text: "implement auth\n\n<knocode_context>\nctx\n</knocode_context>" }],
+        structuredContent: { type: "context", passthrough: false },
+        isError: false,
+      }),
+    );
+    const { hook } = await makePromptHook();
+
+    const event: any = { sessionID: "s1", prompt: { text: "implement auth" } };
+    await hook(event);
+
+    expect(event.prompt.text).toContain("<knocode_context>");
+    expect(event.prompt.text.startsWith("implement auth")).toBe(true);
+  });
+
+  it("sends the canonical project root as repository_path (TASK-036)", async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: any, init?: any) => {
+      if (String(url).includes("/health")) {
+        return { ok: true, status: 200, json: async () => ({ status: "ok", state: "ready" }) };
+      }
+      const method = JSON.parse(init?.body ?? "{}").method;
+      if (method === "initialize" || method === "notifications/initialized") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ jsonrpc: "2.0", id: 1, result: { serverInfo: { version: "0.0.0" } } }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { content: [{ type: "text", text: "x" }], structuredContent: { passthrough: true } },
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { hook } = await makePromptHook();
+
+    await hook({ sessionID: "s1", prompt: { text: "hello" } });
+
+    const toolsCall = fetchMock.mock.calls.find((c: any[]) => {
+      try {
+        return String(c[0]).includes("/mcp") && JSON.parse(c[1]?.body ?? "{}").method === "tools/call";
+      } catch {
+        return false;
+      }
+    });
+    const body = JSON.parse(toolsCall![1].body);
+    expect(body.params.arguments.repository_path).toBe("/repo/canonical");
+  });
+
+  it("passes through untouched on daemon passthrough (no_context_hits)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      stubDaemonFetch({
+        content: [{ type: "text", text: "ctx" }],
+        structuredContent: { passthrough: true, reason: "no_context_hits" },
+        isError: false,
+      }),
+    );
+    const { hook } = await makePromptHook();
+
+    const event: any = { sessionID: "s1", prompt: { text: "unrelated prompt" } };
+    await hook(event);
+
+    expect(event.prompt.text).toBe("unrelated prompt");
+  });
+
+  it("is idempotent: does not re-enrich a draft that already has context", async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: any, init?: any) => {
+      if (String(url).includes("/health")) {
+        return { ok: true, status: 200, json: async () => ({ status: "ok", state: "ready" }) };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "ctx" }] } }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { hook } = await makePromptHook();
+
+    const event: any = {
+      sessionID: "s1",
+      prompt: { text: "implement auth\n\n<knocode_context>\nctx\n</knocode_context>" },
+    };
+    await hook(event);
+
+    expect(event.prompt.text).toBe("implement auth\n\n<knocode_context>\nctx\n</knocode_context>");
+    const toolsCalls = fetchMock.mock.calls.filter((c: any[]) => {
+      try {
+        return String(c[0]).includes("/mcp") && JSON.parse(c[1]?.body ?? "{}").method === "tools/call";
+      } catch {
+        return false;
+      }
+    });
+    expect(toolsCalls).toHaveLength(0);
+  });
+
+  it("stale attachment mention offsets are cleared when the rewrite breaks the prefix", async () => {
+    vi.stubGlobal(
+      "fetch",
+      stubDaemonFetch({
+        content: [{ type: "text", text: "totally rewritten" }],
+        structuredContent: { passthrough: false },
+        isError: false,
+      }),
+    );
+    const { hook } = await makePromptHook();
+
+    const file: any = { uri: "file:///repo/a.ts", mention: { start: 0, end: 4, text: "auth" } };
+    const event: any = { sessionID: "s1", prompt: { text: "look at auth", files: [file] } };
+    await hook(event);
+
+    expect(event.prompt.files[0].mention).toBeUndefined();
+  });
+
+  it("preserves attachment mentions when the rewrite keeps the original text as prefix", async () => {
+    vi.stubGlobal(
+      "fetch",
+      stubDaemonFetch({
+        content: [{ type: "text", text: "look at auth\n\n<knocode_context>\nctx\n</knocode_context>" }],
+        structuredContent: { passthrough: false },
+        isError: false,
+      }),
+    );
+    const { hook } = await makePromptHook();
+
+    const mention = { start: 8, end: 12, text: "auth" };
+    const event: any = {
+      sessionID: "s1",
+      prompt: { text: "look at auth", files: [{ uri: "file:///repo/a.ts", mention: { ...mention } }] },
+    };
+    await hook(event);
+
+    expect(event.prompt.files[0].mention).toEqual(mention);
+  });
+
+  it("skips empty/whitespace prompts without calling the daemon", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { hook } = await makePromptHook();
+    fetchMock.mockClear(); // setup's fire-and-forget MCP initialize may have raced ahead
+
+    const event: any = { sessionID: "s1", prompt: { text: "   " } };
+    await hook(event);
+
+    expect(event.prompt.text).toBe("   ");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fails open when the daemon is unreachable", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
+    const { hook } = await makePromptHook();
+
+    const event: any = { sessionID: "s1", prompt: { text: "implement auth" } };
+    await hook(event);
+
+    expect(event.prompt.text).toBe("implement auth");
+    errSpy.mockRestore();
+  });
+});
+
+describe("resolveRepositoryPath (V2 ctx.location precedence)", () => {
+  it("prefers project.canonical", () => {
+    expect(
+      resolveRepositoryPath({ location: { directory: "/a", project: { canonical: "/b", directory: "/c" } } }),
+    ).toBe("/b");
+  });
+
+  it("falls back to location.directory, then cwd", () => {
+    expect(resolveRepositoryPath({ location: { directory: "/a" } })).toBe("/a");
+    expect(resolveRepositoryPath({})).toBe(process.cwd());
   });
 });
 
@@ -326,7 +473,7 @@ describe("mcpCall (JSON-RPC over POST /mcp)", () => {
   });
 });
 
-describe("requestContextEnrichment (MCP knocode_context + /hook fallback)", () => {
+describe("requestContextEnrichment (MCP knocode_context)", () => {
   beforeEach(() => vi.restoreAllMocks());
 
   const mcpToolResult = (text: string, structured: any = {}, isError = false) =>
@@ -340,121 +487,76 @@ describe("requestContextEnrichment (MCP knocode_context + /hook fallback)", () =
       }),
     } as any);
 
-  it("returns the enriched text from knocode_context", async () => {
+  it("returns enriched text + pack metadata (tokens/files) from knocode_context", async () => {
     const mockFetch = vi.fn().mockImplementation(async () =>
-      mcpToolResult("implement auth\n\n---\n\nContext:\ncode_context: auth", { type: "context", passthrough: false }),
+      mcpToolResult(
+        "implement auth\n\n---\n\nContext:\ncode_context: auth",
+        {
+          type: "context",
+          passthrough: false,
+          total_tokens: 2140,
+          provenance: [
+            { path: "src/a.rs", score: 0.9 },
+            { path: "src/b.rs", score: 0.8 },
+          ],
+        },
+      ),
     );
-    const enriched = await requestContextEnrichment("implement auth", "/repo", "sess", {
+    const result = await requestContextEnrichment("implement auth", "/repo", {
       url: "http://127.0.0.1:9527",
       timeoutMs: 1000,
       fetchImpl: mockFetch as any,
     });
-    expect(enriched).toContain("Context:");
+    expect(result?.enrichedText).toContain("Context:");
+    expect(result?.tokens).toBe(2140);
+    expect(result?.files).toBe(2);
     const [, init] = mockFetch.mock.calls[0];
     const body = JSON.parse(init.body);
     expect(body.params.name).toBe("knocode_context");
     expect(body.params.arguments.repository_path).toBe("/repo");
   });
 
+  it("defaults tokens/files to 0 when structuredContent metadata is absent", async () => {
+    const mockFetch = vi.fn().mockImplementation(async () => mcpToolResult("ctx text"));
+    const result = await requestContextEnrichment("hi", "/repo", { fetchImpl: mockFetch as any });
+    expect(result?.enrichedText).toBe("ctx text");
+    expect(result?.tokens).toBe(0);
+    expect(result?.files).toBe(0);
+  });
+
   it("returns null on daemon passthrough (zero context hits)", async () => {
     const mockFetch = vi.fn().mockImplementation(async () =>
       mcpToolResult("unrelated", { type: "context", passthrough: true, reason: "no_context_hits" }),
     );
-    const enriched = await requestContextEnrichment("unrelated", "/repo", undefined, {
+    const enriched = await requestContextEnrichment("unrelated", "/repo", {
       fetchImpl: mockFetch as any,
     });
     expect(enriched).toBeNull();
-    expect(mockFetch).toHaveBeenCalledTimes(1); // no /hook fallback on MCP passthrough
+    expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("returns null on -32001 indexing error and does NOT fall back to /hook", async () => {
+  it("returns null on -32001 indexing error", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
       json: async () => ({ jsonrpc: "2.0", id: 1, error: { code: -32001, message: "daemon_indexing" } }),
     } as any);
-    const enriched = await requestContextEnrichment("hi", "/repo", undefined, { fetchImpl: mockFetch as any });
+    const enriched = await requestContextEnrichment("hi", "/repo", { fetchImpl: mockFetch as any });
     expect(enriched).toBeNull();
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("falls back to the /hook rewrite on a legacy daemon (404 /mcp)", async () => {
+  it("returns null on a daemon without /mcp (404)", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const mockFetch = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false, status: 404 } as any)
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          correlation_id: "r",
-          hook_type: "PreGeneration",
-          payload: { type: "RewrittenMessage", rewritten: "legacy enriched auth" },
-          latency_ms: 5,
-        }),
-      } as any);
-    const enriched = await requestContextEnrichment("implement auth", "/repo", "sess", {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 404 } as any);
+    const enriched = await requestContextEnrichment("implement auth", "/repo", {
       fetchImpl: mockFetch as any,
     });
-    expect(enriched).toBe("legacy enriched auth");
-    expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(mockFetch.mock.calls[1][0]).toContain("/hook");
+    expect(enriched).toBeNull();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
     errSpy.mockRestore();
   });
 });
 
-describe("requestOutputCompression (MCP knocode_compress + /hook fallback)", () => {
-  beforeEach(() => vi.restoreAllMocks());
-
-  it("returns compressed text + token counts via MCP", async () => {
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        jsonrpc: "2.0",
-        id: 1,
-        result: {
-          content: [{ type: "text", text: "compressed..." }],
-          structuredContent: { type: "compress", original_tokens: 1200, compressed_tokens: 200 },
-          isError: false,
-        },
-      }),
-    } as any);
-    const res = await requestOutputCompression("a".repeat(5000), "bash", "/repo", {
-      fetchImpl: mockFetch as any,
-    });
-    expect(res?.compressed).toBe("compressed...");
-    expect(res?.originalTokens).toBe(1200);
-    const [, init] = mockFetch.mock.calls[0];
-    const body = JSON.parse(init.body);
-    expect(body.params.name).toBe("knocode_compress");
-    expect(body.params.arguments.output_type).toBe("ShellOutput");
-  });
-
-  it("falls back to the /hook ToolOutput contract on legacy daemons", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const mockFetch = vi
-      .fn()
-      .mockResolvedValueOnce({ ok: false, status: 404 } as any)
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          correlation_id: "r2",
-          hook_type: "PreToolCall",
-          payload: { type: "CompressedOutput", original: "x", compressed: "legacy compressed", original_tokens: 100, compressed_tokens: 30 },
-          latency_ms: 3,
-        }),
-      } as any);
-    const res = await requestOutputCompression("x", "read", "/repo", { fetchImpl: mockFetch as any });
-    expect(res?.compressed).toBe("legacy compressed");
-    expect(mockFetch.mock.calls[1][0]).toContain("/hook");
-    errSpy.mockRestore();
-  });
-
-  it("returns null when unreachable (fail-open)", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const mockFetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
-    const res = await requestOutputCompression("x", "bash", "/repo", { fetchImpl: mockFetch as any });
-    expect(res).toBeNull();
-    errSpy.mockRestore();
-  });
-});
+// requestOutputCompression describe block removed: the plugin no longer compresses —
+// RTK (github.com/rtk-ai/rtk) owns the tool-output/command-rewrite layer.

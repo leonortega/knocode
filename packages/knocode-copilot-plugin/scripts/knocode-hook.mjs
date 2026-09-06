@@ -7,14 +7,19 @@
  * — the exact shape VS Code expects. It never prints anything else to stdout.
  *
  * Events (passed as argv[2], also read from hook_event_name):
- *   session-start   -> inject repository context via knocode_context  (additionalContext)
- *   pre-tool-use    -> enrich context for read/search tools via knocode_context
- *   post-tool-use   -> compress large tool outputs via knocode_compress and inject the digest
+ *   session-start        -> inject repository context via knocode_context  (additionalContext)
+ *   user-prompt-submit   -> enrich the user's prompt context via knocode_context (additionalContext)
+ *
+ * Tool-output compression is intentionally NOT handled here: RTK (github.com/rtk-ai/rtk)
+ * owns the command-rewriting/compression layer — the knocode installer wires RTK's own
+ * Copilot integration when the user opts in. Knocode stays focused on repository context.
  *
  * The hooks that run this script can ONLY inject extra context or block — VS Code does
- * not expose a prompt-rewrite or tool-output-replacement hook. So this is the faithful
- * analog of the opencode plugin's `chat.message` (context) and `tool.execute.before`
- * (compression-as-context) behaviors, given the Copilot hook surface.
+ * not expose a prompt-rewrite hook. So `UserPromptSubmit` is the faithful analog of the
+ * opencode plugin's `session.prompt` admission hook: context is fetched from the USER'S
+ * ACTUAL PROMPT (not a synthetic probe), while `SessionStart` seeds a warm overview.
+ * (knocode's old PreToolUse hook was removed: RTK owns the Copilot PreToolUse layer for
+ * command rewriting, and a second PreToolUse just duplicated daemon calls per tool.)
  *
  * Fail-open: any daemon error, timeout, indexing-in-progress (-32001), or missing tool
  * returns `{}` (no-op) and exits 0 — configured hooks never stall or break the agent.
@@ -23,7 +28,6 @@
  *   KNOCODE_DAEMON_URL              daemon base URL            (default http://127.0.0.1:9527)
  *   KNOCODE_TIMEOUT_MS              per MCP call timeout (ms)  (default 15000)
  *   KNOCODE_READY_TIMEOUT_MS        session-start readiness    (default 5000, 0 disables)
- *   KNOCODE_HOOK_COMPRESS_MIN_CHARS min tool_response length to compress (default 2000)
  *
  * Requires Node.js >= 18 (global fetch + AbortSignal.timeout).
  */
@@ -33,7 +37,6 @@ import * as readline from "node:readline";
 const DAEMON_URL = process.env.KNOCODE_DAEMON_URL || "http://127.0.0.1:9527";
 const TIMEOUT_MS = num("KNOCODE_TIMEOUT_MS", 15000);
 const READY_TIMEOUT_MS = num("KNOCODE_READY_TIMEOUT_MS", 5000);
-const COMPRESS_MIN_CHARS = num("KNOCODE_HOOK_COMPRESS_MIN_CHARS", 2000);
 const READY_POLL_MS = 250;
 
 function num(env, def) {
@@ -109,22 +112,6 @@ async function daemonReady(timeoutMs) {
 }
 
 // ---------------------------------------------------------------------------
-// Tool mapping (mirrors packages/opencode-knocode/src/index.ts getOutputType)
-// ---------------------------------------------------------------------------
-
-const READ_LIKE = new Set(["read", "read_file", "readfile", "show_file", "open_file", "view", "cat"]);
-const SEARCH_LIKE = new Set(["grep", "search", "grep_search", "search_pattern", "file_search", "glob", "list_dir"]);
-const SHELL_LIKE = new Set(["bash", "shell", "exec", "run_in_terminal", "run_terminal", "terminal", "execute_command", "run_command", "worktree_run_command", "zsh"]);
-
-function outputType(toolName) {
-  const t = (toolName || "").toLowerCase();
-  if (READ_LIKE.has(t)) return "FileRead";
-  if (SEARCH_LIKE.has(t)) return "SearchResult";
-  if (SHELL_LIKE.has(t)) return "ShellOutput";
-  return "Other";
-}
-
-// ---------------------------------------------------------------------------
 // Per-event handlers — each returns a hook output object or {} (no-op)
 // ---------------------------------------------------------------------------
 
@@ -152,15 +139,10 @@ async function handleSessionStart(input) {
   };
 }
 
-async function handlePreToolUse(input) {
-  const toolName = input?.tool_name;
-  if (!toolName || !isContextWorthwhile(toolName)) return {};
+async function handleUserPromptSubmit(input) {
+  const prompt = input?.prompt;
+  if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0) return {};
   const repositoryPath = input?.cwd || process.cwd();
-  const vals = Object.values(input?.tool_input ?? {})
-    .filter((v) => typeof v === "string")
-    .slice(0, 5)
-    .join("\n");
-  const prompt = `The agent is about to run tool \`${toolName}\`${vals ? ` targeting:\n${vals.slice(0, 400)}` : ""}. Provide relevant repository context to interpret its result.`;
   const out = await mcpCall("tools/call", {
     name: "knocode_context",
     arguments: { prompt, repository_path: repositoryPath },
@@ -170,32 +152,8 @@ async function handlePreToolUse(input) {
   if (!text) return {};
   return {
     hookSpecificOutput: {
-      hookEventName: "PreToolUse",
-      additionalContext: `[knocode] repository context for ${toolName}:\n${text}`,
-    },
-  };
-}
-
-async function handlePostToolUse(input) {
-  const toolName = input?.tool_name;
-  const content = input?.tool_response;
-  if (!toolName || typeof content !== "string" || content.length < COMPRESS_MIN_CHARS) return {};
-  const out = await mcpCall("tools/call", {
-    name: "knocode_compress",
-    arguments: { content, tool_name: toolName, output_type: outputType(toolName) },
-  });
-  if (out.kind !== "ok") return {};
-  const text = resultText(out.result);
-  if (!text || text === content) return {};
-  const s = out.result?.structuredContent;
-  const tokens =
-    s && typeof s.original_tokens === "number" && typeof s.compressed_tokens === "number"
-      ? ` (${s.original_tokens} -> ${s.compressed_tokens} tokens)`
-      : "";
-  return {
-    hookSpecificOutput: {
-      hookEventName: "PostToolUse",
-      additionalContext: `[knocode] compressed the ${toolName} output${tokens}:\n${text}`,
+      hookEventName: "UserPromptSubmit",
+      additionalContext: `[knocode] repository context:\n${text}`,
     },
   };
 }
@@ -210,12 +168,9 @@ async function run(event, input) {
       case "session-start":
       case "sessionstart":
         return await handleSessionStart(input);
-      case "pre-tool-use":
-      case "pretooluse":
-        return await handlePreToolUse(input);
-      case "post-tool-use":
-      case "posttooluse":
-        return await handlePostToolUse(input);
+      case "user-prompt-submit":
+      case "userpromptsubmit":
+        return await handleUserPromptSubmit(input);
       default:
         log(`unknown event: ${event}`);
         return {};
@@ -257,11 +212,6 @@ function main() {
 }
 
 main();
-function isContextWorthwhile(toolName) {
-  const t = (toolName || "").toLowerCase();
-  return READ_LIKE.has(t) || SEARCH_LIKE.has(t);
-}
-
 /** Extract natural language result text; returns null on error/passthrough/empty. */
 function resultText(result) {
   if (!result || result.isError === true) return null;

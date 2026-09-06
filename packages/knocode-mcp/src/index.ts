@@ -2,8 +2,9 @@
 /**
  * Knocode MCP server — stdio → HTTP bridge to the daemon-hosted MCP surface.
  *
- * The daemon (127.0.0.1:9527) owns the canonical MCP tools (`knocode_context`,
- * `knocode_compress`). This process is a thin, pass-through proxy so agents that
+ * The daemon (127.0.0.1:9527) owns the canonical MCP tools (`knocode_context` —
+ * repository context enrichment; tool-output compression lives in RTK,
+ * github.com/rtk-ai/rtk). This process is a thin, pass-through proxy so agents that
  * require a stdio MCP server (Codex, VS Code Copilot, Claude) reach exactly the
  * same tools the opencode plugin drives — there is no local tool registry, so the
  * surface can never drift from the daemon's.

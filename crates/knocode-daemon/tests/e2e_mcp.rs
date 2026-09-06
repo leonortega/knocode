@@ -6,8 +6,8 @@
 //!   (b) tools/call knocode_context returns the enriched answer + structured metadata
 //!   (c) zero-hit prompt → passthrough (text == prompt, passthrough: true)
 //!   (d) readiness gate: knocode_context while indexing → JSON-RPC -32001 (HTTP 200)
-//!   (e) tools/call knocode_compress shrinks repetitive output
-//!   (f) transport errors: garbage → HTTP 400 / -32700; unknown method → -32601
+//!   (e) transport errors: garbage → HTTP 400 / -32700; unknown method → -32601
+//!   (f) knocode_compress answers unknown-tool (-32602): compression lives in RTK
 //!
 //! Runs as ONE test fn because it mutates process-global env vars (own process —
 //! separate integration-test binary from e2e_hooks).
@@ -19,7 +19,6 @@ use knocode_context::{ContextConfig, ContextEngine};
 use knocode_daemon::http_server::{create_router, HttpServerState};
 use knocode_events::EventBus;
 use knocode_knowledge::KnowledgeHub;
-use knocode_optimizer::ExecutionOptimizer;
 use knocode_repo_intel::RepositoryIntelligence;
 use knocode_storage::Database;
 
@@ -70,7 +69,6 @@ async fn e2e_mcp_contracts() {
     );
     let state = HttpServerState {
         context_engine: Arc::new(tokio::sync::Mutex::new(engine)),
-        optimizer: Arc::new(ExecutionOptimizer::new(knocode_optimizer::OptimizerConfig::default())),
     };
 
     // ── Boot HTTP server on an ephemeral port ────────────────────────────
@@ -113,7 +111,8 @@ async fn e2e_mcp_contracts() {
         .map(|t| t["name"].as_str().unwrap().to_string())
         .collect();
     assert!(names.contains(&"knocode_context".to_string()), "{names:?}");
-    assert!(names.contains(&"knocode_compress".to_string()), "{names:?}");
+    // Compression removed from the MCP surface — RTK (github.com/rtk-ai/rtk) owns it.
+    assert!(!names.contains(&"knocode_compress".to_string()), "{names:?}");
 
     // (a) notifications/initialized → HTTP 202, no body to parse
     let (status, _) = post_mcp(
@@ -189,11 +188,7 @@ async fn e2e_mcp_contracts() {
     assert_eq!(json["error"]["code"], -32001, "{json}");
     assert!(json["error"]["message"].as_str().unwrap().contains("daemon_indexing"));
 
-    // (e) knocode_compress shrinks repetitive output
-    let log_lines: Vec<String> = (0..300)
-        .map(|i| format!("2026-08-25T10:00:{:02} INFO request {} handled ok", i % 60, i))
-        .collect();
-    let big_output = format!("{}\n\n\n{}", log_lines.join("\n"), log_lines[..50].join("\n"));
+    // (e) removed tool: knocode_compress answers the standard unknown-tool error
     let (status, json) = post_mcp(
         &port,
         &serde_json::json!({
@@ -202,22 +197,13 @@ async fn e2e_mcp_contracts() {
             "method": "tools/call",
             "params": {
                 "name": "knocode_compress",
-                "arguments": { "content": big_output, "tool_name": "bash", "output_type": "ShellOutput" }
+                "arguments": { "content": "some output", "tool_name": "bash" }
             }
         }),
     )
     .await;
     assert_eq!(status, 200);
-    let result = &json["result"];
-    assert_eq!(result["isError"], false, "{result}");
-    assert_eq!(result["structuredContent"]["type"], "compress");
-    let orig_tokens = result["structuredContent"]["original_tokens"].as_u64().unwrap();
-    let comp_tokens = result["structuredContent"]["compressed_tokens"].as_u64().unwrap();
-    assert!(orig_tokens > 0);
-    assert!(
-        (comp_tokens as f64) < (orig_tokens as f64) / 1.2,
-        "repetitive output must compress >1.2x — orig={orig_tokens}, comp={comp_tokens}"
-    );
+    assert_eq!(json["error"]["code"], -32602, "{json}");
 
     // (f) transport errors
     let (status, json) = post_mcp_raw(&port, "not json{{{").await;
