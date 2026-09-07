@@ -204,7 +204,7 @@ sequenceDiagram
 ```mermaid
 flowchart TD
     A[Receive TaskRequest] --> B[Initialize token budget: 12000]
-    B --> C[Search code: ~6600 tokens]
+    B --> C[Search code: ~5400 tokens]
     C --> D[Retrieve knowledge: ~45% budget]
     D --> E[Order for cache stability]
 
@@ -239,17 +239,22 @@ Context Pack Structure (YAML):
 └─────────────────────────────────────────────────┘
 ```
 
+> Note: the docs→code labels above describe the cache-stability *order*; the
+> 45%/55% budget split is applied to the docs and code sections respectively
+> (`docs_budget = budget * 0.45`, `code_budget = budget * 0.55` — see
+> `context/src/lib.rs`).
+
 ### Code File Selection
 
 1. Search Repository Intelligence with task description
-2. Get top 20 candidate files
+2. Take the candidate pool (`candidate_k`, default 100) and rank deterministically
 3. Score each file by:
    - Text match relevance (0.0–1.0)
    - Structural relevance (imports, function calls) (0.0–1.0)
    - File proximity (same directory = higher) (0.0–1.0)
 4. Sort by composite score
-5. Add files to context until code budget is exhausted
-6. For each file, truncate to `max_lines_per_file` if needed
+5. Take the top `max_files` (default 20) and add files to context until the code budget is exhausted
+6. For each file, truncate to `max_lines_per_file` (default 500) if needed
 
 ---
 

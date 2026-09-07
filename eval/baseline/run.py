@@ -50,6 +50,8 @@ def parse_preview(task_str: str, timeout: int = 10):
         ["cargo", "run", "-p", "knocode-cli", "--quiet", "--", "preview", task_str],
         capture_output=True,
         text=True,
+        encoding="utf-8",   # Windows default (cp1252) chokes on non-ASCII preview output (e.g. "×")
+        errors="replace",
         timeout=timeout,
     )
     latency_ms = int((time.time() - t0) * 1000)
@@ -58,7 +60,7 @@ def parse_preview(task_str: str, timeout: int = 10):
     for line in out.splitlines():
         s = line.strip()
         if s.startswith("// ") and ":" in s:
-            p = s[3:].split(":")[0].strip()
+            p = s[3:].split(":")[0].strip().replace("\\", "/")  # normalize Windows separators to match expected_files
             if p and p not in retrieved:
                 retrieved.append(p)
     # Try to parse token counts from preview output

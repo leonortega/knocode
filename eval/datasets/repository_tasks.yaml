@@ -2,6 +2,8 @@
 # Each task identifies expected relevant files for retrieval evaluation (TASK-006)
 # Categories: bug fixing, feature addition, refactoring, testing, documentation, code search, architecture questions
 # Metrics: Recall@5, Recall@10, MRR, tokens, latency, duplicate ratio — see eval/metrics/retrieval.py
+# Refreshed 2026-09-07: expectations for removed capabilities (knocode-router, knocode-skills,
+# engram.rs, FlashRank rerank, eval/metrics/baseline.py) dropped and re-derived from current code.
 
 - task: "Fix authentication timeout in login flow"
   category: "bug fixing"
@@ -35,7 +37,7 @@
   category: "documentation"
   expected_files:
     - README.md
-    - .knocode/config.toml
+    - crates/knocode-repo-intel/src/registry.rs
     - crates/knocode-core/src/config.rs
 
 - task: "Find where BuildContext assembles token budget"
@@ -44,10 +46,10 @@
     - crates/knocode-context/src/lib.rs
     - crates/knocode-core/src/ipc.rs
 
-- task: "Explain how Model Router selects tier"
+- task: "Explain how the context engine enforces the token budget"
   category: "architecture questions"
   expected_files:
-    - crates/knocode-router/src/lib.rs
+    - crates/knocode-context/src/lib.rs
     - crates/knocode-core/src/config.rs
 
 - task: "Fix race condition in EventBus broadcast"
@@ -56,22 +58,22 @@
     - crates/knocode-events/src/lib.rs
     - crates/knocode-daemon/src/lifecycle.rs
 
-- task: "Add skill priority and specificity handling"
+- task: "Add priority ordering to knowledge retrieval results"
   category: "feature addition"
   expected_files:
-    - crates/knocode-skills/src/lib.rs
     - crates/knocode-knowledge/src/lib.rs
+    - crates/knocode-storage/src/tantivy_index.rs
 
-- task: "Refactor SkillEngine to normalize Claude/Cursor/Continue formats"
+- task: "Refactor agent config normalization for Claude/Codex/Copilot"
   category: "refactoring"
   expected_files:
-    - crates/knocode-skills/src/lib.rs
+    - crates/knocode-cli/src/main.rs
 
-- task: "Test memory retrieval fail-open when Engram down"
+- task: "Test knowledge retrieval fail-open when tantivy index unavailable"
   category: "testing"
   expected_files:
-    - crates/knocode-knowledge/src/engram.rs
     - crates/knocode-knowledge/src/lib.rs
+    - crates/knocode-storage/src/tantivy_index.rs
 
 - task: "Document context provenance fields"
   category: "documentation"
@@ -114,13 +116,13 @@
   expected_files:
     - crates/knocode-optimizer/src/rtk.rs
     - crates/knocode-optimizer/src/lib.rs
-    - benches/context_bench.rs
+    - crates/knocode-bench/benches/rtk_bench.rs
 
-- task: "Document LiteLLM fallback chain"
+- task: "Document the HTTP hook API contract"
   category: "documentation"
   expected_files:
-    - crates/knocode-router/src/lib.rs
-    - crates/knocode-router/src/litellm.rs
+    - docs/01-architecture/RUNTIME.md
+    - crates/knocode-daemon/src/http_server.rs
 
 - task: "Where is frozen prefix boundary added?"
   category: "code search"
@@ -144,11 +146,11 @@
     - packages/opencode-knocode/src/index.ts
     - crates/knocode-daemon/src/http_server.rs
 
-- task: "Refactor tantivy BM25 primary with FlashRank rerank"
+- task: "Refactor tantivy BM25 ranking pipeline"
   category: "refactoring"
   expected_files:
     - crates/knocode-knowledge/src/lib.rs
-    - crates/knocode-knowledge/src/rerank.rs
+    - crates/knocode-storage/src/tantivy_index.rs
 
 - task: "Validate dependency graph A->B->C traversal"
   category: "testing"
@@ -184,16 +186,17 @@
     - crates/knocode-daemon/src/metrics.rs
     - crates/knocode-context/src/lib.rs
 
-- task: "Refactor daemon UDS + HTTP fallback shared state"
+- task: "Refactor daemon HTTP server shared state"
   category: "refactoring"
   expected_files:
     - crates/knocode-daemon/src/lifecycle.rs
     - crates/knocode-daemon/src/http_server.rs
 
-- task: "Test SkillEngine conflict detection"
+- task: "Test HTTP rate limiter burst rejection"
   category: "testing"
   expected_files:
-    - crates/knocode-skills/src/lib.rs
+    - crates/knocode-daemon/src/ratelimit.rs
+    - crates/knocode-daemon/src/http_server.rs
 
 - task: "Document v1 architecture without workflow"
   category: "documentation"
@@ -207,10 +210,10 @@
   expected_files:
     - crates/knocode-cli/src/main.rs
 
-- task: "How does Engram memory namespace work?"
+- task: "How does the knowledge hub store and retrieve entries?"
   category: "architecture questions"
   expected_files:
-    - crates/knocode-knowledge/src/engram.rs
+    - crates/knocode-knowledge/src/lib.rs
     - crates/knocode-storage/src/lib.rs
 
 - task: "Fix SQLite WAL mode enabling"
@@ -222,7 +225,7 @@
   category: "feature addition"
   expected_files:
     - eval/baseline/run.py
-    - eval/metrics/baseline.py
+    - eval/metrics/retrieval.py
 
 - task: "Refactor Context Pack to stable artifact with metadata"
   category: "refactoring"
@@ -270,10 +273,11 @@
   expected_files:
     - crates/knocode-context/src/lib.rs
 
-- task: "Test routing tier selection for simple task"
+- task: "Test readiness gate rejects requests while indexing"
   category: "testing"
   expected_files:
-    - crates/knocode-router/src/lib.rs
+    - crates/knocode-daemon/src/metrics.rs
+    - crates/knocode-daemon/src/lifecycle.rs
 
 - task: "Document observability correlation IDs"
   category: "documentation"

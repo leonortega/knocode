@@ -360,7 +360,11 @@ async fn handle_request(
     state: HttpServerState,
 ) -> Result<HttpResponse, String> {
     let correlation_id = request.correlation_id.to_string();
-    let hook_type = format!("{:?}", request.hook_type);
+    let hook_type = format!("{:?}", request.hook_type);    // Request count at the /hook dispatch site (MCP counts separately as "mcp_context"
+    // in its own tool_context), so knocode_requests_total distinguishes transports.
+    if request.hook_type == HookType::PreGeneration {
+        crate::metrics::global().inc_requests("PreGeneration");
+    }
 
     let payload = match &request.payload {
         RequestPayload::MessageRewrite { session_id, message, context_hints, repository_path } => {
@@ -412,7 +416,6 @@ pub(crate) async fn handle_pre_generation(
     let _timer = crate::metrics::Timer::start();
     let engine = context_engine.lock().await;
     let context_pack = engine.build_context(&task).await?;
-    crate::metrics::global().inc_requests("PreGeneration");
     // TASK-022: wire metrics — context tokens + retrieval recall (was dead_code)
     crate::metrics::global().observe_context_tokens(context_pack.token_usage.total_tokens);
     // Retrieval-stage stats (files in pack, search latency, candidates before packing)

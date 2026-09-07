@@ -68,6 +68,9 @@ jobs:
       - name: Build release binaries
         run: cargo build --release -p knocode-cli -p knocode-daemon
 
+      - name: Verify vendored daemon client copies are in sync
+        run: node scripts/vendor-client.mjs --check
+
       - name: Build agent integration packages (bundled dist)
         shell: pwsh
         run: |
@@ -144,6 +147,9 @@ jobs:
       - name: Build release binaries
         run: cargo build --release -p knocode-cli -p knocode-daemon
 
+      - name: Verify vendored daemon client copies are in sync
+        run: node scripts/vendor-client.mjs --check
+
       - name: Build agent integration packages (bundled dist)
         run: |
           for pkg in opencode-knocode knocode-mcp; do
@@ -217,6 +223,9 @@ jobs:
 
       - name: Build release binaries
         run: cargo build --release -p knocode-cli -p knocode-daemon
+
+      - name: Verify vendored daemon client copies are in sync
+        run: node scripts/vendor-client.mjs --check
 
       - name: Build agent integration packages (bundled dist)
         run: |

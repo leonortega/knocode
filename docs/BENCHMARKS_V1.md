@@ -3,6 +3,31 @@
 > **Date:** September 4, 2026 (updated from Sept 2)
 > **Engine:** Knocode Retrieval Engine v0.9.9
 > **Build Mode:** `--release` (optimized)
+>
+> **Fresh validation run (2026-09-06, v0.9.11, this repo — 160 files, warm index):**
+> BuildContext mean **15.2ms** (criterion, 100 samples — `cargo bench -p knocode-bench --bench context_bench`, target p95 < 50ms ✅);
+> 50-task `eval/datasets/repository_tasks.yaml` eval (`python eval/metrics/retrieval.py --k 5,10`): **Recall@5 0.573**, Recall@10 0.697, MRR 0.302, duplicate ratio 0, avg preview latency ~162ms incl. process spawn (A4 target ≥ 0.4 met — see [V1_RUNTIME_SPEC.md](01-architecture/V1_RUNTIME_SPEC.md) §4).
+> Dataset **refreshed 2026-09-07** (removed-file expectations for `knocode-router`, `knocode-skills`, `engram.rs`, FlashRank rerank and `eval/metrics/baseline.py` dropped and re-derived from current code — see zero-recall analysis below); pre-refresh scores were Recall@5 0.467 / Recall@10 0.553 / MRR 0.238. Raw outputs: `eval/results/evaluation.json`, `target/criterion/`.
+>
+> **Baseline-vs-Knocode token comparison** (same 50 tasks, `python eval/baseline/run.py` → `eval/results/baseline_vs_knocode.json`;
+> harness fixed for utf-8 + Windows path separators on 2026-09-06, rerun on the refreshed dataset 2026-09-07): avg total tokens
+> **baseline 1,807 vs Knocode 1,969 (+9%)** — Knocode adds injected context to input tokens (807 → 1,378) but cuts tool tokens
+> 600 → 85 (−86%), i.e. it trades tool-output churn for targeted context. Reported per Principle 14 ("Report Savings Honestly"):
+> this measures the specific harness budget, not an end-to-end bill.
+>
+> **Zero-recall analysis** (15 of 50 tasks retrieved none of their expected files — results joined with `expected_files`):
+> **4 tasks are dataset bugs** — they expect only files removed from the repo (`knocode-skills`, `knocode-router`, `eval/metrics/baseline.py`;
+> unfixable by retrieval); **7 mix** a removed file with live files that were missed anyway; **4 are pure retrieval misses**.
+> Of the 11 tasks with live expectations, 9 are dominated by **LEXICAL_MISS**: the expected file contains ≈no query terms
+> (e.g. "Fix authentication timeout in login flow" → `config.rs`/`http_server.rs` contain zero occurrences of timeout/auth/login —
+> expectations describe the *change to be made*, not existing content). One **RANKED_TOO_LOW** (`eval/datasets/repository_tasks.yaml`,
+> retrieved in 20/50 tasks but ranked >10 here); one expected file is walker-excluded (`.knocode/config.toml` is in `VENDOR_DIRS` — dataset bug).
+> Amplifier: `tantivy_index.rs` appears in 21/50 and `repository_tasks.yaml` in 20/50 top-10s — eval artifacts quoted into docs/outputs
+> get indexed and re-retrieved. Excluding the 4 fully-stale tasks: recall@10 **0.601** as scored (**0.638** against existing files only).
+> → **Addressed 2026-09-07:** the dataset was refreshed accordingly (stale expectations dropped/re-derived); the refreshed scores are in the fresh-run entry above.
+>
+> The Mattermost / DefinitelyTyped speedups and the component-ablation tables below are **historical runs** on those codebases (engine v0.9.9); they are not re-runnable from this repo.
+>
 > **Methodology:** Each benchmark runs 50 hard queries against a real-world codebase, comparing our retrieval engine against `grep -rE` as the baseline. We measure speed (latency), quality (recall, precision, novelty), and semantic understanding.
 
 ---
@@ -275,7 +300,7 @@ Traditional Approach:
 Our Approach:
   User types query → retrieval engine finds files → 7ms → response
 
-That's 117× faster at P50 (7ms vs 819ms)
+That's 67× faster at P50 (7ms vs 819ms)
 ```
 
 At 7ms, the engine is fast enough to run *on every keystroke* in an AI coding assistant. Grep's 819ms makes it unusable for real-time interaction.

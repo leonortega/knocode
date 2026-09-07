@@ -76,34 +76,27 @@ main request pipeline.
 - **Note:** If context quality needs improvement, re-implement and wire into
   the retrieval ranking step.
 
-### B3. Adapter layer (`adapter.rs` UDS/MessagePack server)
-- **File:** `crates/knocode-daemon/src/adapter.rs`
-- **What:** Full UDS + MessagePack IPC server with rate limiting, health checks,
-  and MessagePack serialization. 700+ lines.
-- **Current state:** The UDS adapter IS wired into `lifecycle.rs` — it runs on
-  Unix alongside the HTTP server. The `shutdown()` method was removed (dead),
-  but the core adapter is alive.
-- **Decision needed:** The daemon now exposes both UDS (primary) and HTTP
-  (fallback) transports. Is this dual-transport still needed, or should the
-  daemon be HTTP-only?
-- **Options:**
-  - **Keep both:** UDS is faster for local IPC, HTTP for cross-platform.
-  - **HTTP only:** Simplify by removing UDS adapter, standardize on HTTP.
-  - **Leave as-is:** Working, no immediate action needed.
+### B3. Adapter layer (UDS/MessagePack server) — RESOLVED: HTTP-only
+- **What was considered:** A full UDS + MessagePack IPC server alongside the
+  HTTP server.
+- **Current state:** ✅ Resolved — the daemon is **HTTP-only**. `adapter.rs` was
+  removed; `POST /hook` + `POST /mcp` on the axum listener (`http_server.rs`)
+  are the single transport on every OS.
+- **Decision:** HTTP only — no dual transport to maintain.
 
 ---
 
 ## Category C: Optional enhancements (built infrastructure, not wired)
 
 ### C1. Prometheus metrics + alerting
-- **Files:** `deploy/prometheus/alerts.yml` (DELETED), `crates/knocode-daemon/src/metrics.rs`
-- **What:** The daemon already exposes metrics (readiness, index_files, latency)
-  via the `Probe` response. Prometheus alerting rules were written but the
-  monitoring stack was never deployed.
+- **Files:** `crates/knocode-daemon/src/metrics.rs`
+- **What:** The daemon exposes `GET /metrics` (Prometheus exposition: readiness,
+  index_files, build duration histogram) and metrics via the `Probe` response.
+  Prometheus alerting rules were written but the monitoring stack was never
+  deployed.
 - **Options:**
-  - **Add `/metrics` endpoint:** Expose Prometheus-format metrics from the daemon.
   - **Deploy alerting:** Set up Prometheus + Grafana (requires infrastructure).
-  - **Skip:** Metrics are available via `knocode doctor` and the Probe endpoint.
+  - **Skip:** Metrics are available via `GET /metrics`, `knocode doctor`, and the Probe endpoint.
 
 ### C2. Incremental re-indexing (file hash comparison)
 - **Related to:** A4, A5
@@ -122,10 +115,9 @@ main request pipeline.
   - **Skip:** Current retrieval is good enough without it.
 
 ### C4. Gemini CLI adapter
-- **Files:** `adapters/gemini/hooks.sh` (DELETED)
 - **What:** A bash hook adapter for Gemini CLI was prototyped but never connected.
-- **Current state:** Gemini could be supported via MCP (like Codex/Copilot/Cursor)
-  by adding it to the agent catalog in the installer.
+- **Current state:** Gemini could be supported via MCP by adding it to the agent
+  catalog in the installer (current catalog: `opencode`, `copilot`).
 - **Options:**
   - **Add via MCP:** Add "gemini" to the agent catalog, wire `~/.gemini/settings.json`.
   - **Skip:** Gemini support not prioritized.

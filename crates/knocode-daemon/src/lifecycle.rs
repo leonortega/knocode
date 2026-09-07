@@ -13,6 +13,10 @@ use knocode_repo_intel::watcher::RepoWatcher;
 use knocode_repo_intel::RepositoryIntelligence;
 use knocode_storage::Database;
 
+/// Default HTTP bind port — shared by `serve()`, the daemon binary's `--port`
+/// default, and the CLI's `knocode serve` default (9527).
+pub const DEFAULT_HTTP_PORT: u16 = 9527;
+
 // ── Daemon State ────────────────────────────────────────────────────────
 
 #[allow(clippy::arc_with_non_send_sync)]
@@ -102,7 +106,14 @@ impl DaemonState {
     }
 
     /// Start the daemon
+    /// Start the daemon on the default HTTP port.
     pub async fn serve(&self) -> Result<(), String> {
+        self.serve_on(DEFAULT_HTTP_PORT).await
+    }
+
+    /// Start the daemon on an explicit HTTP port (`knocode-daemon --port <N>`,
+    /// forwarded by `knocode serve --port <N>`).
+    pub async fn serve_on(&self, http_port: u16) -> Result<(), String> {
         info!("Starting knocode daemon...");
 
         // Print startup banner
@@ -120,7 +131,6 @@ impl DaemonState {
         let http_state = crate::http_server::HttpServerState {
             context_engine: self.context_engine.clone(),
         };
-        let http_port = 9527;
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http_server::start_http_server(http_port, http_state).await {
                 error!(error = %e, "HTTP server error");

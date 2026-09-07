@@ -36,19 +36,19 @@ cargo fmt
 knocode/
 ├── crates/
 │   ├── knocode-core/        # Shared types, errors, config
-│   ├── knocode-daemon/      # Daemon binary
-│   ├── knocode-cli/         # CLI binary
-│   ├── knocode-repo-intel/  # Repository Intelligence
-│   ├── knocode-knowledge/   # Knowledge Hub
-│   ├── knocode-skills/      # Skill Engine
-│   ├── knocode-context/     # Context Engine
-│   ├── knocode-router/      # Model Router
-│   ├── knocode-optimizer/   # Execution Optimizer
-│   ├── knocode-events/      # Event Bus
-│   └── knocode-storage/     # Local Storage
+│   ├── knocode-daemon/      # Daemon — HTTP server (POST /hook, /mcp, /health, /metrics)
+│   ├── knocode-cli/         # CLI — init/index/serve/preview/status/config/doctor
+│   ├── knocode-repo-intel/  # Repository Intelligence — tree-sitter + tantivy + graph + watcher
+│   ├── knocode-context/     # Context Engine — retrieval engine + BuildContext
+│   ├── knocode-knowledge/   # Knowledge Hub — SQLite+tantivy local BM25
+│   ├── knocode-optimizer/   # RTK adapter helpers (doctor probe)
+│   ├── knocode-events/      # Event Bus — in-memory broadcast + tracing
+│   ├── knocode-storage/     # Local Storage — SQLite WAL + tantivy
+│   └── knocode-bench/       # Criterion benchmarks
+├── packages/                # TS client + agent integrations (opencode, mcp, copilot, vscode)
 ├── eval/                    # Evaluation framework
 ├── docs/                    # Documentation
-└── .knocode/                # Default configuration
+└── .knocode/                # Default configuration + agent skill
 ```
 
 ## Development Workflow

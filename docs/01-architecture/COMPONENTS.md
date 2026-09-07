@@ -16,11 +16,11 @@ Define every v1 module in detail. Each module section specifies purpose, respons
 
 ### Purpose
 
-Bridge the coding agent and the daemon. One thin adapter per agent CLI, implementing two operations: intercept-before-generation (rewrite the message) and intercept-before-tool-call (allow/deny/modify).
+Bridge the coding agent and the daemon. One thin adapter per agent CLI: intercept-before-generation (rewrite the message before the model sees it) via the daemon's HTTP API.
 
-### v0.2.0 Implementation
+### Implementation
 
-- **HTTP server** (axum) on port 9527 with JSON IPC
+- **HTTP server** (axum) on port 9527 with JSON IPC (`POST /hook`, `POST /mcp`, `GET /health`, `GET /metrics`)
 - **Fail-open** on timeout or error: returns OriginalPassthrough
 - **OpenCode plugin** (TypeScript) for pre-generation hooks
 - **Claude Code hooks** (shell scripts) for UserPromptSubmit
@@ -55,7 +55,7 @@ Bridge the coding agent and the daemon. One thin adapter per agent CLI, implemen
 
 - Context Engine (for pre-generation)
 - tokio (async I/O)
-- rmp-serde (MessagePack)
+- serde_json (HTTP JSON)
 
 ### Persistent Data
 
@@ -63,8 +63,8 @@ None. The Adapter Layer is stateless.
 
 ### Runtime Behavior
 
-1. Accept UDS connection from agent
-2. Read MessagePack-encoded request
+1. Accept HTTP request from agent
+2. Read JSON-encoded request
 3. Parse and validate request
 4. Generate correlation ID (`req_{uuid}`)
 5. Start tracing span with correlation ID
@@ -78,7 +78,7 @@ None. The Adapter Layer is stateless.
 
 | Error | Behavior |
 |-------|----------|
-| Invalid MessagePack | Return OriginalPassthrough with reason "invalid_request" |
+| Invalid JSON body | Return OriginalPassthrough with reason "invalid_request" |
 | Missing required field | Return OriginalPassthrough with reason "invalid_request" |
 | Timeout | Return OriginalPassthrough with reason "timeout" |
 | Internal error | Return OriginalPassthrough with reason "fail-open" |
@@ -109,8 +109,8 @@ None. The Adapter Layer is stateless.
 
 ### Implementation Requirements
 
-- Use tokio for async UDS server
-- Use rmp-serde for MessagePack encoding/decoding
+- Use tokio for the async HTTP server (axum)
+- Use serde_json for request/response encoding
 - Use uuid crate for correlation ID generation
 - Validate all input before passing to modules
 - Log every request and response at INFO level
@@ -249,9 +249,8 @@ code_context:
 - Build in Rust for predictable low memory, no GC-pause latency
 - Embed tree-sitter/ast-grep/ripgrep as native Rust crates (not shelled out)
 - Run as a long-lived daemon, not spawn-per-request
-- Communicate with Adapter Layer over Unix domain socket with MessagePack
+- Serve the HTTP API (axum) — the agent calls `POST /hook`
 - Memory-map retrieval indices rather than loading fully into RAM
-- Quantize reranker model (int8 ONNX) for RAM savings
 - Use tiktoken-rs for local token counting
 - Enforce 30s timeout, return OriginalPassthrough on exceed
 - Log token usage at every stage
@@ -404,7 +403,7 @@ Parse, index, and search the codebase incrementally. Uses tree-sitter for increm
 
 ### Purpose
 
-One organizational surface for project docs, ADRs, templates, and long-term memory. Lexical (BM25) search over stored knowledge and docs (engram and reranking removed — see REMOVED_TOOLS.md, REMOVED_TOOLS.md).
+One organizational surface for project docs, ADRs, templates, and long-term memory. Lexical (BM25) search over stored knowledge and docs (engram and reranking removed — see REMOVED_TOOLS.md).
 
 ### v0.2.0 Implementation
 
@@ -491,14 +490,6 @@ One organizational surface for project docs, ADRs, templates, and long-term memo
 - Knowledge categories: `convention`, `pattern`, `domain`, `decision`
 - Each knowledge entry has: id, category, key, value, confidence, source, created_at, updated_at
 - Implement confidence decay as a background task
-
----
-
-## 5. Skill Engine — [REMOVED]
-
-> The Skill Engine (`knocode-skills` crate, skill load/match, `behavioral_skills`)
-> was removed — agents own skill discovery natively (see `REMOVED_TOOLS.md`).
-
 
 ---
 
@@ -714,9 +705,9 @@ Provide command-line interface for daemon management, repository inspection, and
 2. Initialize logging
 3. Open database and index
 4. Initialize knowledge store
-5. Index repository (background)
-6. Start Unix socket server
-7. Print startup banner with socket path
+5. Index repository (readiness-gated: `/health` reports `state: indexing` until done)
+6. Start HTTP server on `127.0.0.1:9527`
+7. Print startup banner with listen address
 8. Wait for shutdown signal
 
 #### `knocode init`
@@ -730,9 +721,9 @@ Provide command-line interface for daemon management, repository inspection, and
 
 #### `knocode preview <prompt>`
 
-1. Connect to daemon via UDS
-2. Send PreGeneration request with prompt
-3. Receive ContextPack
+1. Connect to the daemon over HTTP (`KNOCODE_DAEMON_URL`, default `http://127.0.0.1:9527`); fall back to local in-process BuildContext when the daemon is not running
+2. Send a PreGeneration request with the prompt
+3. Receive the ContextPack
 4. Print formatted preview:
    - Knowledge entries
    - Code files included

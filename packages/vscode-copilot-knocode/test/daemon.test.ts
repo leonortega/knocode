@@ -80,51 +80,101 @@ describe("mcpCall", () => {
 describe("requestContextEnrichment", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("returns context text on success and forwards repository_path", async () => {
+  it("returns enriched outcome on success and forwards repository_path + request_id", async () => {
     const mockFetch = vi.fn().mockResolvedValue(
-      jsonResponse({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "repo digest" }], structuredContent: {}, isError: false } }),
+      jsonResponse({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "repo digest" }], structuredContent: { total_tokens: 2140, provenance: [{ path: "a.ts" }] }, isError: false } }),
     );
-    const text = await requestContextEnrichment("implement auth", "C:/repo", {
+    const outcome = await requestContextEnrichment("implement auth", "C:/repo", {
       url: URL,
       timeoutMs: 1000,
       fetchImpl: mockFetch as any,
     });
-    expect(text).toBe("repo digest");
+    expect(outcome.kind).toBe("enriched");
+    if (outcome.kind === "enriched") {
+      expect(outcome.enrichedText).toBe("repo digest");
+      expect(outcome.tokens).toBe(2140);
+      expect(outcome.files).toBe(1);
+    }
     const body = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(body.params.arguments.repository_path).toBe("C:/repo");
+    // §7 request correlation: a client-generated UUID travels with every call
+    expect(body.params.arguments.request_id).toMatch(/^[0-9a-f-]{36}$/);
+    if (outcome.kind === "enriched") {
+      expect(body.params.arguments.request_id).toBe(outcome.requestId);
+    }
   });
 
-  it("returns null when the daemon is unreachable (fail-open)", async () => {
+  it("uses opts.requestId when provided instead of generating one", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      jsonResponse({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "ctx" }], structuredContent: {}, isError: false } }),
+    );
+    const outcome = await requestContextEnrichment("hi", "C:/repo", {
+      url: URL,
+      timeoutMs: 1000,
+      fetchImpl: mockFetch as any,
+      requestId: "fixed-id-for-test",
+    });
+    expect(outcome.kind).toBe("enriched");
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.params.arguments.request_id).toBe("fixed-id-for-test");
+  });
+
+  it("returns tagged passthrough when the daemon is unreachable (fail-open)", async () => {
     const mockFetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
-    const text = await requestContextEnrichment("hi", "C:/repo", {
+    const outcome = await requestContextEnrichment("hi", "C:/repo", {
       url: URL,
       timeoutMs: 1000,
       fetchImpl: mockFetch as any,
     });
-    expect(text).toBeNull();
+    expect(outcome).toEqual({ kind: "passthrough", reason: "daemon_unreachable", requestId: expect.any(String) });
   });
 
-  it("returns null on passthrough (zero context hits)", async () => {
+  it("returns tagged passthrough carrying the daemon reason (zero context hits)", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      jsonResponse({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "x" }], structuredContent: { passthrough: true, reason: "no_context_hits" }, isError: false } }),
+    );
+    const outcome = await requestContextEnrichment("hi", "C:/repo", {
+      url: URL,
+      timeoutMs: 1000,
+      fetchImpl: mockFetch as any,
+    });
+    expect(outcome).toEqual({ kind: "passthrough", reason: "no_context_hits", requestId: expect.any(String) });
+  });
+
+  it("classifies an unspecified passthrough when the daemon sends no reason", async () => {
     const mockFetch = vi.fn().mockResolvedValue(
       jsonResponse({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "x" }], structuredContent: { passthrough: true }, isError: false } }),
     );
-    const text = await requestContextEnrichment("hi", "C:/repo", {
+    const outcome = await requestContextEnrichment("hi", "C:/repo", {
       url: URL,
       timeoutMs: 1000,
       fetchImpl: mockFetch as any,
     });
-    expect(text).toBeNull();
+    expect(outcome.kind).toBe("passthrough");
+    if (outcome.kind === "passthrough") expect(outcome.reason).toBe("unspecified");
   });
 
-  it("returns null when the daemon is mid-index (-32001)", async () => {
+  it("returns tagged passthrough with mcp_error_<code> when the daemon is mid-index (-32001)", async () => {
     const mockFetch = vi.fn().mockResolvedValue(
       jsonResponse({ jsonrpc: "2.0", id: 1, error: { code: -32001, message: "daemon_indexing" } }),
     );
-    const text = await requestContextEnrichment("hi", "C:/repo", {
+    const outcome = await requestContextEnrichment("hi", "C:/repo", {
       url: URL,
       timeoutMs: 1000,
       fetchImpl: mockFetch as any,
     });
-    expect(text).toBeNull();
+    expect(outcome.kind).toBe("passthrough");
+    if (outcome.kind === "passthrough") expect(outcome.reason).toBe("mcp_error_-32001");
+  });
+
+  it("returns tagged passthrough with no_mcp_surface for legacy daemons (404)", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({ ok: false, status: 404 } as any);
+    const outcome = await requestContextEnrichment("hi", "C:/repo", {
+      url: URL,
+      timeoutMs: 1000,
+      fetchImpl: mockFetch as any,
+    });
+    expect(outcome.kind).toBe("passthrough");
+    if (outcome.kind === "passthrough") expect(outcome.reason).toBe("no_mcp_surface");
   });
 });

@@ -39,7 +39,7 @@ graph TB
         end
     end
 
-    CA <-->|UDS / MessagePack| AD
+    CA <-->|HTTP JSON / MCP| AD
     AD --> CE
     CE --> RI
     CE --> KH
@@ -56,13 +56,12 @@ graph TB
 
 > The Skill Engine is removed (see `REMOVED_TOOLS.md`) — agents own skill
 > discovery natively. Model routing is removed; the runtime is model-agnostic (§2.3).
-```
 
 ## Module Responsibilities
 
 | Module | Primary Responsibility | Key Operation |
 |--------|----------------------|---------------|
-| Adapter Layer | Bridge agent and daemon | intercept_before_generation, intercept_before_tool |
+| Adapter Layer | Bridge agent and daemon | intercept_before_generation (HTTP `POST /hook`, MCP `tools/call`) |
 | Context Engine | Build token-budgeted Context Packs | BuildContext(task) |
 | Repository Intelligence | Incremental AST parsing and search | index_repository, search_code, search_symbols |
 | Knowledge Hub | Store and retrieve all knowledge | store, retrieve |
@@ -96,23 +95,23 @@ graph TD
 
 ### Single Daemon Process
 
-The runtime runs as a single Rust daemon process. All modules execute within this process using async tasks on the tokio runtime. The daemon communicates with the coding agent over a Unix domain socket using MessagePack encoding.
+The runtime runs as a single Rust daemon process. All modules execute within this process using async tasks on the tokio runtime. The daemon exposes a single HTTP listener (default `127.0.0.1:9527`) serving `POST /hook`, `POST /mcp`, `GET /health` and `GET /metrics`.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                  knocode daemon process                   │
 │                                                          │
 │  ┌──────────────────┐  ┌──────────────────────────────┐  │
-│  │  Unix Socket     │  │     Module Pipeline           │  │
-│  │  Server          │  │                              │  │
-│  │  (MessagePack)   │  │  Adapter → Context Engine →  │  │
-│  │                  │  │  RI + KH                     │  │
+│  │  HTTP Server     │  │     Module Pipeline           │  │
+│  │  (axum)          │  │                              │  │
+│  │  /hook /mcp      │  │  Adapter → Context Engine →  │  │
+│  │  /health /metrics│  │  RI + KH                     │  │
 │  └──────────────────┘  └──────────────────────────────┘  │
 │                                                          │
 │  ┌──────────────────┐  ┌──────────────────────────────┐  │
-│  │  HTTP Surface    │  │     Local Storage             │  │
-│  │  /health /metrics│  │  - SQLite connection pool     │  │
-│  │  /hook /mcp      │  │  - SQLite+tantivy local       │  │
+│  │  Rate Limiter    │  │     Local Storage             │  │
+│  │  (token bucket)  │  │  - SQLite connection pool     │  │
+│  │                  │  │  - SQLite+tantivy local       │  │
 │  │                  │  │  - Tantivy index handles      │  │
 │  │                  │  │  - Filesystem handles         │  │
 │  └──────────────────┘  └──────────────────────────────┘  │
@@ -123,7 +122,7 @@ The runtime runs as a single Rust daemon process. All modules execute within thi
 │                                                          │
 └──────────────────────────────────────────────────────────┘
            │
-           │  UDS / MessagePack
+           │  HTTP JSON — POST /hook, POST /mcp
            ▼
   ┌─────────────────┐
   │  Coding Agent   │
@@ -135,7 +134,7 @@ The runtime runs as a single Rust daemon process. All modules execute within thi
 | Thread | Purpose |
 |--------|---------|
 | Main thread | Daemon lifecycle, signal handling, configuration loading |
-| Unix socket server | Accepts connections from the coding agent |
+| HTTP server (axum) | Accepts requests from the coding agent |
 | tokio async pool | Handles concurrent request processing |
 | Tantivy background threads | Index merging and maintenance (managed by Tantivy) |
 | SQLite connection pool | Concurrent database access |
@@ -185,7 +184,7 @@ trait IContextBuilder {
 }
 ```
 
-Reference implementation: Rust daemon with Unix socket IPC. Lock strategy: acquire all mutex guards once at the start of `build_context`, pass `&MutexGuard` references to helpers (`search_code_scored`, `retrieve_knowledge_scored`). This eliminates redundant lock contention and enables future parallelism via `tokio::join!`.
+Reference implementation: Rust daemon with HTTP IPC. Lock strategy: acquire all mutex guards once at the start of `build_context`, pass `&MutexGuard` references to helpers (`search_code_scored`, `retrieve_knowledge_scored`). This eliminates redundant lock contention and enables future parallelism via `tokio::join!`.
 
 ### IModelGateway — [REMOVED v0.8.6]
 
@@ -235,15 +234,15 @@ Tantivy is the search index (full-text BM25). Tree-sitter is the parser. Graph i
 
 ```
 [1/7] Scaffold (.knocode/, config, database)
-[2/7] Repository discovery + language detection
-[3/7] Parser validation (verify tree-sitter grammars load)
-[4/7] Indexing (full-text BM25 + symbol extraction + dependency graph)
-[5/7] Knowledge Hub initialization
-[6/7] Validation queries (smoke test all components)
-[7/7] Repository status report
+[2/7] Repository discovery (languages, frameworks, commands)
+[3/7] Downloading tree-sitter grammars
+[4/7] Parser validation (verify tree-sitter grammars load)
+[5/7] Indexing (full-text BM25 + symbol extraction + dependency graph)
+[6/7] Knowledge Hub initialization
+[7/7] Validation queries (smoke test) + repository profile
 ```
 
-Each step is fail-open: errors in one step don't block subsequent steps. The validation step probes Tantivy, SQLite symbols, graph edges, and knowledge entries independently.
+Each step is fail-open: errors in one step don't block subsequent steps. The validation step probes Tantivy, SQLite symbols, graph edges, and knowledge entries independently, then writes `.knocode/profile.json`.
 
 ## Retrieval Status
 
@@ -269,30 +268,30 @@ This enables the daemon to report structured diagnostics instead of generic "no 
 | Layer | Technology | Role |
 |-------|------------|------|
 | Language | Rust (>= 1.75) | Context Engine, daemon, all modules |
-| Agent IPC | UDS + MessagePack primary (`rmp-serde`+`tokio::net::UnixListener`) + HTTP/JSON fallback (`axum`) on `127.0.0.1:9527` | Daemon ↔ Agent; `POST /hook`, UDS `Probe` payload (readiness), `GET /health` (readiness `state: indexing\|ready`), `GET /metrics` |
+| Agent IPC | HTTP/JSON only (`axum`) on `127.0.0.1:9527` — no socket transport | Daemon ↔ Agent; `POST /hook`, HTTP `Probe` payload (readiness), `GET /health` (readiness `state: indexing\|ready`), `GET /metrics` |
 | MCP (Model Context Protocol) | JSON-RPC 2.0 over HTTP (`POST /mcp`) on the same axum listener (`127.0.0.1:9527`) | Daemon-hosted MCP - `initialize` / `ping` / `tools/list` / `tools/call`; tool `knocode_context` (compression = RTK, external); JSON-RPC `-32001 daemon_indexing` while indexing; client = opencode plugin (`no-conversion` tool path, `/hook` fallback) |
-| AST Parsing | tree-sitter **111 languages** via arborium bundle (no feature flags) | `repo-intel/src/parser.rs` |
+| AST Parsing | tree-sitter — **371 grammars available** via `tree-sitter-language-pack` (42-language registry, 33 with parsers) | `repo-intel/src/parser.rs` + `repo-intel/src/registry.rs` |
 | Structural Search | In-process `AstGrepBackend` (ast-grep-core + tree-sitter-language-pack) via `StructuralRetriever` | `retrieval/structural.rs` + `repo-intel/src/structural/` |
 | Text Search | ripgrep (`grep-searcher`+`grep-regex`+`ignore`) | `search_text()` |
 | Full-text Index | tantivy `MmapDirectory` (in-process) | `storage/src/tantivy_index.rs` + `search_fulltext()` wiring |
 | Dependency Graph | `graph.rs` adjacency (`import`/`use`/`require`) + `edges` table `003_graph.sql` (local AST+regex) | `repo-intel/src/graph.rs` |
 | Watcher | Two modes: `commit` (default — polls the resolved HEAD commit via git2, triggers on new commits) or `filesystem` (`notify` + git2 dirty-check; feature `fs-watcher`, enabled by the CLI and daemon) | `repo-intel/src/watcher.rs` |
 | LSP | Stub `LspClient` (`KNOCODE_LSP_ENABLED=true` → probe, never hard dep) | `repo-intel/src/lsp.rs` |
-| Reranking | Removed from v1 runtime per benchmark evaluation (passthrough only) — see REMOVED_TOOLS.md | `knowledge/src/rerank.rs` |
+| Reranking | Removed from v1 runtime per benchmark evaluation (passthrough only) — see REMOVED_TOOLS.md | — |
 | Memory | SQLite+tantivy local (engram removed — see REMOVED_TOOLS.md) | `knocode-storage` local | |
 | Model Gateway | [REMOVED v0.8.6] LiteLLM + heuristic routing deleted — runtime is model-agnostic | see REMOVED_TOOLS.md |
 | Compression | RTK `RtkAdapter::detect()` (binary if present, `~10ms`) → built-ins + tee `~/.knocode/logs/tool-failures/` | `optimizer/src/rtk.rs` |
 | Token Counting | `tiktoken-rs` `cl100k_base` + `heuristic` fallback | `context/src/lib.rs:389`/`optimizer/src/lib.rs:303` |
 | Orchestration | Removed — single tokio daemon (see `REMOVED_TOOLS.md`) | — |
-| Metrics | Prometheus exposition (`GET /metrics` histogram `knocode_build_context_duration_seconds`) + Grafana `docs/dashboards/knocode.json` | `daemon/src/metrics.rs` + `deploy/prometheus/alerts.yml` |
-| Rate Limit | Token-bucket 10/s burst 20 per `session_id` + `HMAC-SHA256` `X-Knocode-Signature` via `hmac` crate `secrets::verify_hmac` (was `sha256(secret+body)` pre-v0.6.0) | `daemon/src/ratelimit.rs` + `core/src/secrets.rs` |
-| Concurrency | `RwLock<ContextEngine>` (was `Mutex`), `session_fingerprints` SHA-256 dedup, per-session memory namespace | `daemon/src/adapter.rs:44` + `context/src/lib.rs:142` |
+| Metrics | Prometheus exposition (`GET /metrics`, histogram `knocode_build_context_duration_seconds`) | `daemon/src/metrics.rs` |
+| Rate Limit | Token-bucket 10/s burst 20 per session (`daemon/src/ratelimit.rs`) | `daemon/src/ratelimit.rs` + `core/src/secrets.rs` |
+| Concurrency | `tokio::sync::Mutex<ContextEngine>`, `session_fingerprints` SHA-256 dedup | `daemon/src/http_server.rs` + `context/src/lib.rs` |
 | Directory Walking | `ignore` crate | `.gitignore` |
 | Database | SQLite `rusqlite` bundled + WAL + `r2d2` pool, migrations `001, 002, 003, 006, 007` | `storage/src/lib.rs:21` |
-| Serialization | `serde`+`toml`+`serde_json`+`serde_yaml`+`rmp-serde` | Config + IPC (MessagePack canonical) |
+| Serialization | `serde`+`toml`+`serde_json`+`serde_yaml` | Config + HTTP IPC (JSON) |
 | CLI | `clap` | `knocode-cli` (init/index/serve/preview/doctor/config) |
 | Logging | `tracing`+`tracing-subscriber` (json `fmt`) | `daemon` |
 | Testing/Bench | `cargo test` (165 tests) + `promptfoo` + `criterion` `benches/context_bench.rs` (p95 <50ms) | `benches/` |
-| Distribution | `Dockerfile` (distroless), `Formula/knocode.rb` (brew tap+launchd), `cargo-wix` MSI | `deploy/` |
+| Distribution | GitHub Releases (Windows x64 zip), install scripts (`scripts/install.ps1` / `install.sh`), Scoop + winget manifests | `.github/workflows/release.yml`, `winget/` |
 | Async Runtime | `tokio` full | `daemon` |
 | HTTP Client | `reqwest` | `cli` |

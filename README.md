@@ -1,6 +1,6 @@
 # Knocode — AI Runtime
 
-**Knocode is a local AI runtime that makes coding agents 20-27× faster at finding relevant code.** It runs as a local daemon, intercepting agent requests and enriching them with repository context — knowledge and code files — using a retrieval engine that understands *what you mean*, not just *what you typed*.
+**Knocode is a local AI runtime that makes coding agents 37-67× faster at finding relevant code.** It runs as a local daemon, intercepting agent requests and enriching them with repository context — knowledge and code files — using a retrieval engine that understands *what you mean*, not just *what you typed*.
 
 ### Why This Matters
 
@@ -12,17 +12,17 @@ Traditional (grep):                        Knocode:
   → finds files with literal "error"         → finds error types, try/catch patterns,
   → misses documentation, test files,          documentation, test files, config,
     related components, config files            related components
-  → 4.8 seconds on 53k files                 → 45ms on 53k files (106× faster at P50)
+  → 5.1 seconds on 53k files                 → 42ms on 53k files (37-67× faster at P50)
 ```
 
 ## Features
 
 - **Retrieval Engine** — Semantic code search that replaces grep. Intent detection → query expansion → BM25 + structural search → graph boost → ranking. Finds files grep can't.
-- **Repository Intelligence** — Incremental indexing: tree-sitter AST (**111 languages**) + tantivy BM25 + structural search (ast-grep) + dependency graph. `mtime+size` shortcut for fast warm re-indexes.
+- **Repository Intelligence** — Incremental indexing: tree-sitter AST (**371 grammars** available via `tree-sitter-language-pack`; 42-language registry, 33 with parsers) + tantivy BM25 + structural search (ast-grep) + dependency graph. `mtime+size` shortcut for fast warm re-indexes.
 - **Context Engine** — Assembles contextual information from your codebase for better AI responses (`BuildContext` — docs → code, 30s budget, fail-open).
-- **Execution Optimizer** — RTK adapter + built-in compressors + `tiktoken-rs` savings reporting.
+- **Execution Optimization** — Tool-output compression is delegated to [RTK](https://github.com/rtk-ai/rtk) (external binary, opt-in via the installer); local token accounting via `tiktoken-rs`.
 - **Event Bus** — Async in-memory observability with `tracing`/`metrics`/`correlation_id`.
-- **Metrics** — Prometheus exposition at `GET /metrics`, Grafana dashboard.
+- **Metrics** — Prometheus exposition at `GET /metrics`.
 - **Fail-Open Design** — Always returns a response on hot path, never blocks the agent (30s timeout → `OriginalPassthrough`).
 - **Two Auto-Index Modes** — `commit` (default, polls git HEAD) or `filesystem` (real-time via notify). Configurable via `[index].watch_mode`.
 
@@ -30,30 +30,35 @@ Traditional (grep):                        Knocode:
 
 ## Benchmark: Knocode vs Grep
 
-We benchmarked our retrieval engine against `grep -rE` across three real-world codebases. The results: **Knocode is 27-106× faster than grep while finding semantically relevant files that grep completely misses.**
+We benchmarked our retrieval engine against `grep -rE` across three real-world codebases. The results: **Knocode is 37-67× faster than grep while finding semantically relevant files that grep completely misses.**
 
-### Speed
+> Full report with methodology, per-query breakdowns, and component ablations:
+> [docs/BENCHMARKS_V1.md](docs/BENCHMARKS_V1.md). A fresh validation run
+> (2026-09-06, v0.9.11) is recorded at the top of that file: BuildContext 15.2ms
+> mean (criterion), Recall@5 0.573 on the 50-task eval (dataset refreshed 2026-09-07).
+
+### Speed *(historical run — see [BENCHMARKS_V1.md · Benchmark 1](docs/BENCHMARKS_V1.md#-benchmark-1-definitelytyped-53000-typescript-files) and [Benchmark 2](docs/BENCHMARKS_V1.md#-benchmark-2-mattermost-9000-go--react-files))*
 
 | Codebase | Knocode (P50) | grep -rE (P50) | Speedup |
 |----------|--------------|----------------|---------|
-| Mattermost (9k files) | 27ms | 971ms | **27×** |
-| DefinitelyTyped (53k files) | 49ms | 4,836ms | **106×** |
-| Knocode repo (158 files) | ~10ms | ~20ms | 2× |
+| Mattermost (9k files) | 7ms | 819ms | **67.2×** |
+| DefinitelyTyped (53k files) | 42ms | 5,132ms | **36.5×** |
+| Knocode repo (158 files) | 1ms | 110ms | **55.1×** |
 
-At 27-49ms, Knocode is fast enough to run on every keystroke in an AI coding assistant. Grep's 4.8 seconds makes it unusable for real-time interaction.
+At 7-42ms P50, Knocode is fast enough to run on every keystroke in an AI coding assistant. Grep's 5.1 seconds makes it unusable for real-time interaction.
 
-### Quality
+### Quality *(historical run — details in [BENCHMARKS_V1.md](docs/BENCHMARKS_V1.md))*
 
 | Codebase | Recall | Precision | Novelty | What novelty means |
 |----------|--------|-----------|---------|-------------------|
-| Mattermost (9k files) | 13.1% | 32.8% | 53.0% | Half our results grep CAN'T find |
-| DefinitelyTyped (53k files) | 14.2% | 1.6% | 89.2% | 89% of our results grep CAN'T find |
+| Mattermost (9k files) | 13.0% | 32.2% | 53.3% | Over half our results grep CAN'T find |
+| DefinitelyTyped (53k files) | 17.3% | 9.3% | 38.6% | 39% of our results grep CAN'T find |
 
-- **Recall** (13-14%): We find a curated subset of grep's results — the *best* files, not *all* files.
-- **Precision** (2-33%): Our results are targeted to what the query actually needs.
-- **Novelty** (53-89%): The magic — files that grep's pattern matching completely misses.
+- **Recall** (13-17%): We find a curated subset of grep's results — the *best* files, not *all* files.
+- **Precision** (9-32%): Our results are targeted to what the query actually needs.
+- **Novelty** (39-53%): The magic — files that grep's pattern matching completely misses.
 
-### What We Find That Grep Can't
+### What We Find That Grep Can't *(examples from the historical run — [BENCHMARKS_V1.md](docs/BENCHMARKS_V1.md))*
 
 | Query | Grep Finds | Knocode Finds | Why |
 |-------|-----------|---------------|-----|
@@ -61,13 +66,13 @@ At 27-49ms, Knocode is fast enough to run on every keystroke in an AI coding ass
 | "find all API endpoints" | Files with literal "API" + "endpoint" | Route definitions, handler registrations, API docs | Understands "endpoints" means route handlers |
 | "why does the auth fail" | Files with literal "auth" + "fail" | Auth middleware, session handling, permission checks | Understands "fail" means debugging context |
 
-### Component Impact
+### Component Impact *(ablation on the historical run — [BENCHMARKS_V1.md · Benchmark 3](docs/BENCHMARKS_V1.md#-benchmark-3-component-evaluation-knocode-repo))*
 
 | Component | Latency Cost | Recall Improvement | Verdict |
 |-----------|-------------|-------------------|---------|
-| Graph Boost | -2ms | +0.0% | ⚠️ Neutral |
-| Candidate K (50→500) | +3ms | +249% | ✅ Strongly recommended |
-| Query Expansion | +3ms | +6.5-18% | ✅ Recommended |
+| Graph Boost | ~0ms | +0.0% | ⚠️ Neutral |
+| Candidate K (50→500) | ~0ms | +81.3% | ✅ Strongly recommended |
+| Query Expansion | ~0ms | +25.7% | ✅ Recommended |
 
 ---
 
@@ -106,22 +111,16 @@ winget upgrade Knocode.knocode
 
 ### Agent integrations
 
-The installers ask which agents to wire up — pick one or more of **OpenCode**, **Codex**, **Copilot (VS Code)**, and **Cursor** (default: all in the developer installers; none in the release one-liner).
-
-```powershell
-# Windows one-liner with agent selection
-powershell -ExecutionPolicy Bypass -c "irm https://leonortega.github.io/knocode/install.ps1 | iex" -Agents opencode,codex
-```
+The installers ask which agents to wire up — pick one or both of **OpenCode** and **Copilot (VS Code)** (default: all in the developer installers; none in the release one-liner).
 
 ```bash
 # Developer installers (source checkout)
-powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Agents opencode,codex
-bash scripts/install.sh --agents opencode,cursor
+powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Agents opencode,copilot
+bash scripts/install.sh --agents opencode,copilot
 ```
 
-- **OpenCode** — plugin `opencode-knocode` + agent skill in `~/.config/opencode`
-- **Codex** — MCP server `knocode-mcp` in `~/.codex/config.toml`
-- **Copilot / Cursor** — the same `knocode-mcp` server in the VS Code / Cursor user-level `mcp.json`
+- **OpenCode** — npm plugin `opencode-knocode` (V2 prompt hook) + agent skill in `~/.config/opencode`
+- **Copilot (VS Code)** — user-level agent hooks in `~/.copilot/hooks/knocode-context.json` (SessionStart + UserPromptSubmit); the same `knocode-mcp` server is also available for user-level `mcp.json`
 
 The integration bundles (`opencode-knocode`, `knocode-mcp`) ship inside every release zip — no npm registry needed; they only require Node.js, which the installer installs automatically if missing (along with Git). Pass `-AllAgents`/`--all-agents` to skip the prompt, `-NoAgents`/`--no-agents` to wire nothing, or `-SkipPrereqs`/`--skip-prereqs` to disable automatic prerequisite installs. Agent configs are written idempotently (re-running updates them).
 
@@ -188,23 +187,26 @@ knocode/
 ├── Cargo.toml                    # Workspace root
 ├── crates/
 │   ├── knocode-core/             # Shared types, errors, config
-│   ├── knocode-daemon/           # Daemon — UDS/MessagePack + HTTP fallback + /metrics
-│   ├── knocode-cli/              # CLI — init/index/serve/preview/doctor
+│   ├── knocode-daemon/           # Daemon — HTTP/MCP server (POST /hook, POST /mcp, /health, /metrics)
+│   ├── knocode-cli/              # CLI — init/index/serve/preview/status/config/doctor
 │   ├── knocode-repo-intel/       # Repository Intelligence — tree-sitter + tantivy + graph + watcher
 │   ├── knocode-context/          # Context Engine — retrieval engine + BuildContext
 │   ├── knocode-knowledge/        # Knowledge Hub — SQLite+tantivy local BM25
-│   ├── knocode-optimizer/        # Execution Optimizer — RTK adapter + compressors
+│   ├── knocode-optimizer/        # RTK adapter helpers (doctor probe; compression itself is RTK's)
 │   ├── knocode-events/           # Event Bus — in-memory broadcast + tracing
 │   ├── knocode-storage/          # Local Storage — SQLite WAL + tantivy
+│   └── knocode-bench/            # Criterion benchmarks
 ├── .knocode/
-│   └── config.toml               # Default configuration
-├── adapters/
-│   ├── cursor/extension.ts       # Cursor integration
-│   ├── gemini/hooks.sh           # Gemini CLI integration
-│   └── tier2/README.md           # Best-effort adapters
-├── .opencode/plugins/            # OpenCode plugin (TypeScript)
+│   ├── config.toml               # Default configuration
+│   └── skills/knocode/           # Agent-facing knocode skill (SKILL.md)
+├── packages/
+│   ├── knocode-client/           # Shared daemon client — single source of truth, vendored into the plugins
+│   ├── opencode-knocode/         # OpenCode plugin (TypeScript, npm)
+│   ├── knocode-mcp/              # stdio MCP pass-through proxy (Codex, Copilot, Claude)
+│   ├── knocode-copilot-plugin/   # Copilot Agent Plugin (hooks + bundled MCP)
+│   └── vscode-copilot-knocode/   # VS Code @knocode chat participant extension
+├── .opencode/                    # OpenCode agent skill (in-repo copy)
 ├── .claude/hooks/                # Claude Code hooks (shell scripts)
-├── benches/                      # criterion benchmarks
 └── docs/                         # Architecture, benchmarks, and specification docs
 ```
 
@@ -222,6 +224,7 @@ Initialize knocode for the current repository.
 Creates:
 - `.knocode/` directory
 - `.knocode/config.toml` with default configuration
+- `.knocode/profile.json` with the repository profile
 - SQLite database at `~/.knocode/data.db`
 
 ### `knocode index`
@@ -244,19 +247,19 @@ Output:
 
 ### `knocode serve`
 
-Start the daemon server (UDS primary on `/tmp/knocode.sock` + HTTP fallback on `127.0.0.1:9527`).
+Start the daemon server (HTTP + MCP on `127.0.0.1:9527`).
 
 ```bash
 knocode serve
-knocode serve --socket /tmp/knocode.sock --port 9527
+knocode serve --port 9527
 ```
 
 The daemon will:
 1. Load configuration
 2. Initialize logging + metrics (`/metrics` endpoint)
 3. Open database (SQLite WAL) + tantivy index (MmapDirectory)
-4. Run initial repository indexing (readiness-gated — `GET /health` reports `state: indexing` and `POST /hook` returns `503 daemon_indexing` until it completes; the UDS/MessagePack adapter binds only after)
-5. Start auto-reindex watcher (commit/filesystem), then UDS+MessagePack primary and HTTP fallback
+4. Run initial repository indexing (readiness-gated — `GET /health` reports `state: indexing` and `POST /hook` returns `503 daemon_indexing` until it completes)
+5. Start auto-reindex watcher (commit/filesystem), then serve HTTP + MCP
 6. Wait for shutdown signal (Ctrl+C)
 
 #### Health & Readiness
@@ -266,8 +269,8 @@ Clients should wait until the daemon is ready before sending requests — during
 - `GET /health` → `{"status": "ok", "version": "...", "state": "indexing" | "ready", "index_files": N}` — poll until `state` is `ready`
 - `GET /metrics` → `knocode_daemon_ready 0|1` gauge (plus `knocode_index_files`)
 - `POST /hook` → HTTP `503` with `reason: "daemon_indexing"` while not ready — retry with backoff
-- UDS/MessagePack `Probe` payload (`{"type":"Probe"}`) → `{"type":"Probe","state":"ready","index_files":N,"version":"..."}` — same signal as `/health` over the primary transport; answered before rate-limiting with no engine lock
-- **Bundled adapters poll automatically** — the OpenCode plugin, Claude Code hooks (`.claude/hooks/knocode-ready.sh`), Gemini CLI hooks, and Cursor extension each wait for `state: "ready"` before their first request (bounded + fail-open: an unreachable daemon bails immediately, a successful check is cached for 30s). Budget via `KNOCODE_READY_TIMEOUT_MS` (default 10000)
+- HTTP `Probe` payload — `POST /hook` with `{"type":"Probe"}` → `{"type":"Probe","state":"ready","index_files":N,"version":"..."}` — same signal as `/health`; answered before rate-limiting with no engine lock
+- **Bundled clients poll automatically** — the OpenCode plugin, `knocode-mcp`, and Claude Code hooks (`.claude/hooks/knocode-ready.sh`) each wait for `state: "ready"` before their first request (bounded + fail-open: an unreachable daemon bails immediately, a successful check is cached for 30s). Budget via `KNOCODE_READY_TIMEOUT_MS` (default 10000)
 
 #### Daemon MCP (`POST /mcp`)
 
@@ -319,20 +322,27 @@ knocode doctor
 
 Output:
 ```
-Knocode Doctor
+Knocode Doctor (v1 — 8 probes)
 ═══════════════════════════════════════
 
 SQLite:          ✓ OK (WAL, migrations up to date)
-Config:          ✓ OK (4 default langs, 111 available via arborium)
-Socket path:     ✓ OK (/tmp/knocode.sock)
-Tree-sitter:     ✓ OK (111 languages via arborium)
-Tantivy:         ✓ OK (MmapDirectory)
-Knowledge Hub:   ✓ OK (SQLite+tantivy local)
-RTK:             ⚠ Not found — using built-in compressors
-Tiktoken:        ✓ OK (cl100k_base LazyLock)
-Secrets redact:  ✓ OK (HMAC via hmac crate)
-Retrieval:       ✓ OK (tantivy BM25 + ast-grep structural)
-Metrics:         ○ GET /metrics on daemon
+Config:          ✓ OK (token budget valid)
+Knocode PATH:    ✓ OK (~/.knocode/bin on PATH)
+Repo profile:    ✓ OK (.knocode/profile.json)
+Tree-sitter:     ✓ OK (global 33/33 parsers ready)
+
+  Repository detected languages
+  ─────────────────────────────
+    rust             214 files
+    typescript       187 files
+    ...
+
+Tantivy:         ✓ OK (142 docs, ~/.knocode/index/<repo-id>)
+Retrieval:       ✓ OK (3/3 probe queries returned results)
+RTK:             ⚠ Not found on PATH — using built-in compressors + tee-on-failure (install rtk for 10ms binary)
+Tiktoken:        ✓ OK (cl100k_base local, no model API round-trip)
+Secrets redact:  ✓ OK (redaction before outbound calls)
+Metrics:         ○ GET /metrics on daemon (prometheus exposition) — curl localhost:9527/metrics
 
 ✓ All critical checks passed
 ```
@@ -350,12 +360,10 @@ Configuration is loaded in order of priority (highest wins):
 
 | Section | Purpose |
 |---------|---------|
-| `[daemon]` | Socket path, concurrency, timeout, `metrics_port`, `rate_limit_per_session` |
-| `[database]` | SQLite path, connection pool |
-| `[index]` | Tantivy path, languages, `watch_mode` (`"commit"` or `"filesystem"`) |
-| `[retrieval]` | Retrieval engine settings (`candidate_k`, `max_files`, `enable_graph`, `enable_expansion`) |
+| `[database]` | SQLite path, max connections |
+| `[index]` | BM25 index path, languages, `watch_mode` (`"commit"` or `"filesystem"`) |
 | `[knowledge]` | Knowledge settings (`max_knowledge_entries`) |
-| `[context]` | Token budget, file limits, `cache_order` |
+| `[context]` | Token budget, file limits, `cache_order`, `candidate_k` |
 | `[rtk]` | Enabled, max tokens, compression level |
 | `[logging]` | Level, file path, retention |
 
@@ -363,13 +371,14 @@ Configuration is loaded in order of priority (highest wins):
 
 | Variable | Overrides | Default |
 |----------|-----------|---------|
-| `KNOCODE_DAEMON_SOCKET` | daemon.socket_path | /tmp/knocode.sock |
 | `KNOCODE_DATABASE_PATH` | database.path | ~/.knocode/data.db |
 | `KNOCODE_LOG_LEVEL` | logging.level | info |
 | `KNOCODE_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
-| `KNOCODE_CANDIDATE_K` | retrieval.candidate_k | 100 |
+| `KNOCODE_CANDIDATE_K` | context.candidate_k | 100 |
+| `KNOCODE_MAX_FILES` | context.max_files | 20 |
 | `KNOCODE_WATCH_MODE` | index.watch_mode ("commit" or "filesystem") | commit |
-| `KNOCODE_SYMBOLS_ENABLED` | Enable/disable tree-sitter symbol extraction | true |
+| `KNOCODE_SYMBOLS_ENABLED` | Set to `false` to disable tree-sitter symbol extraction (BM25 only) | true |
+| `KNOCODE_DAEMON_URL` | Daemon URL used by `knocode status`/`preview` and the JS clients | http://127.0.0.1:9527 |
 | `KNOCODE_READY_TIMEOUT_MS` | Client-adapter readiness wait budget (poll `GET /health` before first request) | 10000 |
 
 ## Agent Integration
@@ -377,27 +386,20 @@ Configuration is loaded in order of priority (highest wins):
 ### OpenCode
 
 1. Start the daemon: `knocode serve`
-2. Copy the plugin: `cp .opencode/plugins/knocode.ts .opencode/plugins/`
+2. Install the npm plugin (`opencode-knocode`) + agent skill — done automatically by `scripts/install.ps1 -Agents opencode` (or `install.sh --agents opencode`)
 3. Restart OpenCode
+
+### Copilot (VS Code)
+
+1. Start the daemon: `knocode serve`
+2. User-level agent hooks are written to `~/.copilot/hooks/` by the installer (`-Agents copilot`)
 
 ### Claude Code
 
 1. Start the daemon: `knocode serve`
-2. Hooks are configured in `.claude/settings.json`
+2. Hooks live in `.claude/hooks/` (`knocode-pregeneration.sh`, `knocode-ready.sh`)
 3. Make hooks executable: `chmod +x .claude/hooks/*.sh`
 4. Restart Claude Code
-
-### Cursor
-
-1. Start the daemon: `knocode serve`
-2. Install extension from `adapters/cursor/extension.ts`
-3. Extension calls `POST /hook` (UDS/MessagePack primary, HTTP fallback, 30s fail-open)
-
-### Gemini CLI
-
-1. Start the daemon: `knocode serve`
-2. Hooks at `adapters/gemini/hooks.sh`
-3. `chmod +x adapters/gemini/hooks.sh`
 
 ## Architecture
 
@@ -406,13 +408,13 @@ Configuration is loaded in order of priority (highest wins):
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                      Coding Agent                           │
-│  (opencode, Claude Code, Cursor, Gemini CLI, etc.)          │
+│  (OpenCode, Copilot, Claude Code, etc.)                     │
 └─────────────────────────┬───────────────────────────────────┘
-                           │ UDS/MessagePack primary, HTTP fallback
+                           │ HTTP JSON — POST /hook, POST /mcp
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    Adapter Layer                            │
-│  • Request validation + rate-limit (per session)            │
+│                    HTTP API Layer                           │
+│  • Request validation + rate-limit (token bucket)           │
 │  • Fail-open (30s → OriginalPassthrough)                    │
 │  • Prometheus /metrics                                      │
 └─────────────────────────┬───────────────────────────────────┘
@@ -426,14 +428,14 @@ Configuration is loaded in order of priority (highest wins):
 └──────┬──────┘  └─────────────┘  └─────────────┘
         │
         ├──► Retrieval Engine (intent → expansion → BM25 + structural → graph → ranking)
-        ├──► Repository Intelligence (tree-sitter 111 langs + tantivy + graph + watcher)
+        ├──► Repository Intelligence (tree-sitter + tantivy + graph + watcher)
         └──► Knowledge Hub (tantivy local)
 ```
 
 ### Request Flow
 
-1. Agent sends request via UDS/MessagePack (HTTP/JSON fallback on Windows)
-2. Adapter Layer validates, rate-limits (per `session_id`), generates correlation ID
+1. Agent sends an HTTP JSON request to `POST /hook` (or MCP `tools/call` via `POST /mcp`)
+2. HTTP layer validates input, rate-limits, generates correlation ID
 3. Context Engine assembles context pack (`RwLock` read, concurrent sessions):
    - **Retrieval Engine** finds relevant code files (intent → expansion → BM25 + structural → graph → ranking)
    - Knowledge Hub retrieves entries (BM25 local)
@@ -441,13 +443,11 @@ Configuration is loaded in order of priority (highest wins):
    - Reversible truncation
 4. Response returned (or `OriginalPassthrough` on error/timeout), metrics recorded
 
-## IPC Protocol
+## HTTP API
 
-### Primary: UDS + MessagePack
+The daemon exposes a single HTTP listener (default `127.0.0.1:9527`): `POST /hook` for prompt enrichment, `POST /mcp` for MCP clients, `GET /health` and `GET /metrics` for observability. There is no socket/MessagePack transport.
 
-`rmp-serde` encode of `AgentRequest` → `4-byte BE len` → body. HTTP/JSON `POST /hook` as fallback.
-
-### Request Format (JSON fallback)
+### Request Format (`POST /hook`)
 
 ```json
 {
@@ -460,7 +460,7 @@ Configuration is loaded in order of priority (highest wins):
 }
 ```
 
-### Response Format (JSON fallback)
+### Response Format
 
 ```json
 {
@@ -491,26 +491,26 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Retrieval Engine | ✅ Complete | Intent → expansion → BM25 + structural → graph → ranking |
-| Repository Intelligence | ✅ Complete | tree-sitter 111 langs + tantivy + graph + watcher |
+| Repository Intelligence | ✅ Complete | tree-sitter (42-lang registry) + tantivy + graph + watcher |
 | Context Engine | ✅ Complete | BuildContext + RwLock concurrency, fail-open |
 | Knowledge Hub | ✅ Complete | BM25 local (SQLite+tantivy) |
-| Execution Optimizer | ✅ Complete | RTK adapter + compressors + tiktoken-rs |
-| Adapter Layer | ✅ Complete | UDS/MessagePack primary + HTTP fallback, 30s fail-open |
+| Execution Optimizer | ✅ Complete | RTK (external, opt-in) + built-in compressor fallback + tiktoken-rs |
+| Adapter Layer | ✅ Complete | HTTP `/hook` + `/mcp`, rate limiting, 30s fail-open |
 | CLI Commands | ✅ Complete | init, index, serve, preview, doctor, config |
-| Agent Adapters | ✅ Complete | OpenCode, Cursor, Gemini CLI |
-| Metrics | ✅ Complete | Prometheus /metrics + Grafana dashboard |
+| Agent Adapters | ✅ Complete | OpenCode, Copilot (VS Code), Claude Code hooks |
+| Metrics | ✅ Complete | Prometheus /metrics exposition |
 | Benchmarks | ✅ Complete | Component Eval, Mattermost (9k), DefinitelyTyped (53k) |
 
 ### External Tool Integration
 
 | Tool | Purpose | Status |
 |------|---------|--------|
-| tree-sitter | AST parsing (111 languages via arborium) | ✅ |
+| tree-sitter | AST parsing (371 languages via tree-sitter-language-pack) | ✅ |
 | tantivy | BM25 full-text search (MmapDirectory) | ✅ |
 | ast-grep | Structural code search | ✅ |
 | tiktoken-rs | Token counting (cl100k_base) | ✅ |
-| RTK | Tool-output compression | ✅ |
-| Prometheus | /metrics exposition + Grafana | ✅ |
+| RTK | Tool-output compression (external binary, opt-in via installer) | ⚠ optional |
+| Prometheus | /metrics exposition | ✅ |
 
 ## Development
 
@@ -532,7 +532,7 @@ cargo test -- --nocapture
 
 ## Roadmap
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the full release history and future plans. Benchmarks: [docs/BENCHMARKS_V1.md](docs/BENCHMARKS_V1.md).
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the full release history and future plans. Benchmarks: [docs/BENCHMARKS_V1.md](docs/BENCHMARKS_V1.md) (includes the 2026-09-06 fresh validation run).
 
 ## License
 

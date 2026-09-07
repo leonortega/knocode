@@ -162,6 +162,7 @@ fn cmd_serve(port: u16, _socket: Option<String>) -> Result<(), String> {
 
     let mut cmd = std::process::Command::new(&daemon_exe);
     cmd.current_dir(&daemon_work_dir)
+        .args(daemon_spawn_args(port))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
@@ -189,7 +190,21 @@ fn cmd_serve(port: u16, _socket: Option<String>) -> Result<(), String> {
     println!(" ✗");
     println!("Warning: daemon started but /health not responding within 20s");
     println!("  Verify: curl {}", health_url);
+    if port != 9527 && is_daemon_running("http://127.0.0.1:9527/health") {
+        // The spawned binary ignored --port: either a pre-`--port` daemon is
+        // already listening on the default port, or the installed copy is stale.
+        println!("  Hint: something answered on the default port 9527 instead of {port}.");
+        println!("        An older daemon may already be running there, or the installed");
+        println!("        knocode-daemon is stale (ignores --port) — reinstall via");
+        println!("        scripts/install.ps1 or scripts/install.sh to refresh it.");
+    }
     Ok(())
+}
+
+/// CLI args forwarded to the spawned `knocode-daemon` binary. Kept pure so the
+/// pass-through contract (the port MUST reach the child) has a unit test.
+fn daemon_spawn_args(port: u16) -> Vec<String> {
+    vec!["--port".to_string(), port.to_string()]
 }
 
 fn is_daemon_running(health_url: &str) -> bool {
@@ -221,14 +236,129 @@ fn find_daemon_exe() -> Result<PathBuf, String> {
             return Ok(PathBuf::from(path));
         }
     }
-    // 3. Check current directory target/release
-    let local = PathBuf::from("target/release/knocode-daemon");
-    #[cfg(windows)]
-    let local = local.with_extension("exe");
-    if local.exists() {
-        return Ok(local);
+    // 3. Check cargo's real target dir(s) — release first, then debug (a debug
+    //    build from `cargo test`/`cargo build` is still better than nothing).
+    for cand in daemon_candidate_paths() {
+        if cand.exists() {
+            return Ok(cand);
+        }
     }
-    Err("knocode-daemon not found. Build with: cargo build --release -p knocode-daemon".to_string())
+    Err(format!(
+        "knocode-daemon not found (searched: {}). Build with: cargo build --release -p knocode-daemon",
+        daemon_candidate_paths()
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
+    ))
+}
+
+/// All candidate paths for the prebuilt daemon binary, in preference order:
+/// release before debug within each target dir (a debug build from `cargo
+/// test` is still better than nothing).
+fn daemon_candidate_paths() -> Vec<PathBuf> {
+    let mut cands = Vec::new();
+    for dir in daemon_target_dirs() {
+        for profile in ["release", "debug"] {
+            let mut p = dir.join(profile).join("knocode-daemon");
+            #[cfg(windows)]
+            let p = p.with_extension("exe");
+            cands.push(p);
+        }
+    }
+    cands
+}
+
+/// Extract `target_directory` from `cargo metadata --no-deps --format-version 1`
+/// output. Pure so the JSON contract has a unit test (Windows paths arrive
+/// JSON-escaped, e.g. "C:\\\\Users\\\\...").
+fn parse_cargo_metadata_target_dir(stdout: &[u8]) -> Option<PathBuf> {
+    let json: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    let dir = json.get("target_directory")?.as_str()?;
+    if dir.trim().is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(dir))
+    }
+}
+
+/// Run `cargo metadata` and return cargo's real target dir — the authoritative
+/// answer covering CARGO_TARGET_DIR env, [build] target-dir in any
+/// .cargo/config.toml, and the default workspace layout. Falls back to the
+/// standard cargo install location (CARGO_HOME/bin) when cargo isn't on PATH.
+fn cargo_metadata_target_dir() -> Option<PathBuf> {
+    let mut bins: Vec<PathBuf> = vec![PathBuf::from("cargo")];
+    if let Some(home) = std::env::var("CARGO_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(dirs_home)
+    {
+        let mut alt = home.join("bin").join("cargo");
+        #[cfg(windows)]
+        let alt = alt.with_extension("exe");
+        bins.push(alt);
+    }
+    for bin in bins {
+        let out = match std::process::Command::new(&bin)
+            .args(["metadata", "--no-deps", "--format-version", "1"])
+            .output()
+        {
+            // Spawn failed (cargo not found) — try the next candidate location.
+            Err(_) => continue,
+            Ok(out) => out,
+        };
+        // cargo ran but metadata failed (e.g. no manifest in CWD) — no answer.
+        if !out.status.success() {
+            return None;
+        }
+        return parse_cargo_metadata_target_dir(&out.stdout);
+    }
+    None
+}
+
+/// Normalize separators for display/storage: cargo config values and env vars
+/// often use `/` while Rust's `join()` appends the platform separator, which
+/// otherwise produces mixed output like `C:/repo/target\\release\\knocode-daemon.exe`
+/// in `knocode serve`'s `Binary:` line and the not-found error's searched list.
+fn normalize_path_separators(p: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        PathBuf::from(p.to_string_lossy().replace('/', "\\"))
+    }
+    #[cfg(not(windows))]
+    {
+        p.to_path_buf()
+    }
+}
+
+/// Candidate dirs to search for the prebuilt daemon, most authoritative first:
+/// CARGO_TARGET_DIR env (cargo honors it over config files), the `cargo
+/// metadata` answer, then the legacy repo-local ./target.
+fn daemon_target_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(env_dir) = std::env::var("CARGO_TARGET_DIR") {
+        if !env_dir.trim().is_empty() {
+            let p = PathBuf::from(env_dir);
+            dirs.push(normalize_path_separators(&if p.is_absolute() {
+                p
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(p)
+            }));
+        }
+    }
+    if let Some(dir) = cargo_metadata_target_dir() {
+        let dir = normalize_path_separators(&dir);
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    let legacy = PathBuf::from("target");
+    if !dirs.contains(&legacy) {
+        dirs.push(legacy);
+    }
+    dirs
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -1471,6 +1601,49 @@ fn dirs() -> Option<PathBuf> {
 mod tests {
     use super::*;
     
+    #[test]
+    fn test_parse_cargo_metadata_target_dir() {
+        // Unix-style path
+        let unix: &[u8] =
+            br#"{"reason":"...","target_directory":"/home/u/proj/target","workspace_root":"/home/u/proj"}"#;
+        assert_eq!(
+            parse_cargo_metadata_target_dir(unix),
+            Some(PathBuf::from("/home/u/proj/target"))
+        );
+        // Windows paths arrive JSON-escaped (raw bytes keep the double backslashes)
+        let win: &[u8] = br#"{"target_directory":"C:\\\\Users\\\\marce\\\\.cargo\\\\target"}"#;
+        assert_eq!(
+            parse_cargo_metadata_target_dir(win),
+            Some(PathBuf::from("C:\\\\Users\\\\marce\\\\.cargo\\\\target"))
+        );
+        assert_eq!(parse_cargo_metadata_target_dir(br#"{"nope":1}"#), None);
+        assert_eq!(parse_cargo_metadata_target_dir(b"not json"), None);
+        assert_eq!(parse_cargo_metadata_target_dir(b""), None);
+    }
+
+    #[test]
+    fn test_normalize_path_separators() {
+        // cargo config/env values use `/` while join() appends `\` on Windows —
+        // the normalized path must display with the platform separator only.
+        let p = normalize_path_separators(Path::new("C:/Users/marce/.cargo/target"));
+        #[cfg(windows)]
+        assert_eq!(p.to_string_lossy(), "C:\\Users\\marce\\.cargo\\target");
+        #[cfg(not(windows))]
+        assert_eq!(p.to_string_lossy(), "C:/Users/marce/.cargo/target");
+    }
+
+    #[test]
+    fn test_daemon_spawn_args_forward_port() {
+        assert_eq!(
+            daemon_spawn_args(9599),
+            vec!["--port".to_string(), "9599".to_string()]
+        );
+        assert_eq!(
+            daemon_spawn_args(9527),
+            vec!["--port".to_string(), "9527".to_string()]
+        );
+    }
+
     #[test]
     fn test_cli_parsing() {
         let cli = Cli::try_parse_from(["knocode", "init"]);

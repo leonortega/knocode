@@ -40,10 +40,10 @@ run_eval() {
 
 case "$SUITE" in
   context|all)
-    run_eval "Context Quality" "config-context-quality.yaml"
+    run_eval "Context Quality" "promptfooconfig.yaml"
     ;;
   *)
-    echo "Usage: $0 [context|all] [--view]  (model routing removed — see LLM_ROUTING_REMOVAL.md)"
+    echo "Usage: $0 [context|all] [--view]  (model routing removed — see docs/01-architecture/REMOVED_TOOLS.md)"
     exit 1
     ;;
 esac

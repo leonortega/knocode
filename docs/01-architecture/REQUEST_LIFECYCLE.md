@@ -26,7 +26,7 @@ sequenceDiagram
 
     rect rgb(220, 240, 240)
     Note over Agent,AD: Stage 0: Readiness wait
-    Agent->>AD: Probe (GET /health or UDS Probe) until state = "ready"
+    Agent->>AD: Probe (GET /health or HTTP Probe) until state = "ready"
     end
 
     rect rgb(230, 245, 255)
@@ -98,16 +98,16 @@ sequenceDiagram
 ### Entry Point
 
 Before the first request, the agent must confirm the daemon is ready. During the
-cold start (initial index) the UDS socket is NOT bound yet — the daemon gates
-binding on indexing completion — so readiness is polled over HTTP first.
+cold start (initial index) the daemon holds the engine lock, so readiness is
+polled over HTTP first.
 
 ### Processing
 
 1. Poll HTTP `GET /health` until `state == "ready"` (or `GET /metrics` shows
    `knocode_daemon_ready 1`). During indexing these answer `state: "indexing"`.
-2. Once the UDS socket exists, the same signal is available on the primary
-   transport via the `Probe` payload (`{ "type": "Probe" }`) — answered before
-   rate-limiting, never gated, no engine lock.
+2. The same signal is available via the HTTP `Probe` payload — `POST /hook` with
+   `{ "type": "Probe" }` — answered before rate-limiting, never gated, no engine
+   lock.
 3. If a real request is sent while not ready: HTTP `POST /hook` returns `503`
    (`reason: "daemon_indexing"`). Retry with backoff — this is a retry signal,
    not a fail-open passthrough.
@@ -142,7 +142,7 @@ generates a response.
 
 ### Processing
 
-1. Adapter Layer receives MessagePack-encoded request over UDS
+1. Adapter Layer receives the JSON-encoded HTTP request (`POST /hook`)
 2. Parse and validate request
 3. Generate correlation ID: `req_{uuid_v4}`
 4. Start tracing span with correlation ID
@@ -156,7 +156,7 @@ Internal `TaskRequest` struct passed to Context Engine.
 
 | Error | Response |
 |-------|----------|
-| Invalid MessagePack | OriginalPassthrough {reason: "invalid_request"} |
+| Invalid JSON body | OriginalPassthrough {reason: "invalid_request"} |
 | Missing `message` | OriginalPassthrough {reason: "invalid_request"} |
 | Missing `session_id` | OriginalPassthrough {reason: "invalid_request"} |
 
@@ -316,7 +316,7 @@ Content is assembled in this fixed order for maximum prompt cache hit rates:
 #### Step 3: Add Docs Context
 
 ```
-docs_budget = total_budget * 0.15  // 1800 tokens
+docs_budget = total_budget * 0.45  // 5400 tokens
 
 for entry in knowledge_entries:
     entry_tokens = count_tokens(entry.value)
@@ -428,7 +428,7 @@ Context pack ready. Format and return to agent.
 
 4. Log: `INFO request_completed correlation_id={id} tokens={total} model={model}`
 
-5. Return MessagePack response over UDS
+5. Return the HTTP JSON response
 
 ### Output
 
@@ -449,8 +449,9 @@ Add rate limiting to the API
 Every request logs token usage to SQLite:
 
 ```sql
-INSERT INTO token_usage (correlation_id, request_type, input_tokens, output_tokens, model, tier, created_at)
-VALUES ('req_xyz789', 'context', 8500, 0, 'gpt-4o', 'balanced', '2025-01-15T10:30:00Z');
+-- Migration 007 dropped the model/tier columns — the runtime is model-agnostic.
+INSERT INTO token_usage (correlation_id, request_type, input_tokens, output_tokens)
+VALUES ('req_xyz789', 'context', 8500, 0);
 ```
 
 ### Errors
@@ -549,7 +550,7 @@ After the request cycle completes:
 | Stage 7: Response | < 10ms | 50ms |
 | **Total Runtime Overhead** | **< 160ms** | **< 30s (hard limit)** |
 | Stage 8: Model Request | N/A (external) | N/A |
-| Stage 9: Tool Compression | < 20ms per tool | 100ms per tool |
+| Stage 9: Tool Execution | N/A (agent-owned; compression = RTK, external) | N/A |
 | Stage 10: Final Response | N/A (agent) | N/A |
 
 ### Hard Limits
@@ -627,7 +628,7 @@ The following rules are **mandatory** for any coding AI implementing this specif
 
 20. **Performance targets are mandatory.** The timing budget in this document defines acceptable performance. Target low single digits; hard limit 30 seconds.
 
-21. **Implement the daemon model.** The Context Engine runs as a long-lived daemon with Unix socket IPC, not spawn-per-request.
+21. **Implement the daemon model.** The Context Engine runs as a long-lived daemon exposing the HTTP API (`POST /hook`, `POST /mcp`), not spawn-per-request.
 
 22. **Embed native Rust crates.** tree-sitter, ast-grep, and ripgrep are embedded as native Rust crates, not shelled out to per call.
 

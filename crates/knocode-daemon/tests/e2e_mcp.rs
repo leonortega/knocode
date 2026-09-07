@@ -132,7 +132,7 @@ async fn e2e_mcp_contracts() {
             "method": "tools/call",
             "params": {
                 "name": "knocode_context",
-                "arguments": { "prompt": "eshop basket checkout flow eshop_marker_alpha", "repository_path": repo_path }
+                "arguments": { "prompt": "eshop basket checkout flow eshop_marker_alpha", "repository_path": repo_path, "request_id": "e2e-req-alpha" }
             }
         }),
     )
@@ -143,6 +143,8 @@ async fn e2e_mcp_contracts() {
     assert_eq!(result["isError"], false, "{result}");
     assert_eq!(result["structuredContent"]["type"], "context");
     assert_eq!(result["structuredContent"]["passthrough"], false);
+    // request correlation (§7): the daemon echoes the client-generated request_id
+    assert_eq!(result["structuredContent"]["request_id"], "e2e-req-alpha", "{result}");
     let text = result["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("eshop_marker_alpha"), "seeded content must be in answer: {text}");
     let prov = result["structuredContent"]["provenance"].as_array().unwrap();
@@ -157,7 +159,7 @@ async fn e2e_mcp_contracts() {
             "method": "tools/call",
             "params": {
                 "name": "knocode_context",
-                "arguments": { "prompt": "zzzqqq unrelated gibberish xyzzy plugh", "repository_path": repo_path }
+                "arguments": { "prompt": "zzzqqq unrelated gibberish xyzzy plugh", "repository_path": repo_path, "request_id": "e2e-req-miss" }
             }
         }),
     )
@@ -165,6 +167,7 @@ async fn e2e_mcp_contracts() {
     assert_eq!(status, 200);
     let result = &json["result"];
     assert_eq!(result["structuredContent"]["passthrough"], true, "{result}");
+    assert_eq!(result["structuredContent"]["request_id"], "e2e-req-miss", "{result}");
     assert_eq!(
         result["content"][0]["text"].as_str().unwrap(),
         "zzzqqq unrelated gibberish xyzzy plugh",

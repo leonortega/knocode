@@ -31,10 +31,34 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
   // Bounded, fail-open readiness gate (cold-start indexing).
   await ensureDaemonReady();
 
-  const contextText = await requestContextEnrichment(
+  // Pre-model enrichment over the daemon MCP surface. One Date.now() pair — the
+  // integration-boundary metric. request_id correlates with the daemon's log line.
+  const startedAt = Date.now();
+  const outcome = await requestContextEnrichment(
     request.prompt,
     cwd,
   );
+  const latencyMs = Date.now() - startedAt;
+
+  let contextText: string | undefined;
+  // Pack metadata for the turn (0 on passthrough) — eval harnesses read these
+  // from turn metadata instead of parsing log lines.
+  let contextTokens = 0;
+  let contextFiles = 0;
+  if (outcome.kind === "enriched") {
+    contextText = outcome.enrichedText;
+    contextTokens = outcome.tokens;
+    contextFiles = outcome.files;
+    // The single integration-boundary metrics line: "Knocode added N ms to this
+    // turn" — latency is client cost, tokens/files are pack size and breadth,
+    // request_id joins with the daemon's "MCP knocode_context built" log line.
+    console.log(`[knocode] context request_id=${outcome.requestId} latency=${latencyMs}ms tokens=${outcome.tokens} files=${outcome.files}`);
+  } else {
+    // Passthrough (no_context_hits / daemon_indexing / unreachable): run with the
+    // bare prompt. The reason makes this line self-sufficient — no daemon log
+    // access needed to classify it.
+    console.log(`[knocode] context passthrough request_id=${outcome.requestId} reason=${outcome.reason} latency=${latencyMs}ms`);
+  }
 
   const messages: vscode.LanguageModelChatMessage[] = [];
 
@@ -72,5 +96,16 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
     throw new Error(`Knocode model request failed: ${msg}`);
   }
 
-  return { metadata: { knocodeContext: contextText ? "attached" : "none" } };
+  return {
+    metadata: {
+      knocodeContext: contextText ? "attached" : "none",
+      knocodeRequestId: outcome.requestId,
+      knocodeContextTokens: contextTokens,
+      knocodeContextFiles: contextFiles,
+      // Client-side enrichment cost in ms (the requestContextEnrichment call only;
+      // readiness-gate waiting is excluded). Recorded on passthrough turns too, so
+      // evals can measure what a failed/unanswered request cost.
+      knocodeLatencyMs: latencyMs,
+    },
+  };
 };

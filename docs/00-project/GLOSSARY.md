@@ -14,13 +14,13 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Daemon
 
-**Definition:** The long-lived local process that hosts the Context Engine and all runtime modules. Communicates with the Adapter Layer over a Unix domain socket using MessagePack.
+**Definition:** The long-lived local process that hosts the Context Engine and all runtime modules. Exposes a single HTTP listener (default `127.0.0.1:9527`) with `POST /hook` for prompt enrichment, `POST /mcp` for MCP clients, plus `GET /health` and `GET /metrics`.
 
 **Scope:** The process lifecycle is: start → initialize → listen → serve requests → shutdown.
 
 ### Agent
 
-**Definition:** A coding agent that interacts with a developer to write, modify, and understand code. Examples: opencode, Claude Code, Cursor, Gemini CLI.
+**Definition:** A coding agent that interacts with a developer to write, modify, and understand code. Examples: OpenCode, Claude Code, GitHub Copilot.
 
 **Scope:** External to the runtime. The runtime improves the agent but does not become the agent.
 
@@ -38,7 +38,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Adapter Layer
 
-**Definition:** One thin adapter per agent CLI, implementing two operations: intercept-before-generation (rewrite the message) and intercept-before-tool-call (allow/deny/modify). Adapters translate between agent-specific hooks and the runtime's internal format.
+**Definition:** One thin adapter per agent CLI, implementing the intercept-before-generation operation (rewrite the message before the model sees it). Adapters translate between agent-specific hooks and the runtime's HTTP API (`POST /hook`).
 
 **Scope:** The entry point of the runtime. One adapter type per supported agent.
 
@@ -98,7 +98,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Knowledge Hub
 
-**Definition:** One organizational surface for project docs, ADRs, templates, and long-term memory. BM25/tantivy lexical search over stored knowledge (FlashRank and engram removed — see REMOVED_TOOLS.md and REMOVED_TOOLS.md).
+**Definition:** One organizational surface for project docs, ADRs, templates, and long-term memory. BM25/tantivy lexical search over stored knowledge (FlashRank and engram removed — see REMOVED_TOOLS.md).
 
 **Scope:** Owns: storage and retrieval of all knowledge types.
 
@@ -156,7 +156,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 **Definition:** A memory system (`Gentleman-Programming/engram`): single Go binary, SQLite+FTS5, MCP-native. Provides save and search capabilities without LLM or embedding dependencies. **Removed** from Knocode v1 — see REMOVED_TOOLS.md (replaced by SQLite+tantivy local).
 
-**Scope:** Used for persistent memory in the Knowledge Hub.
+**Scope:** Removed from the runtime; the Knowledge Hub persists cross-session knowledge in SQLite+tantivy.
 
 ### BM25
 

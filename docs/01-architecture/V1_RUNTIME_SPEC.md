@@ -28,20 +28,21 @@ is not an autonomous SDLC orchestrator.
 |--------|---------|------------|----------------|
 | **Observability** | See what the agent + runtime are doing (traces, metrics, costs) | 🟢🟢 | `knocode-daemon` (metrics), `knocode-events`, `knocode-storage` |
 | **Intelligence** | Understand the repository and build token-efficient context | 🟢🟢 | `knocode-repo-intel`, `knocode-context`, `knocode-knowledge` |
-| **Execution Optimization** | Reduce useless tool output (token waste) | 🟢 | `knocode-optimizer` |
+| **Execution Optimization** | Reduce useless tool output (token waste) | 🟢 | Delegated to RTK (external, opt-in via installers); local token accounting via `knocode-optimizer` + `tiktoken-rs` |
 | **Local Runtime** | Fast, fail-open infrastructure (IPC, lifecycle, readiness) | 🟢🟢 | `knocode-daemon`, `knocode-core`, `knocode-cli` |
 
 ## 2. Ownership Boundaries
 
 ### 2.1 What the Runtime owns
 
-- The **Runtime API** (UDS/MessagePack primary, HTTP fallback), the daemon
-  lifecycle, and fail-open guarantees.
+- The **Runtime API** (HTTP JSON on a single local listener — `POST /hook`,
+  `POST /mcp`), the daemon lifecycle, and fail-open guarantees.
 - **Readiness**: `GET /health` (`state: indexing|ready`), `GET /metrics`
-  (`knocode_daemon_ready`), HTTP `503 daemon_indexing`, and the UDS `Probe`
+  (`knocode_daemon_ready`), HTTP `503 daemon_indexing`, and the HTTP `Probe`
   payload. Clients wait on readiness before sending requests.
 - **Observability**: per-request traces, metrics, and (V1 gap) cost attribution.
-- **Execution optimization**: tool-output compression/filtering.
+- **Execution optimization**: delegated to RTK (§3.3); the runtime owns local
+  token accounting (`tiktoken-rs`).
 - The **Intelligence pillar**, implemented by Knocode (§2.2).
 
 ### 2.2 What Knocode owns (the Intelligence subsystem)
@@ -50,8 +51,7 @@ is not an autonomous SDLC orchestrator.
   retrieval → dependency relationships. Incremental indexing (tree-sitter +
   tantivy BM25 + ast-grep structural + dependency graph), auto-reindex watcher
   (`commit` / `filesystem` modes), cached-reader invalidation so queries serve
-  fresh commits immediately.
-- **Retrieval** — intent detection → query expansion → BM25 + structural search →
+  fresh commits immediately.- **Retrieval** — intent detection → query expansion → BM25 + structural search →
   graph boost → ranking. The runtime answers: *"given what the agent is doing,
   what repository information is worth giving it?"* — different from exposing grep.
 - **Context Construction** — token-efficient assembly (docs → code, frozen-prefix
@@ -129,7 +129,8 @@ V1 trace questions the Runtime must answer:
 
 ### 3.2 Intelligence (Knocode)
 
-- **Repository Intelligence** — incremental indexing; tree-sitter (111 langs),
+- **Repository Intelligence** — incremental indexing; tree-sitter (371 grammars
+  available via tree-sitter-language-pack; 42-language registry),
   tantivy BM25, ast-grep structural, dependency graph; `commit`/`filesystem`
   auto-reindex; index freshness guarantees (cached-handle invalidation).
 - **Retrieval** — intent → expansion → BM25 + structural → graph → ranking;
@@ -149,37 +150,42 @@ V1 trace questions the Runtime must answer:
 
 ### 3.4 Local Runtime
 
-- Single daemon process, tokio; UDS/MessagePack primary + HTTP/JSON fallback.
+- Single daemon process, tokio; HTTP JSON on a single local listener (no socket
+  transport).
 - Fail-open always: 30s hard timeout → `OriginalPassthrough`; readiness-gated
-  startup (listeners/UDS bind only after the initial index); graceful shutdown
+  startup (real requests served only after the initial index); graceful shutdown
   with watcher stop.
-- Security: input validation, secrets redaction, HMAC request signing, token
-  bucket rate limiting.
+- Security: input validation, secrets redaction, token-bucket rate limiting.
 
 ## 4. V1 Acceptance Criteria
 
 | # | Criterion | Current | Target |
 |---|-----------|---------|--------|
-| A1 | Retrieval P50 on a 9k-file repo | 27ms | ≤ 50ms |
-| A2 | Speedup vs `grep -rE` | 27–106× | ≥ 20× |
-| A3 | BuildContext total overhead (target budget) | — | < 160ms typical; 30s hard fail-open |
-| A4 | Retrieval recall@5 on 50-task eval | ~0.29 | ≥ 0.4 |
+| A1 | Retrieval P50 on a 9k-file repo | 7ms ([BENCHMARKS_V1.md](BENCHMARKS_V1.md), historical) | ≤ 50ms |
+| A2 | Speedup vs `grep -rE` | 36–67× ([BENCHMARKS_V1.md](BENCHMARKS_V1.md), historical) | ≥ 20× |
+| A3 | BuildContext total overhead (target budget) | 15.2ms mean on this repo ([BENCHMARKS_V1.md](BENCHMARKS_V1.md) fresh run 2026-09-06) | < 160ms typical; 30s hard fail-open |
+| A4 | Retrieval recall@5 on 50-task eval | 0.573 (2026-09-07, refreshed dataset, `eval/metrics/retrieval.py`) | ≥ 0.4 |
 | A5 | ~~Compression ratio on compressible tool output~~ — delegated to RTK | — | — |
 | A6 | Fail-open: agent always gets a response (never blocks) | ✅ | invariant |
 | A7 | Every request emits a complete trace (tool/retrieval/context/model sections) | partial (metrics-first) | full |
 | A8 | Per-request cost attribution | ❌ (gap) | ✅ |
-| A9 | Readiness contract: clients can wait on `state` before sending requests | ✅ (HTTP + UDS Probe) | invariant |
+| A9 | Readiness contract: clients can wait on `state` before sending requests | ✅ (HTTP /health + HTTP Probe) | invariant |
 | A10 | Queries serve fresh commits immediately after reindex | ✅ (cached-handle invalidation) | invariant |
+
+> Fresh-run evidence: the 2026-09-06 validation run in [BENCHMARKS_V1.md](BENCHMARKS_V1.md)
+> reran `cargo bench -p knocode-bench --bench context_bench` (BuildContext 15.2ms mean)
+> and `python eval/metrics/retrieval.py --k 5,10` (Recall@5 0.573 on the dataset refreshed
+> 2026-09-07) against v0.9.11.
 
 ## 5. Runtime API (V1 surface)
 
 | Transport | Endpoint / message | Purpose |
 |-----------|--------------------|---------|
-| UDS/MessagePack | `RequestPayload::MessageRewrite` | Pre-generation: enrich message with context |
-| UDS/MessagePack | `RequestPayload::Probe` | Readiness: `state`, `index_files`, `version` |
+| HTTP JSON | `POST /hook` — `RequestPayload::MessageRewrite` | Pre-generation: enrich message with context |
+| HTTP JSON | `POST /hook` — `RequestPayload::Probe` | Readiness: `state`, `index_files`, `version` |
 | HTTP | `GET /health` | Readiness + version + index count |
 | HTTP | `GET /metrics` | Prometheus exposition incl. `knocode_daemon_ready` |
-| HTTP | `POST /hook` | JSON fallback for the pre-generation hook; `503 daemon_indexing` while not ready |
+| MCP (JSON-RPC 2.0 over HTTP) | `POST /mcp` | `knocode_context` tool for MCP clients; `-32001 daemon_indexing` while not ready |
 
 ## 6. Evolution Path
 

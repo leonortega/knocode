@@ -187,27 +187,35 @@ Info "Checking prebuilt knocode..."
 $prebuilt = Join-Path $Root "target\release\knocode.exe"
 $prebuiltDaemon = Join-Path $Root "target\release\knocode-daemon.exe"
 # Fallback: cargo may use a global target dir (e.g. ~/.cargo/target) when
-# CARGO_TARGET_DIR or [build] target is set in .cargo/config.toml.
-# Detect via cargo metadata and copy binaries to repo-local target/release/.
-if (-not (Test-Path $prebuilt)) {
-  try {
-    $metaJson = & cargo metadata --no-deps --format-version 1 2>$null | Out-String
-    if ($LASTEXITCODE -eq 0 -and $metaJson) {
-      $cargoTargetDir = ($metaJson | ConvertFrom-Json).target_directory
-      if ($cargoTargetDir -and (Test-Path $cargoTargetDir)) {
-        $cargoReleaseDir = Join-Path $cargoTargetDir "release"
-        $srcKnocode = Join-Path $cargoReleaseDir "knocode.exe"
-        $srcDaemon = Join-Path $cargoReleaseDir "knocode-daemon.exe"
-        if (Test-Path $srcKnocode) {
-          New-Item -ItemType Directory -Force -Path (Split-Path $prebuilt) | Out-Null
-          Copy-Item -LiteralPath $srcKnocode -Destination $prebuilt -Force
-          if (Test-Path $srcDaemon) { Copy-Item -LiteralPath $srcDaemon -Destination $prebuiltDaemon -Force }
-          Info "Copied binaries from cargo target dir ($cargoReleaseDir) -> target/release/"
-        }
-      }
+# CARGO_TARGET_DIR or [build] target-dir is set in .cargo/config.toml.
+# Detect via cargo metadata and sync binaries to repo-local target/release/:
+# copy when missing, refresh when the cargo-built binary is newer.
+$cargoReleaseDir = $null
+try {
+  $metaJson = & cargo metadata --no-deps --format-version 1 2>$null | Out-String
+  if ($LASTEXITCODE -eq 0 -and $metaJson) {
+    $cargoTargetDir = ($metaJson | ConvertFrom-Json).target_directory
+    if ($cargoTargetDir -and (Test-Path $cargoTargetDir)) { $cargoReleaseDir = Join-Path $cargoTargetDir "release" }
+  }
+} catch {}
+function Sync-Prebuilt([string]$Name) {
+  $dest = Join-Path $Root "target\release\$Name.exe"
+  $src = if ($cargoReleaseDir) { Join-Path $cargoReleaseDir "$Name.exe" } else { $null }
+  if (-not (Test-Path $dest)) {
+    if ($src -and (Test-Path $src)) {
+      New-Item -ItemType Directory -Force -Path (Split-Path $dest) | Out-Null
+      Copy-Item -LiteralPath $src -Destination $dest -Force
+      Info "Copied $Name from cargo target dir ($cargoReleaseDir) -> target/release/"
     }
-  } catch {}
+    return
+  }
+  if ($src -and (Test-Path $src) -and ((Get-Item $src).LastWriteTime -gt (Get-Item $dest).LastWriteTime)) {
+    Copy-Item -LiteralPath $src -Destination $dest -Force
+    Info "Refreshed stale $Name from cargo target dir ($cargoReleaseDir) -> target/release/"
+  }
 }
+Sync-Prebuilt "knocode"
+Sync-Prebuilt "knocode-daemon"
 if (Test-Path $prebuilt) { Ok "knocode at target/release/knocode.exe" } else { Warn "knocode binary not found at target/release/knocode.exe - build manually: cargo build --release"; Fail "prebuilt knocode.exe missing - expected at target/release/knocode.exe" }
 if (Test-Path $prebuiltDaemon) { Ok "knocode-daemon at target/release/knocode-daemon.exe" } else { Warn "knocode-daemon not found at target/release/knocode-daemon.exe" }
 

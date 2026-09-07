@@ -1,6 +1,11 @@
 # Context Quality Evaluation Dataset
-# Tests that the Context Engine produces high-quality context packs
+# Exercises the context-quality provider's output contract.
+# - "daemon-path" tests use only real-API vars (task, files_mentioned) and run
+#   against the live daemon when KNOCODE_DAEMON_URL is reachable.
+# - "mock-contract" tests inject simulated inputs (knowledge_entries,
+#   large_file_count) that only the mock engine understands.
 
+# daemon-path: mentioned files land in code_context
 - description: "Context includes mentioned files"
   vars:
     task: "implement a new function in src/auth.rs"
@@ -9,6 +14,7 @@
     - type: contains
       value: "src/auth.rs"
 
+# daemon-path + mock: token usage always reported
 - description: "Context respects token budget"
   vars:
     task: "explain the codebase"
@@ -17,22 +23,16 @@
     - type: contains
       value: "total_tokens"
 
-- description: "Context includes matched skills"
-  vars:
-    task: "add rate limiting to the API"
-    skills_matched: "Rate Limiting:0.8"
-  assert:
-    - type: contains
-      value: "Rate Limiting"
-
-- description: "Context includes relevant knowledge"
+# mock-contract: knowledge entries land in docs_context
+- description: "Context includes knowledge entries in docs_context"
   vars:
     task: "use snake_case for variables"
     knowledge_entries: "naming_convention:Use snake_case"
   assert:
     - type: contains
-      value: "snake_case"
+      value: "naming_convention"
 
+# daemon-path + mock: empty query stays graceful (zeros, not an error)
 - description: "Context handles empty query gracefully"
   vars:
     task: ""
@@ -40,33 +40,38 @@
     - type: contains
       value: "total_tokens"
 
-- description: "Context truncates large content"
+# mock-contract: large content is truncated to the budget
+- description: "Context truncates large content to the token budget"
   vars:
     task: "show me everything"
     large_file_count: 100
+    max_tokens: 5000
   assert:
     - type: contains
       value: "total_tokens"
 
-- description: "Context includes routing decision"
+# daemon-path + mock: usage breakdown by source
+- description: "Context reports token usage by source"
   vars:
     task: "implement a new feature"
   assert:
     - type: contains
-      value: "token_usage"
+      value: "by_source"
 
-- description: "Context handles multiple skills"
-  vars:
-    task: "implement authentication with rate limiting"
-    skills_matched: "Authentication:0.9,Rate Limiting:0.7"
-  assert:
-    - type: contains
-      value: "Authentication"
-
-- description: "Context handles knowledge categories"
+# mock-contract: multiple knowledge entries
+- description: "Context handles multiple knowledge entries"
   vars:
     task: "follow the project conventions"
     knowledge_entries: "convention:Use TypeScript strict mode,pattern:Use functional components"
   assert:
     - type: contains
       value: "convention"
+
+# daemon-path: multiple mentioned files
+- description: "Context includes multiple mentioned files"
+  vars:
+    task: "implement authentication with rate limiting"
+    files_mentioned: "src/auth.rs,src/ratelimit.rs"
+  assert:
+    - type: contains
+      value: "src/ratelimit.rs"

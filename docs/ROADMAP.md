@@ -9,9 +9,9 @@
 
 ## Current Version: v0.9.11
 
-**Released:** September 3, 2026
+**Released:** September 6, 2026
 **Status:** Active
-**Crates:** 12 workspace members (+ `knocode-workflow` excluded, in `future/workflow/`)
+**Crates:** 10 workspace members (+ `knocode-workflow` excluded, in `future/workflow/`)
 **Tests:** ~400
 
 ---
@@ -139,7 +139,7 @@
 
 - **Retrieval Engine:** Intent detection → query expansion → BM25 + structural search (ast-grep) → graph boost → ranking
 - **CombinedRetriever** orchestrates the full pipeline with configurable `RetrievalPolicy`
-- **Benchmark suite:** 4 benchmarks (components, mattermost, dt, retrieval) — 27-106× faster than grep
+- **Benchmark suite:** 4 benchmarks (components, mattermost, dt, retrieval) — 37-67× faster than grep
 - **Watch mode:** Two auto-index modes — `commit` (default, polls git HEAD) and `filesystem` (real-time via notify)
 - **Dependency updates:** tantivy 0.26.1, git2 0.21, tantivy-tokenizer-api 0.7, tree-sitter-language-pack 1.16.1
 - **Cleanup:** Removed engram, FlashRank, LiteLLM, MkDocs, DBOS workflow, `knocode replay`
@@ -154,7 +154,7 @@ See [Architecture](01-architecture/ARCHITECTURE.md), [Components](01-architectur
 ### Core Pipeline
 
 ```
-Coding Agent → Adapter Layer (UDS/MessagePack) → Context Engine → Context Pack (YAML)
+Coding Agent → Adapter Layer (HTTP JSON) → Context Engine → Context Pack (YAML)
                                                        ↓
                                                Repository Intel
                                                Knowledge Hub
@@ -169,12 +169,12 @@ Tool-output compression: delegated to RTK (external binary, wired by installers)
 | Crate | Purpose |
 |-------|---------|
 | `knocode-core` | Shared types, config, IPC, traits |
-| `knocode-daemon` | HTTP/UDS server, adapter, metrics |
+| `knocode-daemon` | HTTP server (`POST /hook`, `POST /mcp`), adapter, metrics |
 | `knocode-cli` | CLI commands (init, index, preview, doctor, etc.) |
 | `knocode-context` | BuildContext pipeline, token budgeting |
 | `knocode-repo-intel` | tree-sitter, ripgrep, tantivy, graph, watcher |
 | `knocode-knowledge` | Knowledge Hub, retrieval |
-| `knocode-optimizer` | ❌ removed — RTK compression, tool output optimization (see REMOVED_TOOLS.md) |
+| `knocode-optimizer` | RTK adapter helpers (doctor probe, compressor fallback, tee-on-failure) — compression itself is RTK's |
 | `knocode-events` | Event bus (in-memory ring buffer) |
 | `knocode-storage` | SQLite + tantivy persistence |
 | `knocode-bench` | Criterion benchmarks |
@@ -199,11 +199,9 @@ Tool-output compression: delegated to RTK (external binary, wired by installers)
 | Agent | Tier | Status |
 |-------|------|--------|
 | OpenCode | 1 | ✅ Canonical integration |
-| Claude Code | 1 | ✅ Supported |
-| Cursor | 1 | ✅ Supported |
-| Gemini CLI | 1 | ✅ Supported |
-| Continue | 1 | ✅ Supported |
-| Copilot / Factory Droid / OpenClaw / Pi | 2 | ⏳ Scaffold |
+| Copilot (VS Code) | 1 | ✅ Supported |
+| Claude Code | 1 | ✅ Supported (hooks) |
+| Cursor / Gemini CLI / Continue | 2 | ⏳ Scaffold |
 | Codex / Windsurf / Cline / Kilo / Antigravity / Kimi | 2 | ⚠️ Best-effort |
 
 ---
@@ -218,8 +216,7 @@ Tool-output compression: delegated to RTK (external binary, wired by installers)
 
 ### v1.1 — Retrieval Quality
 
-- Recall@5 target: 0.4 on 50-task eval dataset (current: ~0.29)
-- Structural query improvement for exhaustive "find all X" patterns
+- Recall@5 target: ≥ 0.4 on 50-task eval dataset (**met — 0.573** on the dataset refreshed 2026-09-07, see [BENCHMARKS_V1.md](BENCHMARKS_V1.md)); remaining focus: MRR (0.302) and exhaustive "find all X" structural queries
 - Tantivy phrase query panic fix (waiting for upstream tantivy 0.26.2+)
 
 ### v2.0 — Platform Extensions
@@ -250,9 +247,9 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md) for development guidelines.
 | Metric | v0.1.0 | v0.3.0 | v0.5.0 | v0.7.5 | v0.9.0 |
 |--------|--------|--------|--------|--------|------------------|
 | Tests | 108 | 147 | 166 | ~184 | ~400 |
-| Languages | 4 | 10+ | 111 | 111 | 111 |
-| Latency P50 | <100ms | <50ms | <50ms | <50ms | 27-49ms |
-| Speedup vs grep | — | — | — | — | 27-106× |
-| Novelty | — | — | — | — | 53-89% |
+| Languages (registry / grammars available) | 4 / 4 | 10+ / 10+ | 42 / 371 | 42 / 371 | 42 / 371 |
+| Latency P50 | <100ms | <50ms | <50ms | <50ms | 1–42ms (repo-size dependent) |
+| Speedup vs grep | — | — | — | — | 37–67× |
+| Novelty | — | — | — | — | 39–53% |
 | Workflow | — | Noop | DBOS (opt) | DBOS → future/ | Removed |
 | Tool compliance | 58% | 90%+ | 15/16 | 15/16 | 15/16 |

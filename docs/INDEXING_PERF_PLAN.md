@@ -1,20 +1,20 @@
-# Indexing Performance Plan — [5/8] Full-text BM25 + Symbol Extraction + Dependency Graph
+# Indexing Performance Plan — Step [5/7] Full-text BM25 + Symbol Extraction + Dependency Graph
 
 > **Historical plan (v0.9.0).** `codebase-memory-mcp`, `engram`, and the Skill Engine were removed in v0.8.6–v0.9.0 (see `docs/01-architecture/REMOVED_TOOLS.md`). This document is retained for reference only.
 >
-> Scope: `knocode init` Step [5/8] for 63k-file repos. Focus is `RepositoryIntelligence::index_repository()` + `build_dependency_graph()` hot path in `crates/knocode-repo-intel/src/lib.rs:164`.
+> Scope: `knocode init` Step [5/7] for 63k-file repos. Focus is `RepositoryIntelligence::index_repository()` + `build_dependency_graph()` hot path in `crates/knocode-repo-intel/src/lib.rs:164`.
 
 ## 1. Background
 
 `knocode init` 7-step pipeline `crates/knocode-cli/src/main.rs:300` + `docs/01-architecture/ARCHITECTURE.md:278`:
 
 ```
-[5/8] Indexing (full-text BM25 + symbol extraction + dependency graph)
+[5/7] Indexing (full-text BM25 + symbol extraction + dependency graph)
   -> RepositoryIntelligence::index_repository()  // BM25 + symbols + tantivy
   -> RepositoryIntelligence::build_dependency_graph() // second walk + extract_imports
 ```
 
-At ~300 files/sec, 63k files = ~210s. User reports timeout on this step. Daemon `request_timeout_ms=30000` `crates/knocode-core/src/config.rs:138` + UDS timeout `crates/knocode-daemon/src/lifecycle.rs:309` also fail-open on 30s for `BuildContext`, so init slowness blocks validation `[7/8]` too.
+At ~300 files/sec, 63k files = ~210s. User reports timeout on this step. Daemon fail-open is 30s for `BuildContext`, so init slowness blocks validation `[7/7]` too.
 
 ## 2. Root Causes (verified)
 
@@ -33,7 +33,7 @@ At ~300 files/sec, 63k files = ~210s. User reports timeout on this step. Daemon 
 
 **Goals:**
 - Cold init 63k < 90s, warm incremental ( <1% changed) < 8s on NVMe.
-- No timeout on `[5/8]`; fail-open still respected but not triggered.
+- No timeout on `[5/7]`; fail-open still respected but not triggered.
 - No schema change; WAL `storage/src/lib.rs:36` preserved.
 
 **Non-Goals:**
@@ -55,7 +55,7 @@ At ~300 files/sec, 63k files = ~210s. User reports timeout on this step. Daemon 
 ### Phase 3 — Parallelism & I/O (est. 2-3x cold win, 1 PR)
 
 6. **Parallel walk** `lib.rs:794` `WalkBuilder::threads(4)` (keep `git_ignore(true)`, `hidden(false)`).Producer-consumer: walk thread pushes `PathBuf` to `crossbeam::channel`, 4 workers do `classify_file + detect_language + metadata filter` before read. Keep single SQLite/tantivy writer thread to respect `!Send` `Connection`.
-7. **Defer graph off init hot path** `cli/main.rs:310`: remove blocking `build_dependency_graph()` from `[5/8]`. Compute lazily: daemon `ContextEngine` caches `DependencyGraph` on first `build_context` with `tokio::task::spawn_blocking` + `timeout 2s`, or `knocode graph --warm` explicit command. `init` prints `Dependency edges: deferred (warm on first query / run 'knocode graph')`. Saves second 63k walk during init.
+7. **Defer graph off init hot path** `cli/main.rs:310`: remove blocking `build_dependency_graph()` from `[5/7]`. Compute lazily: daemon `ContextEngine` caches `DependencyGraph` on first `build_context` with `tokio::task::spawn_blocking` + `timeout 2s`, or `knocode graph --warm` explicit command. `init` prints `Dependency edges: deferred (warm on first query / run 'knocode graph')`. Saves second 63k walk during init.
 8. **Reduce `is_indexable_text_file` + `classify_file` alloc**: use `path.extension()` once, pass `&str` not `String`.
 
 ### Phase 4 — Observability & guardrails (1 PR)

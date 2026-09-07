@@ -92,6 +92,10 @@ fn tools_list() -> Value {
                     "repository_path": {
                         "type": "string",
                         "description": "Absolute workspace root — daemon scopes retrieval to this repository (fallback: daemon CWD)."
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "description": "Optional client-generated correlation id (UUID). Echoed in the daemon log lines and structuredContent so a plugin log line can be joined with the daemon log line for the same request."
                     }
                 },
                 "required": ["prompt"]
@@ -196,8 +200,19 @@ async fn tool_context(
 ) -> (StatusCode, Json<Value>) {
     // Readiness gate: initialize/ping/tools/list always answer; a context BUILD needs
     // the engine, which is locked during the initial index / an auto-reindex.
+    // Optional client-generated correlation id (§7 request correlation): echoed in every
+    // log line and in structuredContent so plugin→daemon requests are traceable without
+    // distributed tracing. Absent → "-" in logs, null in structuredContent.
+    let request_id = args
+        .get("request_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let logged_request_id = request_id.as_deref().unwrap_or("-");
+
     if !crate::metrics::global().is_ready() {
-        tracing::warn!("MCP tools/call knocode_context rejected — daemon indexing in progress (-32001)");
+        tracing::warn!(request_id = %logged_request_id, "MCP tools/call knocode_context rejected — daemon indexing in progress (-32001)");
         return error_response(
             id,
             ERROR_DAEMON_INDEXING,
@@ -226,6 +241,9 @@ async fn tool_context(
         .map(|s| s.to_string());
 
     let started = std::time::Instant::now();
+    // Request count keyed by transport+tool — /hook counts "PreGeneration" at its own
+    // dispatch site, so knocode_requests_total distinguishes MCP from HTTP traffic.
+    crate::metrics::global().inc_requests("mcp_context");
     match handle_pre_generation(
         prompt.to_string(),
         "mcp".to_string(),
@@ -261,7 +279,7 @@ async fn tool_context(
                 .as_ref().as_ref()
                 .map(|p| p.repository_state.clone())
                 .unwrap_or_default();
-            tracing::info!(took_ms = %started.elapsed().as_millis(), "MCP knocode_context built");
+            tracing::info!(request_id = %logged_request_id, took_ms = %started.elapsed().as_millis(), "MCP knocode_context built");
             result_response(
                 id,
                 tool_result(
@@ -272,6 +290,7 @@ async fn tool_context(
                         "repository_state": repository_state,
                         "total_tokens": total_tokens,
                         "provenance": provenance,
+                        "request_id": request_id,
                     }),
                     false,
                 ),
@@ -280,12 +299,12 @@ async fn tool_context(
         Ok(HttpResponsePayload::OriginalPassthrough { original, reason }) => {
             // Zero-value suppression (TASK-031): text is the original prompt — the
             // plugin must leave the message untouched.
-            tracing::info!(reason = %reason, "MCP knocode_context passthrough");
+            tracing::info!(request_id = %logged_request_id, reason = %reason, "MCP knocode_context passthrough");
             result_response(
                 id,
                 tool_result(
                     original,
-                    json!({ "type": "context", "passthrough": true, "reason": reason }),
+                    json!({ "type": "context", "passthrough": true, "reason": reason, "request_id": request_id }),
                     false,
                 ),
             )
@@ -300,12 +319,12 @@ async fn tool_context(
         ),
         Err(e) => {
             crate::metrics::global().inc_fail_open();
-            tracing::error!(error = %e, "MCP knocode_context build failed");
+            tracing::error!(request_id = %logged_request_id, error = %e, "MCP knocode_context build failed");
             result_response(
                 id,
                 tool_result(
                     format!("knocode context build failed: {e}"),
-                    json!({ "type": "context", "passthrough": true, "reason": e }),
+                    json!({ "type": "context", "passthrough": true, "reason": e, "request_id": request_id }),
                     true,
                 ),
             )

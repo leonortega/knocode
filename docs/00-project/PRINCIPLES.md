@@ -71,7 +71,7 @@ Define the engineering principles that govern every implementation decision. Whe
 - ast-grep for structural code search — embedded as native Rust crate
 - ripgrep for text search — embedded as native Rust crate
 - BM25/tantivy for full-text indexing and search
-- FlashRank for reranking — via `ort` (ONNX Runtime) — removed (see REMOVED_TOOLS.md / REMOVED_TOOLS.md)
+- FlashRank for reranking — via `ort` (ONNX Runtime) — removed (see REMOVED_TOOLS.md)
 - engram for memory — SQLite+FTS5, MCP-native — removed (see REMOVED_TOOLS.md; SQLite+tantivy local)
 - RTK for tool-output compression — delegated entirely (external binary, not embedded in the daemon)
 - tiktoken-rs for local token counting — never via model API round-trip
@@ -98,7 +98,7 @@ Define the engineering principles that govern every implementation decision. Whe
 **Implications:**
 - One database schema, not a schema versioning system
 - One configuration format (TOML)
-- One IPC protocol (Unix domain socket with MessagePack)
+- One IPC protocol (HTTP JSON on a single local listener — see ARCHITECTURE.md)
 - One context format (YAML with fixed sections)
 - Direct struct usage, not trait objects for component interfaces
 - Concrete error types, not generic error enums
@@ -121,7 +121,7 @@ Define the engineering principles that govern every implementation decision. Whe
 
 **Implications:**
 - Context packs have hard token budgets enforced by the Context Engine
-- Tool outputs are compressed via RTK before inclusion in context
+- Tool outputs are compressed via RTK before reaching the model (RTK owns compression; knocode owns context)
 - Only relevant files are included, not entire directories
 - Duplicated content is deduplicated across context sources
 - Token counts are tracked locally via tiktoken-rs (never via model API)

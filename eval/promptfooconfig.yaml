@@ -1,13 +1,10 @@
-description: "Knocode AI Runtime Evaluation"
+description: "Knocode Context Quality Evaluation"
 
 providers:
   - id: "file://providers/context-quality.js"
     label: "Context Quality"
 
 tests:
-  - ./datasets/repository_tasks.yaml
+  - ./datasets/context-quality.yaml
 
-outputPath: ./results/evaluation.json
-
-defaultTest:
-  threshold: 0.8
+outputPath: ./results/context-quality.json

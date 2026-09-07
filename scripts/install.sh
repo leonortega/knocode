@@ -90,6 +90,33 @@ else ok "$(git --version)"; fi
 # 1. Use prebuilt knocode (no compile/test - use repository binary)
 if [ "$SKIP_BUILD" = true ]; then info "Skipping build check (--skip-build)"; fi
 info "Checking prebuilt knocode..."
+# Fallback: cargo may use a global target dir (e.g. ~/.cargo/target) when
+# CARGO_TARGET_DIR or [build] target-dir is set in .cargo/config.toml.
+# Detect via cargo metadata and sync binaries into repo-local target/release/
+# (mirrors install.ps1): copy when missing, refresh when the cargo-built
+# binary is newer than the repo-local copy.
+CARGO_RELEASE_DIR=""
+if command -v cargo >/dev/null 2>&1; then
+  cdir="$(cargo metadata --no-deps --format-version 1 2>/dev/null | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' | head -n1)"
+  if [ -n "$cdir" ]; then
+    cdir="$(printf '%s' "$cdir" | sed 's#\\\\#/#g')"  # JSON \\ -> / (Windows-safe, Unix-clean)
+    [ -d "$cdir/release" ] && CARGO_RELEASE_DIR="$cdir/release"
+  fi
+fi
+sync_prebuilt() { # $1 = binary name (knocode | knocode-daemon)
+  for ext in "" ".exe"; do
+    src="$CARGO_RELEASE_DIR/$1$ext"; dest="$ROOT/target/release/$1$ext"
+    [ -n "$CARGO_RELEASE_DIR" ] && [ -f "$src" ] || continue
+    if [ ! -f "$dest" ]; then
+      mkdir -p "$ROOT/target/release"
+      cp -f "$src" "$dest" && info "Copied $1$ext from cargo target dir ($CARGO_RELEASE_DIR) -> target/release/"
+    elif [ "$src" -nt "$dest" ]; then
+      cp -f "$src" "$dest" && info "Refreshed stale $1$ext from cargo target dir ($CARGO_RELEASE_DIR) -> target/release/"
+    fi
+  done
+}
+sync_prebuilt knocode
+sync_prebuilt knocode-daemon
 if [ -f "$ROOT/target/release/knocode" ] || [ -f "$ROOT/target/release/knocode.exe" ]; then ok "knocode at target/release/knocode(.exe)"; else warn "knocode binary not found at target/release/knocode - build manually: cargo build --release"; echo "prebuilt knocode missing - expected at target/release/knocode" >&2; exit 1; fi
 if [ -f "$ROOT/target/release/knocode-daemon" ] || [ -f "$ROOT/target/release/knocode-daemon.exe" ]; then ok "knocode-daemon at target/release/knocode-daemon(.exe)"; else warn "knocode-daemon not found at target/release/knocode-daemon"; fi
 

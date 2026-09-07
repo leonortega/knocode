@@ -14,7 +14,7 @@ Define how the AI Runtime operates as a local daemon application. This document 
 
 ### Single Daemon Process
 
-The runtime runs as a single Rust daemon process. The daemon hosts a Unix domain socket server that accepts connections from coding agents. All module logic executes within this process using async tasks on the tokio runtime.
+The runtime runs as a single Rust daemon process. The daemon hosts an HTTP server (axum) that accepts requests from coding agents on `127.0.0.1:9527` (`POST /hook`, `POST /mcp`, `GET /health`, `GET /metrics`). All module logic executes within this process using async tasks on the tokio runtime.
 
 ### Process Lifecycle
 
@@ -28,19 +28,19 @@ Start (knocode serve)
   ├── Build ContextEngine (single index path: reindex_repository)
   │
   ├── Readiness = "indexing" (reported by /health + /metrics)
-  ├── Bind HTTP health/metrics listener FIRST — reachable during indexing;
-  │     POST /hook returns 503 (reason: "daemon_indexing") until ready
+  ├── Bind HTTP listener FIRST — reachable during indexing;
+  │     GET /health reports state "indexing"; POST /hook returns 503
+  │     (reason: "daemon_indexing") until ready
   ├── Run initial repository index to completion (readiness gate)
   │     — on failure/panic: log loudly, still flip to ready (degraded: ripgrep fallback)
   ├── Readiness = "ready"
   ├── Start auto-reindex watcher (commit | filesystem)
   │     — each watcher reindex flips readiness: ready → indexing → ready
-  ├── Bind UDS/MessagePack adapter (primary transport — only after the index)
   │
   │   ┌─── Running ───────────────────────────────────────┐
   │   │                                                    │
-  │   │   Accept agent connections (UDS)                   │
-  │   │   UDS Probe payload → state / index_files / version│
+  │   │   Accept agent requests (HTTP /hook, /mcp)         │
+  │   │   Probe payload → state / index_files / version    │
   │   │   Handle pre-generation hooks (BuildContext)       │
   │   │   Emit observability events                        │
   │   │   Background: incremental indexing on git change   │
@@ -112,10 +112,10 @@ Start (knocode serve)
 
 ### Step 5: Initial Repository Indexing (readiness-gated)
 
-> Runs to completion (success or failure) BEFORE the UDS/MessagePack adapter binds,
-> so no request on the primary transport can wait on the engine lock mid-index or
-> race a half-built index. During this phase the HTTP health/metrics listener is
-> already up and reports `state: "indexing"`.
+> Runs to completion (success or failure) BEFORE `POST /hook` starts serving real
+> requests, so no request can wait on the engine lock mid-index or race a
+> half-built index. During this phase the HTTP listener is already up and reports
+> `state: "indexing"`.
 
 ```
 1. Check if repository is already indexed (SQLite metadata)
@@ -140,14 +140,14 @@ Start (knocode serve)
 > flips readiness to `"indexing"` for its duration so clients back off instead of
 > queueing on the engine lock.
 
-### Step 7: UDS/MessagePack Adapter Bind
+### Step 7: Serving
 
 ```
-1. Create Unix socket at configured path (default: /tmp/knocode.sock)
-2. Set socket permissions (owner read/write only)
-3. Bind — only after the initial index completed (readiness gate)
-4. Log server startup with socket path
-5. Ready to serve requests
+1. The HTTP listener is already bound (Step: readiness gate)
+2. GET /health now reports state "ready"; POST /hook and POST /mcp
+   process requests normally
+3. Log server startup with the listen address (default 127.0.0.1:9527)
+4. Ready to serve requests
 ```
 
 ## Configuration
@@ -165,40 +165,33 @@ Start (knocode serve)
 ```toml
 # ~/.config/knocode/config.toml
 
-[daemon]
-socket_path = "/tmp/knocode.sock"    # Unix socket path
-max_concurrent = 10                   # Max concurrent requests
-request_timeout_ms = 30000            # Max time for BuildContext (fail-open)
-
 [database]
 path = "~/.knocode/data.db"          # SQLite database path
 max_connections = 5                   # Connection pool size
 
 [index]
 path = "~/.knocode/index/"           # Tantivy index directory
-languages = ["rust", "typescript", "javascript", "python"]  # 111 languages supported via arborium; add any from arborium's language list
+languages = ["rust", "typescript", "javascript", "python"]  # 4 default; 371 grammars available via tree-sitter-language-pack
+watch_mode = "commit"                 # "commit" (default) or "filesystem"
 
 [knowledge]
-max_knowledge_entries = 10000         # Max knowledge entries (engram removed — see REMOVED_TOOLS.md)         # Max knowledge entries
+max_knowledge_entries = 10000         # Max knowledge entries (engram removed — see REMOVED_TOOLS.md)
 
 [context]
 max_tokens = 12000                    # Max tokens per Context Pack
 max_files = 20                        # Max files in Context Pack
 max_lines_per_file = 500             # Max lines per file in Context Pack
 cache_order = ["docs_context", "code_context"]  # Fixed order
+candidate_k = 100                     # Candidate pool size before ranking
 
 # [model] / [routing] / [litellm] removed in v0.8.6 — the runtime is
 # model-agnostic; the agent/provider/user selects the model (V1_RUNTIME_SPEC.md §2.3)
 # [skills] removed — the runtime no longer loads or matches skills (REMOVED_TOOLS.md)
 
-# [rtk] removed — tool-output compression lives in RTK (external binary),
-# not in the daemon (REMOVED_TOOLS.md)
-
-# [workflow] — v1 REMOVED (future/workflow only, opt-in --features workflow)
-# See future/workflow/README.md — not part of v1 runtime (TASK-001)
-# enabled = false
-# engine = "noop"
-# dbos_endpoint = "http://localhost:3001"
+[rtk]
+enabled = true                        # Optimizer crate helpers (doctor probe, tee-on-failure)
+max_output_tokens = 8000              # Budget used by the compressor fallback
+compression_level = "balanced"        # Tool-output compression itself is RTK's (external binary)
 
 [logging]
 level = "info"                        # Log level: error, warn, info, debug, trace
@@ -211,19 +204,21 @@ retention_days = 7                    # Log retention
 
 | Variable | Overrides | Default |
 |----------|-----------|---------|
-| `KNOCODE_DAEMON_SOCKET` | daemon.socket_path | /tmp/knocode.sock |
+| `KNOCODE_DAEMON_URL` | Daemon URL used by `knocode status`/`preview` and the JS clients | http://127.0.0.1:9527 |
 | `KNOCODE_DATABASE_PATH` | database.path | ~/.knocode/data.db |
 | `KNOCODE_LOG_LEVEL` | logging.level | info |
 | `KNOCODE_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
-| `KNOCODE_ENGRAM_ENDPOINT` | *removed* — engram retired (see REMOVED_TOOLS.md) | — |
-| `KNOCODE_MODEL_DEFAULT` | *removed v0.8.6* — model router deleted | — |
-| `KNOCODE_LITELLM_URL` | *removed v0.8.6* — LiteLLM deleted | — |
+| `KNOCODE_CANDIDATE_K` | context.candidate_k | 100 |
+| `KNOCODE_MAX_FILES` | context.max_files | 20 |
+| `KNOCODE_WATCH_MODE` | index.watch_mode ("commit" or "filesystem") | commit |
+| `KNOCODE_READY_TIMEOUT_MS` | Client-adapter readiness wait budget | 10000 |
+| `KNOCODE_LITELLM_URL` | *removed v0.8.6* — LiteLLM deleted (accepted but ignored for compat) | — |
 
 ## IPC Protocol
 
-### Unix Domain Socket
+### HTTP JSON API
 
-The daemon communicates with coding agents over a Unix domain socket using MessagePack encoding.
+The daemon communicates with coding agents over HTTP JSON on a single listener (default `127.0.0.1:9527`). There is no socket/MessagePack transport; the structs below are the serde JSON shapes used by `POST /hook`.
 
 ### Message Format
 
@@ -294,9 +289,9 @@ indexing ──(initial index completes)──► ready ──(auto-reindex star
 | HTTP `GET /metrics` | `knocode_daemon_ready 0` | `knocode_daemon_ready 1` |
 | HTTP `POST /hook` | HTTP `503` `reason: "daemon_indexing"` | processes the request |
 | Daemon MCP `POST /mcp` | `tools/call` -> JSON-RPC error `-32001 daemon_indexing` (HTTP `200`) | `tools/call` processes `knocode_context` (compression = RTK, external) |
-| UDS `Probe` payload | `Probe { state: "indexing", ... }` | `Probe { state: "ready", ... }` |
+| HTTP `Probe` payload (`POST /hook` with `{"type":"Probe"}`) | `Probe { state: "indexing", ... }` | `Probe { state: "ready", ... }` |
 
-Wire example (UDS/MessagePack primary):
+Wire example (HTTP JSON):
 
 ```json
 // Request
@@ -310,11 +305,11 @@ Wire example (UDS/MessagePack primary):
 
 Client guidance:
 
-1. **Cold start:** the UDS socket is NOT bound until the initial index completes
-   (readiness gate), so poll HTTP `GET /health` until `state == "ready"`.
-2. **Post-startup:** the UDS `Probe` payload answers on the primary transport —
-   never rate-limited, never gated, no engine lock. It reports `indexing` during
-   auto-reindexes; retry with backoff instead of sending real requests.
+1. **Cold start:** poll HTTP `GET /health` until `state == "ready"` (the readiness
+   gate holds real requests off the engine lock during the initial index).
+2. **Post-startup:** the HTTP `Probe` payload (`POST /hook` with `{"type":"Probe"}`)
+   answers before rate-limiting — never gated, no engine lock. It reports `indexing`
+   during auto-reindexes; retry with backoff instead of sending real requests.
 3. HTTP `POST /hook` during indexing returns `503 daemon_indexing` — a retry
    signal, **not** a fail-open passthrough (fail-open still guarantees the agent
    always gets a `RewrittenMessage` once ready).
@@ -383,7 +378,7 @@ see `REMOVED_TOOLS.md`.
 ```
 1. Receive SIGINT/SIGTERM
 2. Set shutdown flag (atomic bool)
-3. Stop accepting new UDS connections
+3. Stop accepting new HTTP connections
 4. Wait for in-flight requests to complete (max 30 seconds)
 5. If requests still in-flight after 30s:
    a. Log warning for each in-flight request
@@ -392,9 +387,8 @@ see `REMOVED_TOOLS.md`.
 7. Close SQLite connection pool
 8. Close knowledge store
 9. Flush log buffers
-10. Remove Unix socket file
-11. Log shutdown complete
-12. Exit with code 0
+10. Log shutdown complete
+11. Exit with code 0
 ```
 
 ### Force Shutdown
@@ -431,15 +425,13 @@ CREATE TABLE symbols (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Token usage tracking
+-- Token usage tracking (migration 007 dropped model/tier — the runtime is model-agnostic)
 CREATE TABLE token_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     correlation_id TEXT NOT NULL,
     request_type TEXT NOT NULL,
     input_tokens INTEGER NOT NULL,
     output_tokens INTEGER NOT NULL,
-    model TEXT NOT NULL,
-    tier TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

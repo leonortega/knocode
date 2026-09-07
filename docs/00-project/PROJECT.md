@@ -6,7 +6,7 @@ A local AI Runtime that improves existing coding agents by providing repository 
 
 ## Problem Statement
 
-Current coding agents (opencode, Claude Code, Cursor, Gemini CLI, etc.) operate with significant limitations:
+Current coding agents (OpenCode, Claude Code, GitHub Copilot, etc.) operate with significant limitations:
 
 1. **No persistent repository understanding.** Agents re-analyze the entire repository on every request. They lack persistent knowledge of project structure, conventions, patterns, and architecture.
 
@@ -36,14 +36,11 @@ These agents expose true programmatic hooks that fire unconditionally on every m
 
 | Agent | Pre-Generation Hook | Pre-Tool Hook (RTK-owned) |
 |-------|---------------------|---------------|
-| opencode | `chat.message` | `tool.execute.before` (via RTK's plugin) |
+| OpenCode | `chat.message` | `tool.execute.before` (via RTK's plugin) |
 | Claude Code | `UserPromptSubmit` | `PreToolUse` (via RTK's hooks) |
+| Copilot (VS Code) | `UserPromptSubmit` (user-level hooks) | `PreToolUse` (via RTK's hooks) |
 | Cursor | (TBD) | (TBD) |
 | Gemini CLI | (TBD) | (TBD) |
-| GitHub Copilot | (TBD) | (TBD) |
-| OpenClaw | (TBD) | (TBD) |
-| Pi | (TBD) | (TBD) |
-| Factory Droid | (TBD) | (TBD) |
 
 ### Tier 2 — Convention-Based (Best-Effort)
 

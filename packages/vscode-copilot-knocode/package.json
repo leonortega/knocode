@@ -28,10 +28,11 @@
     ]
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "package": "vsce package",
-    "test": "vitest run"
+    "vendor": "node ../../scripts/vendor-client.mjs",
+    "build": "node ../../scripts/vendor-client.mjs && tsc -p tsconfig.json",
+    "typecheck": "node ../../scripts/vendor-client.mjs && tsc -p tsconfig.json --noEmit",
+    "package": "npm run build && vsce package",
+    "test": "node ../../scripts/vendor-client.mjs && vitest run"
   },
   "keywords": [
     "copilot",
