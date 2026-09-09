@@ -156,13 +156,19 @@ fn cmd_serve(port: u16, _socket: Option<String>) -> Result<(), String> {
     println!("  Binary: {}", daemon_exe.display());
     println!("  HTTP:   {}", health_url);
 
-    // Start daemon as background process
-    let daemon_work_dir = dirs_home().unwrap_or_else(|| PathBuf::from(".")).join(".knocode");
-    std::fs::create_dir_all(&daemon_work_dir).ok();
+    // Start daemon as background process.
+    // FIX: spawn with the USER'S project root as both CWD and `--repo`. The daemon
+    // resolves the repository to index from its process CWD — spawning it in
+    // ~/.knocode made `knocode serve` index the knocode home directory (~87 files)
+    // instead of the user's repo, while /health reported "ready".
+    let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     let mut cmd = std::process::Command::new(&daemon_exe);
-    cmd.current_dir(&daemon_work_dir)
-        .args(daemon_spawn_args(port))
+    let mut spawn_args = daemon_spawn_args(port);
+    spawn_args.push("--repo".to_string());
+    spawn_args.push(project_root.to_string_lossy().to_string());
+    cmd.current_dir(&project_root)
+        .args(&spawn_args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
 
@@ -260,7 +266,7 @@ fn daemon_candidate_paths() -> Vec<PathBuf> {
     let mut cands = Vec::new();
     for dir in daemon_target_dirs() {
         for profile in ["release", "debug"] {
-            let mut p = dir.join(profile).join("knocode-daemon");
+            let p = dir.join(profile).join("knocode-daemon");
             #[cfg(windows)]
             let p = p.with_extension("exe");
             cands.push(p);
@@ -293,7 +299,7 @@ fn cargo_metadata_target_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(dirs_home)
     {
-        let mut alt = home.join("bin").join("cargo");
+        let alt = home.join("bin").join("cargo");
         #[cfg(windows)]
         let alt = alt.with_extension("exe");
         bins.push(alt);
@@ -377,21 +383,26 @@ fn run_index_with_progress(
     repo_intel: &mut knocode_repo_intel::RepositoryIntelligence,
 ) -> Result<knocode_repo_intel::IndexStats, String> {
     let is_tty = std::io::stdout().is_terminal();
+    let started = Instant::now();
 
     let progress_cb = move |done: usize, total: usize, phase: &str| {
+        // Elapsed seconds in every line: when the counter stalls on the last few
+        // files or the final index commit, rising elapsed time shows the run is
+        // alive instead of hung.
+        let elapsed = started.elapsed().as_secs();
         if is_tty {
             let mut stdout = std::io::stdout();
             if total > 0 {
-                let _ = write!(stdout, "\r      {}/{} files — {}\x1b[K", done, total, phase);
+                let _ = write!(stdout, "\r      {}/{} files — {} ({}s)\x1b[K", done, total, phase, elapsed);
             } else {
-                let _ = write!(stdout, "\r      {} files — {}\x1b[K", done, phase);
+                let _ = write!(stdout, "\r      {} files — {} ({}s)\x1b[K", done, phase, elapsed);
             }
             let _ = stdout.flush();
         } else if done > 0 && done % 5000 == 0 {
             if total > 0 {
-                println!("      … {}/{} files ({})", done, total, phase);
+                println!("      … {}/{} files ({}; {}s)", done, total, phase, elapsed);
             } else {
-                println!("      … {} files ({})", done, phase);
+                println!("      … {} files ({}; {}s)", done, phase, elapsed);
             }
         }
     };
@@ -668,39 +679,11 @@ fn cmd_init(wizard: bool, _no_anim: bool) -> Result<(), String> {
         discovery.test_command.as_deref().unwrap_or("-")
     );
     println!("  Profile:           {}", profile_path.display());
-    match ensure_artifact_dir(&project_root, "context") {
-        Ok(dir) => {
-            println!("  Artifacts:         {}", dir.display());
-            print_gitignore_hint();
-        }
-        Err(e) => println!("  Artifacts:         (skipped: {})", e),
-    }
     println!();
-    // Next steps — dynamic: probe the daemon instead of suggesting what's already true.
-    if daemon_alive() {
-        println!("Next steps:");
-        println!("  Daemon already running at http://127.0.0.1:9527 — this repo is ready.");
-    } else {
-        println!("Next steps:");
-        println!("  1. Start the daemon: 'knocode serve' (or scripts/install.ps1, which starts it)");
-    }
-    println!("  Agent setup (opencode plugin) is global — installed once by scripts/install.ps1.");
     println!("  Re-run 'knocode init' anytime - incremental and safe to repeat.");
 
     Ok(())
 }
-
-/// Best-effort probe: is the knocode daemon answering on the default HTTP port?
-fn daemon_alive() -> bool {
-    use std::net::TcpStream;
-    let addr = "127.0.0.1:9527";
-    std::net::ToSocketAddrs::to_socket_addrs(addr)
-        .ok()
-        .and_then(|mut addrs| addrs.next())
-        .map(|ip| TcpStream::connect_timeout(&ip, std::time::Duration::from_millis(300)).is_ok())
-        .unwrap_or(false)
-}
-
 
 
 #[derive(Default, Debug)]
@@ -1047,14 +1030,6 @@ fn cmd_index(watch: bool, watch_mode: Option<&str>) -> Result<(), String> {
     println!("  Files skipped:    {}", stats.files_skipped);
     println!("  Files deleted:    {}", stats.files_deleted);
     println!("  Duration:         {}ms", stats.duration_ms);
-    // TASK-038: per-repo artifact home for any generated reports/exports
-    match ensure_artifact_dir(&project_root, "context") {
-        Ok(dir) => {
-            println!("  Artifacts:        {}", dir.display());
-            print_gitignore_hint();
-        }
-        Err(e) => println!("  Artifacts:        (skipped: {})", e),
-    }
     // Also show graph edge count (new in v0.3.0) — Phase3 defer on large repos
     if stats.files_indexed > 5000 && std::env::var("KNOCODE_BUILD_GRAPH").ok().as_deref() != Some("1") {
         println!("  Dependency edges: deferred (lazy, set KNOCODE_BUILD_GRAPH=1 to force)");
@@ -1559,20 +1534,6 @@ fn cmd_doctor() -> Result<(), String> {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/// TASK-038: per-repo artifact home — ALL generated deliverables for an analyzed repo land in
-/// `<repo>/.knocode/artifacts/<name>/` (NEVER back into the knocode source repository).
-/// `knocode init` owns `.knocode/`, so creating on demand is safe.
-fn ensure_artifact_dir(repo_root: &Path, name: &str) -> Result<PathBuf, String> {
-    let dir = repo_root.join(".knocode").join("artifacts").join(name);
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("Failed to create artifact directory {}: {}", dir.display(), e))?;
-    Ok(dir)
-}
-
-/// TASK-038: do not auto-edit the analyzed repo's .gitignore — print a hint instead.
-fn print_gitignore_hint() {
-    println!("  Hint: consider adding '.knocode/artifacts/' to this repository's .gitignore");
-}
 
 fn get_db_path() -> PathBuf {
     dirs().unwrap_or_else(|| PathBuf::from("."))

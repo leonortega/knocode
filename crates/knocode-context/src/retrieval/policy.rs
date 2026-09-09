@@ -285,6 +285,15 @@ pub struct RetrievalPolicy {
     pub structural_candidate_k: usize,
     /// Max files for structural exhaustive queries ("find all X").
     pub structural_max_files: usize,
+
+    /// P0 eval fix: score multiplier for documentation-class files whose path
+    /// matches no query token (generic meta-docs like README/ROADMAP matching
+    /// via content generality). `1.0` disables damping; `0.10` drops generic
+    /// meta-docs below the on-topic code files they used to bury while letting
+    /// genuinely BM25-strong docs stay listed (Recall@10 unchanged in eval).
+    /// Code/Config/Test never damped; path-token match ("indexing" vs
+    /// INDEXING_PERF_PLAN.md) keeps full score.
+    pub doc_prior_damping: f32,
 }
 
 impl Default for RetrievalPolicy {
@@ -309,6 +318,7 @@ impl Default for RetrievalPolicy {
             max_matches_per_backend: 200,
             structural_candidate_k: 500,
             structural_max_files: 500,
+            doc_prior_damping: 0.10,
         }
     }
 }
@@ -350,11 +360,14 @@ impl RetrievalPolicy {
         intent_boost * dir_boost * auth_boost * test_mult
     }
 
-    /// Effective candidate_k (env override `KNOCODE_CANDIDATE_K` wins)
+    /// Effective candidate_k (env override `KNOCODE_CANDIDATE_K` wins).
+    /// P0: clamp raised 200→1000 — the old clamp silently capped the documented
+    /// structural candidate_k of 500-1000 AND made bench_components' 50 vs 500
+    /// comparison measure 50 vs 200, masking the component's real effect.
     pub fn effective_candidate_k(&self) -> usize {
         if let Ok(v) = std::env::var("KNOCODE_CANDIDATE_K") {
             if let Ok(n) = v.parse::<usize>() {
-                return n.min(200);
+                return n.min(1000);
             }
         }
         self.candidate_k
@@ -375,7 +388,7 @@ impl RetrievalPolicy {
         if k == 100 && doc_count > 5000 {
             k = 200;
         }
-        k.min(200)
+        k
     }
 }
 

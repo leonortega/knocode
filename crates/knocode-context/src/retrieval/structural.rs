@@ -148,9 +148,21 @@ pub fn parse_structural_query(query: &str) -> Option<StructuralPattern> {
         return Some(StructuralPattern::AstGrepPattern(q.to_string()));
     }
 
-    // Check for inferred structural intent
-    if let Some(kind) = InferredKind::from_query(q) {
-        return Some(StructuralPattern::Inferred(kind));
+    // P0 fix: inferred structural search runs a FULL ast-grep walk of the repo
+    // (~1.2s on 53k files), so it must only fire when the query actually asks
+    // for a structural enumeration. Debugging/informational questions that
+    // merely CONTAIN a keyword ("why is the Express response type missing json
+    // **method**") previously hijacked the structural backend into a full-repo
+    // scan on every such query. Require an explicit enumeration trigger in
+    // addition to the inferred kind.
+    let q_lower = q.to_lowercase();
+    let wants_enumeration = ["find ", "show ", "list ", "all ", "where is ", "where are "]
+        .iter()
+        .any(|t| q_lower.contains(t));
+    if wants_enumeration {
+        if let Some(kind) = InferredKind::from_query(q) {
+            return Some(StructuralPattern::Inferred(kind));
+        }
     }
 
     None

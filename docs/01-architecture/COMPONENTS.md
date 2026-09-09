@@ -514,7 +514,8 @@ One organizational surface for project docs, ADRs, templates, and long-term memo
 - The daemon's `PreToolCall`/`ToolOutput`/`CompressedOutput` IPC variants, the
   `/hook` `ToolOutput` contract, and the `ExecutionOptimizer` state were deleted.
 - Agents that want output compression should run RTK's own plugin/hook for the
-  selected agent (`rtk init -g --auto-patch --opencode` / `--copilot`).
+  selected agent (`rtk init -g --auto-patch --opencode` / `--copilot`); the
+  installers also register RTK's global hook (`rtk init -g --auto-patch`).
 
 ### Pointer
 

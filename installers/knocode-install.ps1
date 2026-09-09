@@ -19,7 +19,8 @@
     - RTK (prebuilt from GitHub releases) - optional external tool, offered AFTER
       agent selection and ONLY when agent integrations are selected (opt-in: asked
       interactively, or force/skip with -WithRtk / -NoRtk). RTK's own per-agent
-      integrations are wired via `rtk init -g` for each selected agent.
+      integrations are wired via `rtk init -g` for each selected agent, plus the
+      global compression hook (`rtk init -g --auto-patch`).
 
   Agent integrations (OpenCode / Copilot) are optional and
   selected interactively. They use the integration bundles shipped inside the
@@ -63,6 +64,14 @@
 param([string]$Version = "", [string]$Agents = "", [switch]$AllAgents, [switch]$NoAgents, [switch]$WithRtk, [switch]$NoRtk, [switch]$SkipPrereqs)
 
 $ErrorActionPreference = "Stop"
+# UTF-8 for native output: tools like rtk emit UTF-8; without this, PowerShell 5.1
+# decodes their stdout with the console ANSI codepage and relayed lines show mojibake
+# (em-dash renders as "A with circumflex" garbage). No-op on PS7 / already-UTF8
+# consoles; never fatal when there is no console handle (output redirected).
+try {
+  if ([Console]::OutputEncoding.CodePage -ne 65001) { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 }
+  $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch {}
 $Repo = "leonortega/knocode"
 $AgentCatalog = @("opencode", "copilot")
 
@@ -553,12 +562,32 @@ if ($agentSel.Count -gt 0 -and $rtkCmd) {
       $out = & $rtkCmd init -g --$a --auto-patch 2>&1
       if ($LASTEXITCODE -eq 0) {
         Write-Ok "rtk integration wired for $a (rtk init -g --$a)"
-        $out | Where-Object { $_ -and $_.ToString().Trim() } | Select-Object -First 3 | ForEach-Object { Write-Step "    $_" }
+        # Relay rtk output minus its "/!\ No hook installed" upsell: the global hook
+        # is installed right after this loop; the filter stays in case rtk still
+        # prints the warning (e.g. the hook install failed).
+        $out | Where-Object { $_ -and $_.ToString().Trim() -and $_.ToString() -notmatch 'No hook installed' } | Select-Object -First 3 | ForEach-Object { Write-Step "    $_" }
       }
       else { Write-Warn "rtk init failed for $a (exit $LASTEXITCODE) - run manually: rtk init -g --$a"; $out | Select-Object -First 5 | ForEach-Object { Write-Step "    $_" } }
     } catch { Write-Warn "rtk init failed for $a : $($_.Exception.Message)" }
     $ErrorActionPreference = $prevEA
   }
+
+  # ── Global hook - `rtk init -g --auto-patch` registers RTK's compression hook ──
+  # (Claude-style hook + RTK.md) so token savings also apply outside the wired
+  # agents. Fail-open: never blocks the install. `$null |` closes stdin so rtk
+  # never waits on the installer's stdin. MUST run before the rtk.ts PATCH below:
+  # init regenerates the plugin file (and resurrects the `which rtk` probe).
+  Write-Step "Installing RTK global hook (rtk init -g --auto-patch)..."
+  $prevEA = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+  try {
+    $out = $null | & $rtkCmd init -g --auto-patch 2>&1
+    if ($LASTEXITCODE -eq 0) {
+      Write-Ok "rtk global hook installed (rtk init -g --auto-patch)"
+      $out | Where-Object { $_ -and $_.ToString().Trim() } | Select-Object -First 3 | ForEach-Object { Write-Step "    $_" }
+    }
+    else { Write-Warn "rtk global hook install failed (exit $LASTEXITCODE) - run manually: rtk init -g --auto-patch"; $out | Select-Object -First 5 | ForEach-Object { Write-Step "    $_" } }
+  } catch { Write-Warn "rtk global hook install failed : $_" }
+  $ErrorActionPreference = $prevEA
 
   # ── PATCH: rtk.ts binary probe - `which rtk` is Unix-only ───────────────
   # RTK's generated OpenCode plugin (rtk init --opencode) probes with `which`,

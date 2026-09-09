@@ -36,6 +36,10 @@ pub enum RetrievalSignal {
     DocAuthority(f32),
     /// Vocabulary expansion (add→create)
     QueryExpansion(f32),
+    /// Doc prior damping: generic meta-doc with no query-token path match had
+    /// its FULL score multiplied by `factor` (generic docs outranked code files
+    /// via stacked priors plus broad-content BM25).
+    DocPriorDamping { factor: f32 },
     /// Structural/AST pattern match (ast-grep-core or tree-sitter fallback)
     StructuralMatch { pattern: String, score: f32 },
 }
@@ -58,6 +62,7 @@ impl std::fmt::Display for RetrievalSignal {
             Self::IntentBoost { intent, boost } => write!(f, "intent:{}:{:.2}", intent, boost),
             Self::DocAuthority(b) => write!(f, "doc_authority:{:.2}", b),
             Self::QueryExpansion(b) => write!(f, "query_expansion:{:.2}", b),
+            Self::DocPriorDamping { factor } => write!(f, "doc_prior_damping:{:.2}", factor),
             Self::StructuralMatch { pattern, score } => write!(f, "structural_match:{}:{:.2}", pattern, score),
         }
     }

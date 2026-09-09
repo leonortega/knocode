@@ -424,13 +424,14 @@ pub(crate) async fn handle_pre_generation(
         crate::metrics::global().observe_retrieval_duration(stats.retrieval_ms as f64 / 1000.0);
         crate::metrics::global().observe_retrieval_candidates(stats.candidates);
     }
-    let recall = if !context_pack.code_context.is_empty() { 0.85 } else { 0.0 };
-    crate::metrics::global().set_retrieval_recall(recall);
-    tracing::info!(correlation_id=%context_pack.metadata.correlation_id, repository_state=%context_pack.repository_state, total_tokens=%context_pack.token_usage.total_tokens, recall=%recall, "trace: context built");
+    // Recall is an evaluation metric (R@k/MRR in eval/metrics/retrieval.py), not a
+    // production gauge — the daemon has no ground truth at request time.
+    tracing::info!(correlation_id=%context_pack.metadata.correlation_id, repository_state=%context_pack.repository_state, total_tokens=%context_pack.token_usage.total_tokens, "trace: context built");
 
     // TASK-031/F-2: zero-value rewrite suppression — when all three content sources are empty,
     // return the original untouched instead of a metadata-only skeleton (~500-700 tokens for nothing).
     if context_pack.token_usage.total_tokens == 0 {
+        crate::metrics::global().inc_empty();
         tracing::info!(correlation_id=%context_pack.metadata.correlation_id, "no context hits — OriginalPassthrough (TASK-031)");
         return Ok(HttpResponsePayload::OriginalPassthrough {
             original: message,

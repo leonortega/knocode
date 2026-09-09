@@ -182,6 +182,25 @@ export async function fetchData() {
     }
 
     #[test]
+    fn test_typescript_declaration_symbols() {
+        // DefinitelyTyped-style .d.ts content: ambient declarations. Regressed to
+        // 0 symbols on the whole DT repo — verify each extraction layer.
+        let code = r#"
+export declare function add(a: number, b: number): number;
+export interface Options { timeout?: number; }
+export type Handler = (e: Event) => void;
+declare class Widget { render(): void; }
+declare namespace Dom { function query(sel: string): Element; }
+"#;
+        let ast = extract_symbols_ast(code, "typescript");
+        eprintln!("AST symbols from .d.ts: {:?}", ast.iter().map(|s| (s.kind.as_str(), s.name.as_str())).collect::<Vec<_>>());
+        assert!(
+            !ast.is_empty(),
+            "tree-sitter extracted 0 symbols from .d.ts content — ambient declarations are not captured"
+        );
+    }
+
+    #[test]
     fn test_typescript_symbols() {
         let code = r#"
 interface User {

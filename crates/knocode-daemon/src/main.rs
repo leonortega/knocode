@@ -37,6 +37,32 @@ fn parse_port_value(value: &str) -> Result<Option<u16>, String> {
     Ok(Some(port))
 }
 
+/// Parse one or more `--repo <path>` / `--repo=<path>` flags: repositories to index
+/// + watch EAGERLY at startup (multi-repo daemon — one daemon serves all repos).
+/// Without any `--repo`, the daemon starts repo-neutral and indexes repositories
+/// lazily on their first request. The FIRST path is also chdir'd into before config
+/// load, preserving the legacy config-resolution behavior of `knocode serve`.
+fn parse_repo_args(args: &[String]) -> Result<Vec<PathBuf>, String> {
+    let mut repos = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if let Some(value) = arg.strip_prefix("--repo=") {
+            repos.push(PathBuf::from(value));
+            continue;
+        }
+        if arg == "--repo" {
+            match iter.next() {
+                Some(value) => repos.push(PathBuf::from(value)),
+                None => {
+                    return Err("--repo requires a value (e.g. knocode-daemon --repo C:/path/to/repo)"
+                        .to_string())
+                }
+            }
+        }
+    }
+    Ok(repos)
+}
+
 #[tokio::main]
 async fn main() {
     // CLI overrides (parsed before config load so a bad --port fails fast)
@@ -50,6 +76,27 @@ async fn main() {
     };
 
     // Load configuration
+    // Optional eager repositories (`knocode serve --repo ...`). Chdir to the FIRST
+    // one before config load so `[index].watch_mode`, context limits etc. resolve
+    // from that repo's config (legacy `knocode serve` behavior preserved).
+    let eager_repos = match parse_repo_args(&args) {
+        Ok(repos) => repos,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    };
+    if let Some(first) = eager_repos.first() {
+        if !first.is_dir() {
+            eprintln!("--repo path is not a directory: {}", first.display());
+            std::process::exit(1);
+        }
+        if let Err(e) = std::env::set_current_dir(first) {
+            eprintln!("Failed to chdir to {}: {e}", first.display());
+            std::process::exit(1);
+        }
+    }
+
     let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = match Config::load(&project_root) {
         Ok(config) => config,
@@ -65,8 +112,8 @@ async fn main() {
         std::process::exit(1);
     }
 
-    // Initialize daemon state (creates context engine, optimizer, etc.)
-    let state = match DaemonState::initialize(config) {
+    // Initialize daemon state (multi-repo: context engine, watcher registry, etc.)
+    let state = match DaemonState::initialize(config, eager_repos) {
         Ok(state) => state,
         Err(e) => {
             eprintln!("Failed to initialize daemon: {}", e);

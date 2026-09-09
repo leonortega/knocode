@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -19,23 +20,46 @@ pub const DEFAULT_HTTP_PORT: u16 = 9527;
 
 // ── Daemon State ────────────────────────────────────────────────────────
 
+/// One auto-reindex watcher per known repository (multi-repo daemon).
+struct WatcherEntry {
+    watcher: RepoWatcher,
+    handle: tokio::task::JoinHandle<()>,
+}
+
 #[allow(clippy::arc_with_non_send_sync)]
 pub struct DaemonState {
     pub config: Config,
+    /// Shared SQLite store (migration 008: rows are per-repository) — used by the
+    /// context engine for lazy per-repo indexing and by the watcher registry.
+    pub db_path: PathBuf,
+    /// Repos to index + watch eagerly at startup (from `--repo` flags). A multi-repo
+    /// daemon starts repo-neutral: repos WITHOUT a `--repo` flag are indexed lazily
+    /// on their first request and watched from then on.
+    pub eager_repos: Vec<PathBuf>,
     pub event_bus: EventBus,
     pub context_engine: Arc<tokio::sync::Mutex<knocode_context::ContextEngine>>,
-    /// Auto-reindex watcher — owned by the state so graceful shutdown can call
-    /// `stop()` and end its poll loops instead of letting them run until process exit.
-    pub watcher: RepoWatcher,
+    /// Auto-reindex watcher registry — one RepoWatcher per known repository, keyed by
+    /// canonical path string. Arc'd so the context engine's `on_repo_registered`
+    /// callback can spawn watchers for lazily-resolved repos. Graceful shutdown
+    /// stops every entry's poll loop.
+    watchers: Arc<std::sync::Mutex<HashMap<String, WatcherEntry>>>,
     pub shutdown_flag: Arc<AtomicBool>,
     pub force_shutdown_flag: Arc<AtomicBool>,
 }
 
 impl DaemonState {
-    /// Initialize daemon state from config
-    pub fn initialize(config: Config) -> Result<Self, String> {
-        // Initialize logging
-        initialize_logging(&config.logging.level);
+    /// Initialize daemon state from config.
+    ///
+    /// Multi-repo design: the daemon does NOT bind to a single repository. The
+    /// default repo intelligence (used only as the fallback when a request carries
+    /// no `repository_path`) resolves from the process CWD; every other repo is
+    /// resolved, lazily indexed and watched per request. `eager_repos` (from
+    /// `--repo` flags) are indexed + watched at startup instead.
+    pub fn initialize(config: Config, eager_repos: Vec<PathBuf>) -> Result<Self, String> {
+        // Initialize logging — stdout AND the configured file (`logging.file_path`).
+        // The file layer is the only durable one: `knocode serve` spawns this process
+        // with null stdio, so without it every freeze/fail-open was invisible.
+        initialize_logging(&config.logging.level, &config.logging.file_path);
 
         info!("Initializing daemon...");
 
@@ -53,20 +77,18 @@ impl DaemonState {
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let force_shutdown_flag = Arc::new(AtomicBool::new(false));
 
-        // Initialize repository intelligence
-        let repo_path = std::env::current_dir()
-            .map_err(|e| format!("Failed to get current directory: {}", e))?;
+        // Default (fallback) repository intelligence — process CWD. NOT indexed at
+        // startup: without `--repo` the daemon is repo-neutral and indexes repos
+        // lazily on first request via the context engine.
+        let cwd = std::env::current_dir()
+            .map_err(|e| format!("Failed to get current directory: {e}"))?;
+        info!(fallback_repo = %cwd.display(), eager_repos = eager_repos.len(), "Daemon initialized (multi-repo mode)");
 
-        // Auto-reindex watcher (started in serve(); owned here so shutdown can stop it)
-        let watcher = RepoWatcher::new(repo_path.clone()).with_mode(config.index.watch_mode);
-
-        let repo_db_path = expand_path(&config.database.path);
-        let repo_db = Database::open(&repo_db_path)
+        let default_db = Database::open(&db_path)
             .map_err(|e| format!("Failed to open database for repo-intel: {}", e))?;
-
         let repo_intel = RepositoryIntelligence::new(
-            repo_path,
-            repo_db,
+            cwd,
+            default_db,
             event_bus.clone(),
         );
 
@@ -93,13 +115,16 @@ impl DaemonState {
             knowledge_hub,
             event_bus.clone(),
             context_config,
-        );
+        )
+        .with_db_path(db_path.clone());
 
         Ok(Self {
             config,
+            db_path,
+            eager_repos,
             event_bus,
             context_engine: Arc::new(tokio::sync::Mutex::new(context_engine)),
-            watcher,
+            watchers: Arc::new(std::sync::Mutex::new(HashMap::new())),
             shutdown_flag,
             force_shutdown_flag,
         })
@@ -137,106 +162,86 @@ impl DaemonState {
             }
         });
 
-        // ── Startup indexing — READINESS GATED ──────────────────────────────
-        // The UDS/MessagePack adapter does NOT bind until the initial index
-        // finishes (success or failure), so no request on the primary transport can
-        // ever wait on the engine lock mid-index or race a half-built index.
-        // Indexing goes through the ContextEngine — the SAME single index path the
-        // auto-reindex watcher uses below — and runs on tokio's blocking pool.
-        // (A Ctrl+C/SIGTERM during this phase terminates the process; only the
-        // health/metrics HTTP listener is up, so there is nothing to drain.)
-        let indexing_db_path = expand_path(&self.config.database.path);
-        let indexing_engine = self.context_engine.clone();
-        info!("Running initial repository indexing (UDS adapter binds when it completes; HTTP /hook returns 503 until ready)...");
-        // blocking_lock is safe here: spawn_blocking thread, never an async task.
-        let result = tokio::task::spawn_blocking(move || {
-            indexing_engine.blocking_lock().reindex_repository(None)
-        })
-        .await;
-        match result {
-            Ok(Ok(stats)) => {
-                // TASK-034/F-5: report the REAL indexed-file count from SQLite —
-                // `files_indexed` is per-run (incremental runs are small); the store
-                // handle used by reindex_repository is already dropped.
-                let file_count = Database::open(&indexing_db_path).and_then(|db| db.get_file_count());
-                match file_count {
-                    Ok(count) => crate::metrics::global().set_index_files(count),
-                    Err(_) => crate::metrics::global().set_index_files(stats.files_indexed),
-                }
-                info!(
-                    files = stats.files_indexed,
-                    symbols = stats.symbols_extracted,
-                    duration_ms = stats.duration_ms,
-                    "Initial indexing complete — binding listeners"
-                );
-            }
-            Ok(Err(e)) => {
-                // Bind anyway: retrieval degrades to the ripgrep fallback and the
-                // watcher below keeps retrying on repo changes.
-                crate::metrics::global().inc_fail_open();
-                error!(error = %e, "Initial indexing failed — binding listeners anyway");
-            }
-            Err(join_err) => {
-                crate::metrics::global().inc_fail_open();
-                error!(error = %join_err, "Initial indexing panicked — binding listeners anyway");
-            }
+        // ── Multi-repo: GC, watcher-callback wiring, eager `--repo` indexes ──
+        // The daemon is repo-neutral at startup — it does NOT index its CWD. Only
+        // explicitly passed `--repo` paths are indexed eagerly (readiness-gated);
+        // every other repository is indexed lazily on its first request
+        // (ContextEngine::resolve_repo_intel) and watched from then on.
+        // Stale-repo GC — fire-and-forget on a blocking thread. Mass DELETEs plus
+        // removal of multi-GB tantivy index dirs can take MINUTES; gating readiness
+        // on it would leave /health "indexing" and /hook 503 for the whole run
+        // (observed: 3m37s). The daemon serves immediately; GC finishes in background.
+        let gc_db_path = self.db_path.clone();
+        tokio::task::spawn_blocking(move || Self::prune_stale_repos_in(&gc_db_path));
+
+        // Fire the watcher factory when the engine resolves a NEW repository, so
+        // lazily-indexed repos are auto-reindexed on change too (not just --repo).
+        // Registered on a blocking thread BEFORE the HTTP server binds, so no request
+        // can resolve a repo before the callback exists. (blocking_lock is illegal on
+        // the async runtime thread — hence spawn_blocking.)
+        {
+            let engine = self.context_engine.clone();
+            let registry = self.watchers.clone();
+            let db_path = self.db_path.clone();
+            let watch_mode = self.config.index.watch_mode.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let mut eng = engine.blocking_lock();
+                let engine_cb = engine.clone();
+                eng.set_on_repo_registered(Arc::new(move |path| {
+                    Self::spawn_watcher_for(
+                        &registry,
+                        &engine_cb,
+                        &db_path,
+                        watch_mode.clone(),
+                        std::path::Path::new(path),
+                    );
+                }));
+            })
+            .await;
         }
 
-        // Initial index done (success or failure — we serve either way): flip
-        // readiness so /hook accepts requests and clients stop polling.
-        crate::metrics::global().set_readiness(crate::metrics::Readiness::Ready);
-
-        // ── Auto-reindex watcher ────────────────────────────────────────────
-        // Re-indexes when the repo changes after startup (mode from `[index].watch_mode`:
-        // "commit" on new git commits, "filesystem" on any file change). The initial
-        // index above already finished (readiness gate), so the watcher starts here and
-        // the two never write to the SQLite/tantivy stores concurrently. `self.watcher`
-        // is owned by DaemonState so graceful shutdown can call `stop()` — the poll
-        // loop exits instead of running until process exit.
-        let watcher_db_path = expand_path(&self.config.database.path);
-        let watcher_engine = self.context_engine.clone();
-        info!(mode = %self.watcher.mode(), "Starting auto-reindex watcher");
-
-        // Callback runs on tokio's blocking pool — safe to do a full index walk.
-        // Re-indexing goes THROUGH the shared ContextEngine (not an ad-hoc
-        // RepositoryIntelligence), so the engine's cached tantivy handles are
-        // invalidated on completion and queries issued right after a change serve
-        // the fresh commit immediately instead of from a stale reader.
-        // `blocking_lock` is deliberate: this runs on a blocking thread, never
-        // inside an async task, so it cannot deadlock the runtime.
-        // The JoinHandle is retained so graceful shutdown can await the loop's exit.
-        let watch_handle = self.watcher.spawn(move || {
-            // Flip to indexing so /health + /metrics report the reindex and /hook
-            // 503s — clients back off instead of queueing on the engine lock.
-            crate::metrics::global().set_readiness(crate::metrics::Readiness::Indexing);
-            let t0 = std::time::Instant::now();
-            let engine = watcher_engine.blocking_lock();
-            match engine.reindex_repository(None) {
-                Ok(stats) => {
-                    // Report the REAL indexed-file count from SQLite (the reindex
-                    // wrote through the engine's DB connection to the same store).
-                    let file_count = Database::open(&watcher_db_path)
-                        .and_then(|db| db.get_file_count())
+        // ── Readiness signal + HTTP health/metrics listener ─────────────────
+        crate::metrics::global().set_readiness(crate::metrics::Readiness::Indexing);
+        for repo in &self.eager_repos {
+            let repo_str = repo.to_string_lossy().to_string();
+            let engine = self.context_engine.clone();
+            let path_for_index = repo_str.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                engine.blocking_lock().reindex_repository(Some(&path_for_index))
+            })
+            .await;
+            match result {
+                Ok(Ok(stats)) => {
+                    let repo_id = knocode_core::repository_id_from_path(&repo_str);
+                    let file_count = Database::open(&self.db_path)
+                        .and_then(|db| {
+                            let _ = db.register_repo(&repo_id, &repo_str);
+                            db.get_file_count_for_repo(&repo_id)
+                        })
                         .unwrap_or(stats.files_indexed);
                     crate::metrics::global().set_index_files(file_count);
+                    crate::metrics::global().set_index_age(0.0);
                     info!(
+                        repo = %repo_str,
                         files = stats.files_indexed,
                         symbols = stats.symbols_extracted,
                         duration_ms = stats.duration_ms,
-                        took_ms = t0.elapsed().as_millis(),
-                        "Auto-reindex complete"
+                        "Eager repository indexing complete"
                     );
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     crate::metrics::global().inc_fail_open();
-                    error!(error = %e, "Auto-reindex failed");
+                    error!(repo = %repo_str, error = %e, "Eager indexing failed — repo will be lazily indexed on first request");
+                }
+                Err(join_err) => {
+                    crate::metrics::global().inc_fail_open();
+                    error!(repo = %repo_str, error = %join_err, "Eager indexing panicked");
                 }
             }
-            // Reindex done (success or failure) — serve again.
-            crate::metrics::global().set_readiness(crate::metrics::Readiness::Ready);
-        });
-
-
+            self.spawn_repo_watcher(repo);
+        }
+        // Eager work done (or nothing to do — repo-neutral startup): serve.
+        crate::metrics::global().set_readiness(crate::metrics::Readiness::Ready);
 
         // Wait for shutdown signal
         info!("Daemon ready. Press Ctrl+C to shutdown.");
@@ -248,13 +253,170 @@ impl DaemonState {
         // Wait for HTTP server to finish (timeout)
         let _ = tokio::time::timeout(Duration::from_secs(5), http_handle).await;
 
-        // Stop the auto-reindex watcher and wait for its poll loop to exit
-        // (commit mode: within one poll interval; filesystem: within ~1s + debounce).
-        self.watcher.stop();
-        let _ = tokio::time::timeout(Duration::from_secs(10), watch_handle).await;
+        // Stop every registered auto-reindex watcher and wait for its poll loop
+        // (commit mode: within one poll interval; filesystem: ~1s + debounce).
+        let entries: Vec<WatcherEntry> = {
+            let mut registry = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
+            registry.drain().map(|(_, e)| e).collect()
+        };
+        for entry in entries {
+            entry.watcher.stop();
+            let _ = tokio::time::timeout(Duration::from_secs(10), entry.handle).await;
+        }
 
         info!("Daemon shutdown complete");
         Ok(())
+    }
+
+    /// Register + spawn an auto-reindex watcher for ONE repository (multi-repo mode).
+    /// Delegates to the shared factory with this daemon's state.
+    fn spawn_repo_watcher(&self, repo_path: &std::path::Path) {
+        Self::spawn_watcher_for(
+            &self.watchers,
+            &self.context_engine,
+            &self.db_path,
+            self.config.index.watch_mode.clone(),
+            repo_path,
+        );
+    }
+
+    /// Shared watcher factory — used both for eager `--repo` repos at startup and
+    /// (via the context engine's `on_repo_registered` callback) for repos resolved
+    /// lazily from requests, so EVERY known repo gets auto-reindexed on change.
+    fn spawn_watcher_for(
+        registry: &Arc<std::sync::Mutex<HashMap<String, WatcherEntry>>>,
+        engine: &Arc<tokio::sync::Mutex<knocode_context::ContextEngine>>,
+        db_path: &std::path::Path,
+        watch_mode: knocode_core::WatchMode,
+        repo_path: &std::path::Path,
+    ) {
+        let key = dunce::canonicalize(repo_path)
+            .unwrap_or_else(|_| repo_path.to_path_buf())
+            .to_string_lossy()
+            .to_string();
+        {
+            let registry = registry.lock().unwrap_or_else(|e| e.into_inner());
+            if registry.contains_key(&key) {
+                return;
+            }
+        }
+
+        let watcher = RepoWatcher::new(repo_path.to_path_buf()).with_mode(watch_mode);
+        let engine = engine.clone();
+        let repo_str = key.clone();
+        let db_path = db_path.to_path_buf();
+        info!(repo = %repo_str, mode = %watcher.mode(), "Starting auto-reindex watcher");
+
+        let handle = watcher.spawn(move || {
+            let repo_id = knocode_core::repository_id_from_path(&repo_str);
+            // Flip to indexing so /health + /metrics report the reindex and /hook
+            // 503s — clients back off instead of queueing on the engine lock.
+            crate::metrics::global().set_readiness(crate::metrics::Readiness::Indexing);
+            crate::metrics::global().clear_index_age();
+            let t0 = std::time::Instant::now();
+            let reindex = engine.blocking_lock().reindex_repository(Some(&repo_str));
+            match reindex {
+                Ok(stats) => {
+                    // Report the REAL indexed-file count from SQLite (per-repo rows,
+                    // migration 008) for THIS watcher's repository.
+                    let file_count = Database::open(&db_path)
+                        .and_then(|db| db.get_file_count_for_repo(&repo_id))
+                        .unwrap_or(stats.files_indexed);
+                    crate::metrics::global().set_index_files(file_count);
+                    crate::metrics::global().set_index_age(0.0);
+                    info!(
+                        repo = %repo_str,
+                        files = stats.files_indexed,
+                        symbols = stats.symbols_extracted,
+                        duration_ms = stats.duration_ms,
+                        took_ms = t0.elapsed().as_millis(),
+                        "Auto-reindex complete"
+                    );
+                }
+                Err(e) => {
+                    crate::metrics::global().inc_fail_open();
+                    error!(repo = %repo_str, error = %e, "Auto-reindex failed");
+                }
+            }
+            // Reindex done (success or failure) — serve again.
+            crate::metrics::global().set_readiness(crate::metrics::Readiness::Ready);
+        });
+
+        let mut registry = registry.lock().unwrap_or_else(|e| e.into_inner());
+        registry.insert(key, WatcherEntry { watcher, handle });
+    }
+
+    /// Startup GC (background — see serve_on): drop DB rows + tantivy indices for
+    /// repositories whose path no longer exists (repo deleted/moved), and legacy
+    /// orphan rows from pre-registry runs (including the old daemon's `~\.knocode`
+    /// self-indexing bug). Deleted repos are simply re-indexed lazily if a request
+    /// for them ever arrives again.
+    fn prune_stale_repos_in(db_path: &std::path::Path) {
+        let db = match Database::open(db_path) {
+            Ok(db) => db,
+            Err(e) => {
+                warn!(error = %e, "Stale-repo GC skipped: could not open database");
+                return;
+            }
+        };
+
+        let registered = match db.list_registered_repos() {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(error = %e, "Stale-repo GC skipped: could not list registry");
+                return;
+            }
+        };
+
+        let mut pruned_files = 0usize;
+        // 1. Registered repos whose path vanished.
+        for (repo_id, path) in &registered {
+            if std::path::Path::new(path).is_dir() {
+                continue;
+            }
+            match db.drop_repo_data(repo_id) {
+                Ok(n) => pruned_files += n,
+                Err(e) => warn!(repository_id = %repo_id, error = %e, "Failed to drop stale repo rows"),
+            }
+            let _ = std::fs::remove_dir_all(knocode_repo_intel::default_index_path(repo_id));
+            let _ = db.delete_repo_registry_entry(repo_id);
+            info!(repo = %path, repository_id = %repo_id, "Pruned stale repository (path no longer exists)");
+        }
+
+        // 2. Orphan file rows with no registry entry (legacy pre-registry runs), plus
+        // the pre-migration-008 global bucket (repository_id='') which per-repo
+        // retrieval never reads. Errors are LOGGED (not swallowed) so a transient
+        // SQLite busy/lock at startup is visible and retried on the next restart.
+        let registered_ids: std::collections::HashSet<&String> =
+            registered.iter().map(|(id, _)| id).collect();
+        let mut orphan_ids: Vec<String> = match db.list_file_repo_ids() {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(error = %e, "Stale-repo GC: could not list orphan repo ids");
+                Vec::new()
+            }
+        };
+        orphan_ids.push(String::new()); // legacy global bucket from migration 008
+        for repo_id in &orphan_ids {
+            if registered_ids.contains(repo_id) {
+                continue;
+            }
+            match db.drop_repo_data(repo_id) {
+                Ok(n) if n > 0 => {
+                    pruned_files += n;
+                    if !repo_id.is_empty() {
+                        let _ = std::fs::remove_dir_all(knocode_repo_intel::default_index_path(repo_id));
+                        info!(repository_id = %repo_id, files = n, "Pruned orphan repository rows (no registry entry)");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => warn!(repository_id = %repo_id, error = %e, "Stale-repo GC: failed to drop orphan rows — will retry on next restart"),
+            }
+        }
+
+        if pruned_files > 0 {
+            info!(files = pruned_files, "Stale-repo GC complete");
+        }
     }
 }
 
@@ -317,17 +479,51 @@ async fn wait_for_shutdown(shutdown_flag: Arc<AtomicBool>, force_flag: Arc<Atomi
 
 // ── Helper Functions ────────────────────────────────────────────────────
 
-fn initialize_logging(level: &str) {
-    use tracing_subscriber::EnvFilter;
+fn initialize_logging(level: &str, file_path: &str) {
+    use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(level));
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(true)
-        .with_thread_ids(true)
-        .init();
+    let log_path = expand_path(file_path);
+    let (dir, name) = (
+        log_path.parent().map(|p| p.to_path_buf()),
+        log_path.file_name().map(|n| n.to_os_string()),
+    );
+
+    match (dir, name) {
+        (Some(dir), Some(name)) if std::fs::create_dir_all(&dir).is_ok() => {
+            // `rolling::never` = a plain single file in append mode (no rotation yet).
+            // Sync (non-non-blocking) writes on purpose — a daemon crash must not
+            // lose the log lines that explain the crash. The EnvFilter layer is
+            // registered first so it filters BOTH the console and file layers.
+            let file_writer = tracing_appender::rolling::never(&dir, name);
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_target(true)
+                        .with_thread_ids(true)
+                        .with_ansi(false),
+                )
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(file_writer)
+                        .with_target(true)
+                        .with_thread_ids(true)
+                        .with_ansi(false),
+                )
+                .init();
+        }
+        _ => {
+            // Log file/dir couldn't be created — fall back to stdout-only.
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_target(true)
+                .with_thread_ids(true)
+                .init();
+        }
+    }
 }
 
 fn expand_path(path: &str) -> PathBuf {

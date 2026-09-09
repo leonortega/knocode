@@ -58,7 +58,8 @@ pub struct Metrics {
     context_files: Mutex<Histogram>,
     retrieval_duration: Mutex<Histogram>,
     retrieval_candidates: Mutex<Histogram>,
-    retrieval_recall: Mutex<f64>,
+    empty_total: Mutex<usize>,
+    index_age: Mutex<Option<f64>>,
     readiness: Mutex<Readiness>,
 }
 
@@ -73,7 +74,8 @@ impl Metrics {
             context_files: Mutex::new(Histogram::new(vec![1.0, 3.0, 5.0, 10.0, 20.0, 50.0])),
             retrieval_duration: Mutex::new(Histogram::new(vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0])),
             retrieval_candidates: Mutex::new(Histogram::new(vec![0.0, 5.0, 10.0, 25.0, 50.0, 100.0, 500.0])),
-            retrieval_recall: Mutex::new(0.0),
+            empty_total: Mutex::new(0),
+            index_age: Mutex::new(None),
             readiness: Mutex::new(Readiness::Indexing),
         }
     }
@@ -110,8 +112,19 @@ impl Metrics {
     pub fn observe_retrieval_candidates(&self, n: usize) {
         if let Ok(mut h) = self.retrieval_candidates.lock() { h.observe(n as f64); }
     }
-    pub fn set_retrieval_recall(&self, recall: f64) {
-        if let Ok(mut r) = self.retrieval_recall.lock() { *r = recall; }
+    /// Requests where retrieval succeeded but produced zero context
+    /// (`OriginalPassthrough` / TASK-031) — distinct from fail-open.
+    pub fn inc_empty(&self) {
+        if let Ok(mut c) = self.empty_total.lock() { *c += 1; }
+    }
+
+    /// Seconds since the last completed index (initial or auto-reindex).
+    /// Cleared while a reindex is in progress.
+    pub fn set_index_age(&self, secs: f64) {
+        if let Ok(mut g) = self.index_age.lock() { *g = Some(secs.max(0.0)); }
+    }
+    pub fn clear_index_age(&self) {
+        if let Ok(mut g) = self.index_age.lock() { *g = None; }
     }
 
     /// Daemon readiness — `Indexing` while the initial index / an auto-reindex runs,
@@ -173,8 +186,14 @@ impl Metrics {
         if let Ok(h) = self.retrieval_candidates.lock() {
             out.push_str(&h.exposition("knocode_retrieval_candidates", "Candidate results returned by retrieval before packing"));
         }
-        if let Ok(r) = self.retrieval_recall.lock() {
-            out.push_str(&format!("# HELP knocode_retrieval_recall Retrieval recall@5\n# TYPE knocode_retrieval_recall gauge\nknocode_retrieval_recall {}\n", *r));
+        if let Ok(c) = self.empty_total.lock() {
+            out.push_str(&format!("# HELP knocode_context_empty_total Context requests that succeeded but produced zero context (OriginalPassthrough)\n# TYPE knocode_context_empty_total counter\nknocode_context_empty_total {}\n", *c));
+        }
+        if let Ok(g) = self.index_age.lock() {
+            match &*g {
+                Some(age) => out.push_str(&format!("# HELP knocode_index_age_seconds Seconds since the last completed index\n# TYPE knocode_index_age_seconds gauge\nknocode_index_age_seconds {}\n", age)),
+                None => out.push_str("# HELP knocode_index_age_seconds Seconds since the last completed index\n# TYPE knocode_index_age_seconds gauge\n"),
+            }
         }
         out
     }
@@ -211,7 +230,11 @@ mod tests {
         m.observe_context_files(7);
         m.observe_retrieval_duration(0.012);
         m.observe_retrieval_candidates(14);
+        m.inc_empty();
+        m.set_index_age(12.5);
         let exp = m.exposition();
+        assert!(exp.contains("knocode_context_empty_total 1"));
+        assert!(exp.contains("knocode_index_age_seconds 12.5"));
         assert!(exp.contains("knocode_requests_total"));
         assert!(exp.contains("knocode_build_context_duration_seconds"));
         assert!(exp.contains("knocode_fail_open_total"));

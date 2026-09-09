@@ -39,6 +39,14 @@ impl Database {
         conn.execute_batch("PRAGMA journal_mode=WAL;")
             .map_err(|e| format!("Failed to set WAL mode: {}", e))?;
 
+        // Wait for the write lock instead of failing instantly: `knocode init` and
+        // the daemon both write this database, and without a busy timeout the two
+        // SQLITE_BUSY-retry against each other — a reindex can crawl for tens of
+        // minutes and then fail-open, discarding all its work. 10s covers lock
+        // handoffs; batched writes here keep transactions short anyway.
+        conn.execute_batch("PRAGMA busy_timeout=10000; PRAGMA synchronous=NORMAL;")
+            .map_err(|e| format!("Failed to set PRAGMAs: {}", e))?;
+
         // `:memory:` is not a real file — record nothing so callers can tell the
         // store is ephemeral (retrieval-only instances, tests).
         let db_path = (path != std::path::Path::new(":memory:")).then(|| path.to_path_buf());
@@ -85,6 +93,31 @@ impl Database {
         let migration_007 = include_str!("migrations/007_drop_vestigial.sql");
         self.apply_migration("007_drop_vestigial", migration_007)?;
 
+        // Migration 008: scope the files table per repository — without it, every
+        // re-index of repo A deleted repo B's rows (globally-unique `path`).
+        let migration_008 = include_str!("migrations/008_files_repo_scope.sql");
+        self.apply_migration("008_files_repo_scope", migration_008)?;
+
+        // Migration 009: repository registry (repository_id ↔ path) — the multi-repo
+        // daemon's lazy indexing + stale-repo GC need the path behind each hash.
+        let migration_009 = include_str!("migrations/009_repo_registry.sql");
+        self.apply_migration("009_repo_registry", migration_009)?;
+
+        // Migration 010: index symbols.parent_id. FK enforcement is ON at runtime
+        // (re-enabled after every migration), and symbols.parent_id REFERENCES
+        // symbols(id) with NO index: every symbol DELETE triggered a full table scan
+        // of symbols PER ROW to verify the self-FK — mass cleanups (stale-repo GC on
+        // a 53k-file repo) took minutes-to-hours holding the SQLite write lock. The
+        // index makes FK checks O(log n).
+        let migration_010 = include_str!("migrations/010_symbols_parent_id_idx.sql");
+        self.apply_migration("010_symbols_parent_id_idx", migration_010)?;
+
+        // Migration 011: index files.repository_id — find_symbols_scoped joins
+        // symbols→files filtered by repository_id; without the index every symbol
+        // lookup scans the whole files table (63k rows across all repos).
+        let migration_011 = include_str!("migrations/011_files_repo_idx.sql");
+        self.apply_migration("011_files_repo_idx", migration_011)?;
+
         // v1: 004_events and 005_audits removed per TASK-002/TASK-001 — preserved in future/workflow/migrations/
         // Event persistence (ring buffer + SQLite) and workflow audits are NOT part of v1 hot path.
         // v1 keeps only tracing + metrics + correlation IDs (EventBus is in-memory only).
@@ -106,16 +139,44 @@ impl Database {
             return Ok(());
         }
 
+        // Migrations that REBUILD a FK-referenced table (008 drops `files` and
+        // renames `files_v2` back while `symbols` still holds a FOREIGN KEY →
+        // files.id) fail the DROP the moment FK enforcement is ON (rusqlite's
+        // default). The rebuild copies `id`s verbatim, so every foreign key stays
+        // valid AFTER the rebuild — we only need enforcement OFF across the
+        // migration window. PRAGMA foreign_keys must run outside a transaction,
+        // which holds here (the status SELECT above left none open).
         self.conn
-            .execute_batch(sql)
-            .map_err(|e| format!("Migration '{}' failed: {}", name, e))?;
+            .execute_batch("PRAGMA foreign_keys=OFF;")
+            .map_err(|e| format!("Migration '{}': could not suspend foreign_keys: {}", name, e))?;
+
+        // Transactional: a migration killed mid-way (e.g. daemon killed during a
+        // slow table rebuild) must roll back cleanly, or the rerun hits partial
+        // state (e.g. duplicate rows in a rebuilt table) and fails forever.
+        self.conn
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| format!("Migration '{}': begin failed: {}", name, e))?;
+        if let Err(e) = self.conn.execute_batch(sql) {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            let _ = self.conn.execute_batch("PRAGMA foreign_keys=ON;");
+            return Err(format!("Migration '{}' failed: {}", name, e));
+        }
+
+        if let Err(e) = self.conn.execute(
+            "INSERT INTO schema_migrations (name) VALUES (?1)",
+            params![name],
+        ) {
+            let _ = self.conn.execute_batch("ROLLBACK");
+            let _ = self.conn.execute_batch("PRAGMA foreign_keys=ON;");
+            return Err(format!("Failed to record migration '{}': {}", name, e));
+        }
 
         self.conn
-            .execute(
-                "INSERT INTO schema_migrations (name) VALUES (?1)",
-                params![name],
-            )
-            .map_err(|e| format!("Failed to record migration '{}': {}", name, e))?;
+            .execute_batch("COMMIT")
+            .map_err(|e| format!("Migration '{}': commit failed: {}", name, e))?;
+        self.conn
+            .execute_batch("PRAGMA foreign_keys=ON;")
+            .map_err(|e| format!("Migration '{}': could not re-enable foreign_keys: {}", name, e))?;
 
         info!(migration = name, "Applied migration");
         Ok(())
@@ -130,12 +191,13 @@ impl Database {
         hash: &str,
         size: i64,
         language: Option<&str>,
+        repository_id: &str,
     ) -> Result<i64, String> {
         let start = Instant::now();
         self.conn
             .execute(
-                "INSERT INTO files (path, hash, size, language, last_indexed_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![path, hash, size, language, Utc::now().to_rfc3339()],
+                "INSERT INTO files (path, repository_id, hash, size, language, last_indexed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![path, repository_id, hash, size, language, Utc::now().to_rfc3339()],
             )
             .map_err(|e| format!("Failed to insert file: {}", e))?;
         let id = self.conn.last_insert_rowid();
@@ -156,16 +218,21 @@ impl Database {
         Ok(())
     }
 
-    /// Delete a file by path — cascades to symbols (TASK-010: stale symbols must disappear)
-    pub fn delete_file(&self, path: &str) -> Result<(), String> {
+    /// Delete a file by path within one repository — cascades to symbols
+    /// (TASK-010: stale symbols must disappear). Repository-scoped: a path may
+    /// exist in several repos, and re-indexing repo A must never touch repo B's rows.
+    pub fn delete_file(&self, path: &str, repository_id: &str) -> Result<(), String> {
         let start = Instant::now();
         // Delete symbols first to avoid FOREIGN KEY constraint (symbols.file_id → files.id)
         let _ = self.conn.execute(
-            "DELETE FROM symbols WHERE file_id IN (SELECT id FROM files WHERE path = ?1)",
-            params![path],
+            "DELETE FROM symbols WHERE file_id IN (SELECT id FROM files WHERE path = ?1 AND repository_id = ?2)",
+            params![path, repository_id],
         );
         self.conn
-            .execute("DELETE FROM files WHERE path = ?1", params![path])
+            .execute(
+                "DELETE FROM files WHERE path = ?1 AND repository_id = ?2",
+                params![path, repository_id],
+            )
             .map_err(|e| format!("Failed to delete file: {}", e))?;
         log_slow("delete_file", start);
         Ok(())
@@ -189,15 +256,15 @@ impl Database {
         Ok(files)
     }
 
-    /// Get all files with full meta (for incremental mtime+size shortcut — Phase2)
-    pub fn get_all_files_meta(&self) -> Result<Vec<FileRecord>, String> {
+    /// Get all files with full meta for ONE repository (incremental mtime+size shortcut — Phase2)
+    pub fn get_all_files_meta(&self, repository_id: &str) -> Result<Vec<FileRecord>, String> {
         let start = Instant::now();
         let mut stmt = self
             .conn
-            .prepare("SELECT id, path, hash, size, language, last_indexed_at FROM files")
+            .prepare("SELECT id, path, hash, size, language, last_indexed_at FROM files WHERE repository_id = ?1")
             .map_err(|e| format!("Failed to prepare query: {}", e))?;
         let files = stmt
-            .query_map([], |row| {
+            .query_map(params![repository_id], |row| {
                 Ok(FileRecord {
                     id: row.get(0)?,
                     path: row.get(1)?,
@@ -266,12 +333,97 @@ impl Database {
         }
     }
 
-    /// Get the count of indexed files
+    /// Get the count of indexed files (global — use `get_file_count_for_repo` for per-repo)
     pub fn get_file_count(&self) -> Result<usize, String> {
         self.conn
             .query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0))
             .map(|v| v as usize)
             .map_err(|e| format!("Failed to count files: {}", e))
+    }
+
+    /// Count indexed files for ONE repository (daemon readiness / index_files gauge)
+    pub fn get_file_count_for_repo(&self, repository_id: &str) -> Result<usize, String> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE repository_id = ?1",
+                params![repository_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|v| v as usize)
+            .map_err(|e| format!("Failed to count files for repo: {}", e))
+    }
+
+    // ── Repository registry (migration 009) ─────────────────────────
+
+    /// Upsert the path behind a repository_id. Called whenever the daemon indexes
+    /// (eagerly or lazily) a repository so stale-repo GC can identify the data.
+    pub fn register_repo(&self, repository_id: &str, path: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO repo_registry (repository_id, path) VALUES (?1, ?2)
+                 ON CONFLICT(repository_id) DO UPDATE SET path = excluded.path",
+                params![repository_id, path],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("Failed to register repository: {}", e))
+    }
+
+    /// All registered repositories as (repository_id, path), oldest first.
+    pub fn list_registered_repos(&self) -> Result<Vec<(String, String)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT repository_id, path FROM repo_registry ORDER BY registered_at")
+            .map_err(|e| format!("Failed to list registered repos: {}", e))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| format!("Failed to query registered repos: {}", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read registered repos: {}", e))?;
+        Ok(rows)
+    }
+
+    /// Distinct repository_ids present in the files table (registered or not —
+    /// used to find legacy/orphan rows from pre-registry runs).
+    pub fn list_file_repo_ids(&self) -> Result<Vec<String>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT repository_id FROM files WHERE repository_id != ''")
+            .map_err(|e| format!("Failed to list file repo ids: {}", e))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Failed to query file repo ids: {}", e))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read file repo ids: {}", e))?;
+        Ok(rows)
+    }
+
+    /// Delete all file + symbol rows for ONE repository. Returns the number of
+    /// file rows removed (symbols go with them via the file_id join).
+    pub fn drop_repo_data(&self, repository_id: &str) -> Result<usize, String> {
+        self.conn
+            .execute(
+                "DELETE FROM symbols WHERE file_id IN (SELECT id FROM files WHERE repository_id = ?1)",
+                params![repository_id],
+            )
+            .map_err(|e| format!("Failed to drop symbols for repo: {}", e))?;
+        self.conn
+            .execute(
+                "DELETE FROM files WHERE repository_id = ?1",
+                params![repository_id],
+            )
+            .map(|v| v as usize)
+            .map_err(|e| format!("Failed to drop files for repo: {}", e))
+    }
+
+    /// Remove a registry entry (after its data has been dropped).
+    pub fn delete_repo_registry_entry(&self, repository_id: &str) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM repo_registry WHERE repository_id = ?1",
+                params![repository_id],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("Failed to delete registry entry: {}", e))
     }
 
     // ── Symbols ─────────────────────────────────────────────────────
@@ -393,12 +545,170 @@ impl Database {
         Ok(symbols)
     }
 
+    /// Repository-scoped, bounded symbol lookup — hot path for retrieval.
+    ///
+    /// Fixes the v1 regression where `find_symbol("how to add error handling")`
+    /// ran `LIKE '%<whole sentence>%'` over EVERY repository's symbols with no
+    /// LIMIT (13-22ms per query against 236k symbols). This version:
+    /// 1. Tokenizes the query and ORs per-token LIKE patterns (SQLite can only
+    ///    use a range scan for the FIRST pattern; ORs let the optimizer pick one
+    ///    token instead of a full scan on the whole sentence).
+    /// 2. Restricts candidates to one repository via a files JOIN on an indexed
+    ///    `repository_id` (migration 011) — no cross-repo pollution.
+    /// 3. `LIMIT max_results` — no unbounded result materialization.
+    ///
+    /// Returns symbols whose name contains ANY query token (bm25-style broad
+    /// recall; ranking happens in the retrieval layer).
+    pub fn find_symbols_scoped(
+        &self,
+        query: &str,
+        repository_id: &str,
+        max_results: usize,
+    ) -> Result<Vec<Symbol>, String> {
+        let start = Instant::now();
+
+        // Tokenize: alphanumeric runs ≥ 3 chars (2-char tokens like "db" match
+        // thousands of rows and dominate the OR cost for no ranking value).
+        let mut tokens: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut push_token = |t: &mut String| {
+            if t.len() >= 3 && !tokens.contains(t) {
+                tokens.push(t.clone());
+            }
+            t.clear();
+        };
+        for ch in query.chars() {
+            if ch.is_alphanumeric() || ch == '_' {
+                cur.push(ch);
+            } else {
+                push_token(&mut cur);
+            }
+        }
+        push_token(&mut cur);
+        // Cap OR arms — more terms can't help and each is a potential scan.
+        tokens.truncate(6);
+
+        let symbols = if tokens.is_empty() {
+            // No usable token (e.g. numeric/symbol-only query): return a small
+            // bounded slice rather than an unbounded scan.
+            let symbols = {
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT s.id, s.file_id, s.name, s.kind, s.line_start, s.line_end, s.parent_id
+                         FROM symbols s
+                         JOIN files f ON f.id = s.file_id
+                         WHERE f.repository_id = ?1
+                         LIMIT ?2",
+                    )
+                    .map_err(|e| format!("Failed to prepare scoped symbol query: {}", e))?;
+                let mapped = stmt.query_map(params![repository_id, max_results as i64], |row| {
+                    Ok(Symbol {
+                        id: row.get(0)?,
+                        file_id: row.get(1)?,
+                        name: row.get(2)?,
+                        kind: row.get(3)?,
+                        line_start: row.get(4)?,
+                        line_end: row.get(5)?,
+                        parent_id: row.get(6)?,
+                    })
+                })
+                .map_err(|e| format!("Failed to query scoped symbols: {}", e))?;
+                let collected = mapped
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| format!("Failed to collect scoped symbols: {}", e))?;
+                collected
+            };
+            symbols
+        } else {
+            // OR-join per-token LIKE patterns against the indexed symbols.name.
+            // Placeholders are numbered explicitly (?1..?n, then repo, then limit):
+            // mixing an explicit ?N BEFORE anonymous ? markers makes SQLite
+            // auto-number the anonymous ones from N+1, breaking the binding order.
+            let arms: Vec<String> = (1..=tokens.len())
+                .map(|i| format!("s.name LIKE ?{i} ESCAPE '\\'"))
+                .collect();
+            let where_clause = arms.join(" OR ");
+            let sql = format!(
+                "SELECT s.id, s.file_id, s.name, s.kind, s.line_start, s.line_end, s.parent_id
+                 FROM symbols s
+                 JOIN files f ON f.id = s.file_id
+                 WHERE f.repository_id = ?{repo} AND ({where_clause})
+                 LIMIT ?{lim}",
+                repo = tokens.len() + 1,
+                lim = tokens.len() + 2,
+                where_clause = where_clause,
+            );
+            // Bind: one escaped LIKE pattern per token, then repo_id, then limit.
+            let pattern_for = |t: &str| format!("%{}%", t.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+            let mut params_vec: Vec<String> = tokens.iter().map(|t| pattern_for(t)).collect();
+            params_vec.push(repository_id.to_string());
+            params_vec.push(max_results.to_string());
+            let symbols = {
+                let mut stmt = self
+                    .conn
+                    .prepare(&sql)
+                    .map_err(|e| format!("Failed to prepare scoped symbol query: {}", e))?;
+                let param_refs: Vec<&dyn rusqlite::ToSql> =
+                    params_vec.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+                let mapped = stmt
+                    .query_map(param_refs.as_slice(), |row| {
+                        Ok(Symbol {
+                            id: row.get(0)?,
+                            file_id: row.get(1)?,
+                            name: row.get(2)?,
+                            kind: row.get(3)?,
+                            line_start: row.get(4)?,
+                            line_end: row.get(5)?,
+                            parent_id: row.get(6)?,
+                        })
+                    })
+                    .map_err(|e| format!("Failed to query scoped symbols: {}", e))?;
+                let collected = mapped
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| format!("Failed to collect scoped symbols: {}", e))?;
+                collected
+            };
+            symbols
+        };
+
+        log_slow("find_symbols_scoped", start);
+        Ok(symbols)
+    }
+
     /// Get the count of symbols
     pub fn get_symbol_count(&self) -> Result<usize, String> {
         self.conn
             .query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get::<_, i64>(0))
             .map(|v| v as usize)
             .map_err(|e| format!("Failed to count symbols: {}", e))
+    }
+
+    /// Count symbols belonging to a set of file IDs (chunked IN queries — the ids
+    /// come from one repo's `files` rows). Used to detect a symbol-less index left
+    /// by an interrupted run: Phase1 commits file records BEFORE extraction, so a
+    /// killed run leaves rows whose files the mtime+size shortcut would then skip
+    /// forever, keeping the index silently crippled at 0 symbols.
+    pub fn count_symbols_for_file_ids(&self, file_ids: &[i64]) -> Result<usize, String> {
+        let mut total = 0usize;
+        for chunk in file_ids.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT COUNT(*) FROM symbols WHERE file_id IN ({})",
+                placeholders
+            );
+            let params: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let n: i64 = self
+                .conn
+                .query_row(&sql, params.as_slice(), |row| row.get(0))
+                .map_err(|e| format!("Failed to count symbols for file ids: {}", e))?;
+            total += n as usize;
+            if total > 0 {
+                return Ok(total); // early exit — only zero-vs-nonzero matters
+            }
+        }
+        Ok(total)
     }
 
     // ── Token Usage ─────────────────────────────────────────────────
@@ -946,7 +1256,7 @@ mod tests {
     fn test_insert_and_get_file() {
         let db = test_db();
         let id = db
-            .insert_file("src/main.rs", "abc123", 1024, Some("rust"))
+            .insert_file("src/main.rs", "abc123", 1024, Some("rust"), "test")
             .unwrap();
         assert!(id > 0);
 
@@ -968,7 +1278,7 @@ mod tests {
     fn test_update_file() {
         let db = test_db();
         let id = db
-            .insert_file("src/main.rs", "old_hash", 100, None)
+            .insert_file("src/main.rs", "old_hash", 100, None, "test")
             .unwrap();
         db.update_file(id, "new_hash", 200).unwrap();
 
@@ -980,9 +1290,9 @@ mod tests {
     #[test]
     fn test_delete_file() {
         let db = test_db();
-        db.insert_file("src/main.rs", "abc", 100, None)
+        db.insert_file("src/main.rs", "abc", 100, None, "test")
             .unwrap();
-        db.delete_file("src/main.rs").unwrap();
+        db.delete_file("src/main.rs", "test").unwrap();
         let file = db.get_file("src/main.rs").unwrap();
         assert!(file.is_none());
     }
@@ -990,8 +1300,8 @@ mod tests {
     #[test]
     fn test_get_all_files() {
         let db = test_db();
-        db.insert_file("a.rs", "h1", 10, None).unwrap();
-        db.insert_file("b.rs", "h2", 20, None).unwrap();
+        db.insert_file("a.rs", "h1", 10, None, "test").unwrap();
+        db.insert_file("b.rs", "h2", 20, None, "test").unwrap();
         let files = db.get_all_files().unwrap();
         assert_eq!(files.len(), 2);
     }
@@ -1000,9 +1310,9 @@ mod tests {
     fn test_file_count() {
         let db = test_db();
         assert_eq!(db.get_file_count().unwrap(), 0);
-        db.insert_file("a.rs", "h", 10, None).unwrap();
+        db.insert_file("a.rs", "h", 10, None, "test").unwrap();
         assert_eq!(db.get_file_count().unwrap(), 1);
-        db.insert_file("b.rs", "h", 10, None).unwrap();
+        db.insert_file("b.rs", "h", 10, None, "test").unwrap();
         assert_eq!(db.get_file_count().unwrap(), 2);
     }
 
@@ -1010,7 +1320,7 @@ mod tests {
     fn test_insert_and_find_symbols() {
         let db = test_db();
         let file_id = db
-            .insert_file("src/main.rs", "h", 100, None)
+            .insert_file("src/main.rs", "h", 100, None, "test")
             .unwrap();
 
         let sym_id = db
@@ -1028,7 +1338,7 @@ mod tests {
     fn test_find_symbol() {
         let db = test_db();
         let file_id = db
-            .insert_file("a.rs", "h", 100, None)
+            .insert_file("a.rs", "h", 100, None, "test")
             .unwrap();
         db.insert_symbol(file_id, "UserService", "struct", 1, 20, None)
             .unwrap();
@@ -1041,10 +1351,51 @@ mod tests {
     }
 
     #[test]
+    fn test_find_symbols_scoped() {
+        let db = test_db();
+        // Repo A: two symbols
+        let fa = db.insert_file("a.rs", "h", 100, None, "repo_a").unwrap();
+        db.insert_symbol(fa, "UserService", "struct", 1, 20, None).unwrap();
+        db.insert_symbol(fa, "handle_request", "function", 25, 50, None).unwrap();
+        // Repo B: one symbol that would match a whole-sentence LIKE scan
+        let fb = db.insert_file("b.rs", "h", 100, None, "repo_b").unwrap();
+        db.insert_symbol(fb, "UserService", "struct", 1, 20, None).unwrap();
+
+        // Tokenized match: "user service" → tokens user/service → UserService
+        let results = db
+            .find_symbols_scoped("how does the user service handler work", "repo_a", 50)
+            .unwrap();
+        assert_eq!(results.len(), 1, "UserService matches the 'user' token");
+        let results_handle = db
+            .find_symbols_scoped("the request handler setup", "repo_a", 50)
+            .unwrap();
+        assert_eq!(results_handle.len(), 1, "handle_request matches the 'request' token");
+
+        // Repo scoping: repo_b never sees repo_a rows and vice versa
+        let results_b = db
+            .find_symbols_scoped("UserService", "repo_b", 50)
+            .unwrap();
+        assert_eq!(results_b.len(), 1);
+        let results_none = db
+            .find_symbols_scoped("handle_request", "repo_b", 50)
+            .unwrap();
+        assert_eq!(results_none.len(), 0, "no cross-repo pollution");
+
+        // LIMIT is honored
+        let limited = db.find_symbols_scoped("user service", "repo_a", 1).unwrap();
+        assert_eq!(limited.len(), 1);
+
+        // No usable tokens → bounded fallback slice (≤ max_results), never a
+        // full-sentence LIKE scan and never unbounded.
+        let empty_tokens = db.find_symbols_scoped("::", "repo_a", 1).unwrap();
+        assert_eq!(empty_tokens.len(), 1, "no tokens → bounded fallback slice");
+    }
+
+    #[test]
     fn test_symbol_count() {
         let db = test_db();
         let file_id = db
-            .insert_file("a.rs", "h", 100, None)
+            .insert_file("a.rs", "h", 100, None, "test")
             .unwrap();
         assert_eq!(db.get_symbol_count().unwrap(), 0);
         db.insert_symbol(file_id, "a", "function", 1, 5, None)
@@ -1076,7 +1427,7 @@ mod tests {
 
         {
             let db1 = Database::open(&path).unwrap();
-            db1.insert_file("a.rs", "h", 10, None).unwrap();
+            db1.insert_file("a.rs", "h", 10, None, "test").unwrap();
         }
 
         // Open again — migrations should not fail

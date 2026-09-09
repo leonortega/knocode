@@ -80,6 +80,15 @@ pub struct ContextEngine {
     /// Lazily-created per-repository intelligence keyed by canonical workspace path (TASK-036/F-7):
     /// ONE daemon serves many opencode windows on different repos simultaneously.
     repo_cache: Arc<Mutex<HashMap<String, Arc<Mutex<RepositoryIntelligence>>>>>,
+    /// Persistent SQLite path shared across repos (migration 008). When set, per-request
+    /// repository intelligence is backed by the SAME store the daemon indexes into —
+    /// required for lazy per-repo indexing (a request-only repo previously got an
+    /// in-memory DB, so its index writes were silently discarded).
+    db_path: Option<std::path::PathBuf>,
+    /// Callback fired ONCE per newly-resolved repository path (multi-repo daemon).
+    /// The daemon uses it to spawn that repo's auto-reindex watcher, so lazily
+    /// indexed repos are watched too — not just `--repo` eager ones.
+    on_repo_registered: Option<Arc<dyn Fn(&str) + Send + Sync>>,
     knowledge_hub: Arc<Mutex<KnowledgeHub>>,
     event_bus: EventBus,
     config: ContextConfig,
@@ -98,11 +107,26 @@ impl ContextEngine {
         Self {
             default_repo_intel: Arc::new(Mutex::new(repo_intel)),
             repo_cache: Arc::new(Mutex::new(HashMap::new())),
+            db_path: None,
+            on_repo_registered: None,
             knowledge_hub: Arc::new(Mutex::new(knowledge_hub)),
             event_bus,
             config,
             session_fingerprints: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Point per-request repository intelligence at the daemon's persistent SQLite store
+    /// (multi-repo daemon: one shared DB, per-repo rows since migration 008).
+    pub fn with_db_path(mut self, db_path: std::path::PathBuf) -> Self {
+        self.db_path = Some(db_path);
+        self
+    }
+
+    /// Register the new-repository callback (see `on_repo_registered`). Callable
+    /// after construction because the daemon holds the engine behind a Mutex.
+    pub fn set_on_repo_registered(&mut self, cb: Arc<dyn Fn(&str) + Send + Sync>) {
+        self.on_repo_registered = Some(cb);
     }
 
     /// Resolve the per-request repository view (TASK-036): when the agent's workspace path is
@@ -124,21 +148,78 @@ impl ContextEngine {
                 return Ok(ri.clone());
             }
         }
-        // Retrieval-only instance — DB is only needed for indexing/metadata, use throwaway in-memory store
-        let db = knocode_storage::Database::open(&std::path::PathBuf::from(":memory:"))?;
+        // Multi-repo daemon: per-request repos share the daemon's persistent SQLite
+        // store (migration 008) when one is configured, so their index writes persist
+        // and lazy indexing below actually lands. In-memory fallback keeps tests and
+        // retrieval-only usage working with no config.
+        let db = match &self.db_path {
+            Some(path) => knocode_storage::Database::open(path)?,
+            None => knocode_storage::Database::open(&std::path::PathBuf::from(":memory:"))?,
+        };
         let ri = Arc::new(Mutex::new(RepositoryIntelligence::new(
             canonical.clone(),
             db,
             self.event_bus.clone(),
         )));
-        if let Ok(mut cache) = self.repo_cache.lock() {
-            let repo_id = match ri.lock() {
-                Ok(guard) => guard.repository_id().to_string(),
-                Err(_) => String::new(),
-            };
-            info!(repo = %canonical.to_string_lossy(), repository_id = %repo_id, "resolved per-repository intelligence (TASK-036)");
-            cache.entry(key).or_insert_with(|| ri.clone());
+        let repo_id = match ri.lock() {
+            Ok(guard) => guard.repository_id().to_string(),
+            Err(_) => String::new(),
+        };
+
+        // Cache first (single flight per path): only the resolver that inserts the
+        // entry pays for registration + lazy indexing + the watcher callback.
+        let was_new = {
+            let mut cache = self
+                .repo_cache
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?;
+            match cache.entry(key.clone()) {
+                std::collections::hash_map::Entry::Occupied(existing) => {
+                    return Ok(existing.get().clone());
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(ri.clone());
+                    true
+                }
+            }
+        };
+
+        if was_new {
+            // Register the repo (registry migration 009) so stale-repo GC can map
+            // its repository_id back to this path.
+            if let Some(path) = &self.db_path {
+                let db = knocode_storage::Database::open(path)?;
+                let _ = db.register_repo(&repo_id, &key);
+
+                // Lazy per-repo indexing: a repo the daemon has never seen gets
+                // indexed on its first request (multi-repo "one daemon for all
+                // repositories"). Unindexed = zero file rows for this repo_id.
+                // Indexing through `ri` itself (not `reindex_repository`) avoids
+                // recursion via resolve_repo_intel.
+                let indexed = db
+                    .get_file_count_for_repo(&repo_id)
+                    .unwrap_or(0);
+                if indexed == 0 {
+                    info!(
+                        repo = %canonical.to_string_lossy(),
+                        repository_id = %repo_id,
+                        "first request for unknown repository — lazy indexing"
+                    );
+                    if let Ok(mut guard) = ri.lock() {
+                        if let Err(e) = guard.index_repository() {
+                            warn!(repository_id = %repo_id, error = %e, "lazy indexing failed — retrieval will degrade to ripgrep fallback");
+                        }
+                    }
+                }
+            }
+
+            // Notify the daemon so it can spawn this repo's auto-reindex watcher.
+            if let Some(cb) = &self.on_repo_registered {
+                cb(&key);
+            }
         }
+
+        info!(repo = %canonical.to_string_lossy(), repository_id = %repo_id, "resolved per-repository intelligence (TASK-036)");
         Ok(ri)
     }
 
@@ -573,7 +654,18 @@ impl ContextEngine {
         );
         // index_repository() evicts the repo's cached tantivy handle on completion,
         // so the engine's next search reopens a fresh reader and sees the new data.
-        intel.index_repository()
+        // Progress heartbeats (throttled to ~1/sec of file count) go to the trace
+        // log so a long index never looks frozen — the daemon has no other visible
+        // progress signal while /health reports "indexing".
+        let last_logged = std::sync::atomic::AtomicUsize::new(0);
+        let progress = |done: usize, total: usize, phase: &str| {
+            let last = last_logged.load(std::sync::atomic::Ordering::Relaxed);
+            if done == 0 || done.saturating_sub(last) >= 1000 {
+                last_logged.store(done, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!(done, total, phase, "indexing progress");
+            }
+        };
+        intel.index_repository_with_progress(Some(&progress))
     }
 
     /// Serialize context pack to YAML — compact, deterministic order (skills → docs → code).

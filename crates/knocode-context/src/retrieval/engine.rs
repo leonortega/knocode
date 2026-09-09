@@ -483,11 +483,38 @@ impl Retriever for TantivyRetriever {
         }
         merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+        // P0 eval-quality fix: damp generic meta-docs. Documentation files whose
+        // PATH shares no token with the query matched via content generality and
+        // stacked class×dir×authority×intent priors — putting a .md at rank 1 for
+        // 47/50 golden-eval tasks and pushing the actual code target to rank ~3.
+        //
+        // Prior-only damping proved insufficient (explain output: README's pure
+        // BM25 can be 3× the target code file's), so the damping multiplies the
+        // FULL final score of generic docs. Genuinely on-topic docs are carried
+        // by their raw BM25 and survive; generic meta-docs fall below the code
+        // files they used to bury. Code/Config/Test files are never damped.
+        let damped_paths: HashSet<String> = {
+            let mut damped_paths: HashSet<String> = HashSet::new();
+            for (path, score) in merged.iter_mut() {
+                if let Some((_, file_class, _)) = by_path.get(path.as_str()) {
+                    if ranking::is_generic_doc(path, file_class, &q_tokens) {
+                        *score *= policy.doc_prior_damping as f64;
+                        damped_paths.insert(path.clone());
+                    }
+                }
+            }
+            merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            damped_paths
+        };
+
         // Build Evidence with signals
         let mut signals_by_path: HashMap<String, Vec<RetrievalSignal>> = HashMap::new();
         for (path, score) in merged.iter() {
             let mut sigs = Vec::new();
             sigs.push(RetrievalSignal::TantivyScore(*score as f32));
+            if damped_paths.contains(path.as_str()) {
+                sigs.push(RetrievalSignal::DocPriorDamping { factor: policy.doc_prior_damping });
+            }
             if let Some(gs) = graph_signals.get(path) {
                 sigs.push(gs.clone());
             }
@@ -509,7 +536,7 @@ impl Retriever for TantivyRetriever {
                     ev.signals = sigs.clone();
                 }
                 let mut extra = Vec::new();
-                ranking::apply_class_and_dir_boost(1.0, &path, file_class, &query.text, policy, &mut extra);
+                ranking::apply_class_and_dir_boost_with_query_tokens(1.0, &path, file_class, &q_tokens, policy, &mut extra);
                 ev.signals.extend(extra);
                 evidence.push(ev);
             }

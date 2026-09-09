@@ -5,5 +5,9 @@ export default defineConfig({
     include: ["test/**/*.test.ts"],
     environment: "node",
     globals: true,
+    // Quiet output: dots + pass/fail summary only; console.log spam suppressed.
+    // Verbose view still available: npx vitest run --reporter=verbose --silent=false
+    reporters: ["dot"],
+    silent: true,
   },
 });

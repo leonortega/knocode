@@ -467,6 +467,40 @@ Schema::builder()
     .build()
 ```
 
+## Metrics
+
+`GET /metrics` exposes the Prometheus text exposition format (v0.9.0 — lightweight,
+in-memory, no `prometheus` crate; see `daemon/src/metrics.rs`). The full list:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `knocode_requests_total{key=...}` | counter | Total requests by hook type (distinguishes HTTP hook from MCP dispatch) |
+| `knocode_build_context_duration_seconds` | histogram | End-to-end daemon context-request latency (engine-lock wait + build + serialize; RAII timer spans the handler) |
+| `knocode_fail_open_total` | counter | Fail-open count (timeout/error → OriginalPassthrough) |
+| `knocode_context_empty_total` | counter | Requests that succeeded but produced zero context (`OriginalPassthrough`, `reason: "no_context_hits"`) — distinct from fail-open |
+| `knocode_context_tokens` | histogram | Context tokens per request |
+| `knocode_context_files` | histogram | Files included in the context pack per request |
+| `knocode_retrieval_duration_seconds` | histogram | Retrieval-stage latency (search only, excluding packing) |
+| `knocode_retrieval_candidates` | histogram | Candidate results returned by retrieval before packing |
+| `knocode_index_files` | gauge | Indexed files (real count from SQLite after initial index / auto-reindex) |
+| `knocode_index_age_seconds` | gauge | Seconds since the last completed index; sample omitted while no index has completed or during a reindex |
+| `knocode_daemon_ready` | gauge | `1` = ready, `0` = indexing (readiness state machine above) |
+
+Latency decomposition: `knocode_build_context_duration_seconds` is the total;
+`knocode_retrieval_duration_seconds` is the retrieval stage within it. There is
+deliberately no per-query-planning metric — the planner is deterministic and
+in-process (a tracing concern, not a production metric).
+
+Retrieval quality (recall@k, MRR) is **not** exposed here: the daemon has no
+ground truth at request time. It lives in the evaluation suite
+(`eval/metrics/retrieval.py`, `eval/run_comparison.sh`).
+
+Plugin-side integration latency (`session.prompt` → `/hook` → prompt mutation)
+is measured separately by the agent adapters via a single `Date.now()` pair and
+logged per prompt (`[knocode] context latency=<ms> tokens=<n> files=<n>`), so
+daemon overhead vs. integration overhead can be told apart without a metrics
+pipeline.
+
 ## Logging
 
 ### Log Format

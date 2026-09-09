@@ -673,13 +673,15 @@ impl TantivyIndex {
             Box::new(BooleanQuery::new(must_clauses))
         };
 
-        // Candidate pool size: max_results is candidateK (20/50/100/200) — env KNOCODE_CANDIDATE_K overrides config/CLI
-        // Previously max_results*3; now caller passes candidateK directly (default 100 → Top 20 after ranking)
+        // Candidate pool size: max_results is candidateK (20/50/100/500/1000) — env KNOCODE_CANDIDATE_K
+        // overrides config/CLI. Previously clamped to 200, which silently voided the documented
+        // structural candidate_k of 500-1000 (bench_components showed Candidate K as +0.0% partly
+        // because of this clamp). Clamp raised to 1000 to honor policy.
         let fetch_limit = std::env::var("KNOCODE_CANDIDATE_K")
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(max_results)
-            .min(200);
+            .min(1000);
         let _search_start = std::time::Instant::now();
         let top_docs = searcher
             .search(&full_query, &TopDocs::with_limit(fetch_limit).order_by_score())

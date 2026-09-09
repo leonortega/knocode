@@ -143,7 +143,9 @@ export async function mcpCall(
     }
     return { kind: "ok", result: body.result };
   } catch (error) {
-    console.error(`[knocode] Daemon unreachable: ${error}`);
+    // No console logging here: mcpCall failures surface via the typed outcome
+    // (`reason: String(error)`) and callers decide how/whether to log — keeps
+    // fire-and-forget setup handshakes from double-logging stderr noise.
     return { kind: "failure", reason: String(error) };
   }
 }

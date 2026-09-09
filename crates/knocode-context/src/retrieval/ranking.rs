@@ -89,11 +89,60 @@ pub fn apply_class_and_dir_boost(
     policy: &RetrievalPolicy,
     signals: &mut Vec<RetrievalSignal>,
 ) -> f32 {
+    apply_class_and_dir_boost_with_query_tokens(
+        base_score,
+        path,
+        file_class,
+        &query_tokens(query),
+        policy,
+        signals,
+    )
+}
+
+/// P0 eval-quality fix: documentation damping for top-of-list monopolization.
+///
+/// Generic meta-docs (README.md, ROADMAP.md, CHANGELOG.md, docs/*.md) match
+/// every query through their CONTENT, then stack compounding priors — file
+/// class ×1.4-2.5, directory ×1.2-1.3, authority ×1.5. On the golden 50-task
+/// eval this put a .md file at rank 1 for 47/50 tasks, pushing the actual code
+/// target to rank ~3 and capping MRR at ~0.28.
+///
+/// A doc file whose PATH shares no token with the query matched on content
+/// generality, not on-topic evidence. The engine multiplies such docs' FULL
+/// final score by `policy.doc_prior_damping` (see engine.rs). Code/Config/Test
+/// files are never damped; a path-token match (query "indexing" vs
+/// INDEXING_PERF_PLAN.md) keeps the full score — topical docs still win.
+
+/// True when this file is documentation-class AND its path contains none of
+/// the query tokens (i.e. it is a generic meta-doc for this query).
+pub fn is_generic_doc(path: &str, file_class: &str, query_tokens: &[String]) -> bool {
+    if file_class != "Documentation" || query_tokens.is_empty() {
+        return false;
+    }
+    let path_lower = path.to_lowercase();
+    !query_tokens.iter().any(|t| path_lower.contains(t.as_str()))
+}
+
+pub fn apply_class_and_dir_boost_with_query_tokens(
+    base_score: f32,
+    path: &str,
+    file_class: &str,
+    query_tokens: &[String],
+    policy: &RetrievalPolicy,
+    signals: &mut Vec<RetrievalSignal>,
+) -> f32 {
     let class_boost = policy.file_class_weights.boost_for(file_class);
     if (class_boost - 1.0).abs() > f32::EPSILON {
         signals.push(RetrievalSignal::FileClassBoost { class: file_class.to_string(), boost: class_boost });
     }
-    let test_mult = policy.test_multiplier(query, file_class);
+    // Query-aware test multiplier from pre-tokenized query (mirrors
+    // `test_multiplier`'s substring check on the lowercased query).
+    let is_test_query = query_tokens.iter().any(|t| t.contains("test") || t.contains("spec") || t.contains("dtslint"));
+    let test_mult = if file_class == "Test" {
+        if is_test_query { policy.test_boost } else { policy.test_penalty }
+    } else {
+        1.0
+    };
     if (test_mult - 1.0).abs() > f32::EPSILON {
         if test_mult < 1.0 {
             signals.push(RetrievalSignal::TestPenalty(test_mult));
@@ -105,7 +154,9 @@ pub fn apply_class_and_dir_boost(
     if (dir_boost - 1.0).abs() > f32::EPSILON {
         signals.push(RetrievalSignal::DirectoryBoost(dir_boost));
     }
-    base_score * class_boost * test_mult * dir_boost
+    let combined = class_boost * test_mult * dir_boost;
+
+    base_score * combined
 }
 
 /// Merge BM25 + symbol results: keep max score per path.

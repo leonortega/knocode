@@ -42,6 +42,14 @@ param([switch]$SkipBuild, [string]$Agents = "", [switch]$AllAgents, [switch]$NoA
 $ErrorActionPreference = "Stop"
 # Always English in scripts (avoid localized ShouldProcess/WhatIf)
 try { [System.Threading.Thread]::CurrentThread.CurrentUICulture = [System.Globalization.CultureInfo]::GetCultureInfo('en-US'); [System.Threading.Thread]::CurrentThread.CurrentCulture = [System.Globalization.CultureInfo]::GetCultureInfo('en-US') } catch {}
+# UTF-8 for native output: tools like rtk emit UTF-8; without this, PowerShell 5.1
+# decodes their stdout with the console ANSI codepage and relayed lines show mojibake
+# (em-dash renders as "A with circumflex" garbage). No-op on PS7 / already-UTF8
+# consoles; never fatal when there is no console handle (output redirected).
+try {
+  if ([Console]::OutputEncoding.CodePage -ne 65001) { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 }
+  $OutputEncoding = [System.Text.Encoding]::UTF8
+} catch {}
 $Root = (Resolve-Path "$PSScriptRoot\..").Path
 Set-Location $Root
 
@@ -561,12 +569,32 @@ if ($agentSel.Count -gt 0 -and $rtkCmd) {
       $out = & $rtkCmd init -g --$a --auto-patch 2>&1
       if ($LASTEXITCODE -eq 0) {
         Ok "rtk integration wired for $a (rtk init -g --$a)"
-        $out | Where-Object { $_ -and $_.ToString().Trim() } | Select-Object -First 3 | ForEach-Object { Info "    $_" }
+        # Relay rtk output minus its "/!\ No hook installed" upsell: the global hook
+        # is installed right after this loop; the filter stays in case rtk still
+        # prints the warning (e.g. the hook install failed).
+        $out | Where-Object { $_ -and $_.ToString().Trim() -and $_.ToString() -notmatch 'No hook installed' } | Select-Object -First 3 | ForEach-Object { Info "    $_" }
       }
       else { Warn "rtk init failed for $a (exit $LASTEXITCODE) - run manually: rtk init -g --$a"; $out | Select-Object -First 5 | ForEach-Object { Info "    $_" } }
     } catch { Warn "rtk init failed for $a : $_" }
     $ErrorActionPreference = $prevEA
   }
+
+  # ── Global hook - `rtk init -g --auto-patch` registers RTK's compression hook ──
+  # (Claude-style hook + RTK.md) so token savings also apply outside the wired
+  # agents. Fail-open: never blocks the install. `$null |` closes stdin so rtk
+  # never waits on the installer's stdin. MUST run before the rtk.ts PATCH below:
+  # init regenerates the plugin file (and resurrects the `which rtk` probe).
+  Info "Installing RTK global hook (rtk init -g --auto-patch)..."
+  $prevEA = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+  try {
+    $out = $null | & $rtkCmd init -g --auto-patch 2>&1
+    if ($LASTEXITCODE -eq 0) {
+      Ok "rtk global hook installed (rtk init -g --auto-patch)"
+      $out | Where-Object { $_ -and $_.ToString().Trim() } | Select-Object -First 3 | ForEach-Object { Info "    $_" }
+    }
+    else { Warn "rtk global hook install failed (exit $LASTEXITCODE) - run manually: rtk init -g --auto-patch"; $out | Select-Object -First 5 | ForEach-Object { Info "    $_" } }
+  } catch { Warn "rtk global hook install failed : $_" }
+  $ErrorActionPreference = $prevEA
 
   # ── PATCH: rtk.ts binary probe - `which rtk` is Unix-only ───────────────
   # RTK's generated OpenCode plugin (rtk init --opencode) probes with `which`,
@@ -591,6 +619,10 @@ if ($agentSel.Count -gt 0 -and $rtkCmd) {
 # 4. Start daemon - knocode must be in RUNNING state after installation
 # TASK-037: launch the daemon from ~\.knocode\bin (installed copy) so the runtime keeps
 # working if the repo is moved/cleaned — NOT from target\release.
+# Multi-repo daemon: launched WITHOUT --repo, it starts repo-neutral (no CWD binding,
+# no startup index). Repositories are indexed lazily on their first request (the agent
+# plugin sends repository_path) and watched from then on, so working from ~\.knocode
+# is correct here — it no longer causes the daemon to index its own home directory.
 function Test-DaemonHealth {
   try { $r = Invoke-WebRequest -Uri "http://127.0.0.1:9527/health" -UseBasicParsing -TimeoutSec 2; return ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) } catch { return $false }
 }

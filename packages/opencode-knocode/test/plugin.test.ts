@@ -205,7 +205,9 @@ describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
   });
 
   it("skips empty/whitespace prompts without calling the daemon", async () => {
-    const fetchMock = vi.fn();
+    // Full-lifecycle stub so the fire-and-forget setup handshake doesn't hit
+    // an undefined-response mock and spam stderr (the bare vi.fn() used to).
+    const fetchMock = stubDaemonFetch({ content: [] });
     vi.stubGlobal("fetch", fetchMock);
     const { hook } = await makePromptHook();
     fetchMock.mockClear(); // setup's fire-and-forget MCP initialize may have raced ahead

@@ -12,7 +12,8 @@
 #   - RTK (prebuilt from GitHub releases) - optional external tool, offered AFTER
 #     agent selection and ONLY when agent integrations are selected (opt-in: asked
 #     interactively, or force/skip with --with-rtk / --no-rtk). RTK's own per-agent
-#     integrations are wired via `rtk init -g` for each selected agent.
+#     integrations are wired via `rtk init -g` for each selected agent, plus the
+#     global compression hook (`rtk init -g --auto-patch`).
 #
 # Agent integrations (OpenCode / Copilot) are optional and
 # selected interactively. They use the integration bundles shipped inside the
@@ -476,7 +477,11 @@ if [ -n "$AGENT_SEL" ] && [ -n "$RTK_CMD" ]; then
     rtk_out=$("$RTK_CMD" init -g "--$a" --auto-patch </dev/null 2>&1)
     if [ $? -eq 0 ]; then
       ok "rtk integration wired for $a (rtk init -g --$a)"
-      echo "$rtk_out" | grep -v '^[[:space:]]*$' | head -3 | sed 's/^/    /'
+      # Relay rtk output minus its "/!\ No hook installed" upsell: the global hook
+      # is installed right after this loop; the filter stays in case rtk still
+      # prints the warning (e.g. the hook install failed). (awk, not grep -v | head:
+      # pipefail-safe when every line matches.)
+      echo "$rtk_out" | awk 'NF && $0 !~ /No hook installed/ { print; if (++n == 3) exit }' | sed 's/^/    /'
       # PATCH: RTK's generated plugin probes with `which rtk`, which does not
       # exist on Windows — swap the probe to `rtk --version` (portable). Must
       # run after EVERY `rtk init --opencode` (RTK regenerates the file).
@@ -492,6 +497,27 @@ if [ -n "$AGENT_SEL" ] && [ -n "$RTK_CMD" ]; then
       echo "$rtk_out" | head -5 | sed 's/^/    /'
     fi
   done
+
+  # ── Global hook: register RTK's compression hook (Claude-style hook + RTK.md)
+  # so token savings also apply outside the wired agents. Fail-open; stdin closed
+  # so rtk never waits on the installer's stdin. Note: init regenerates rtk.ts,
+  # so the plugin probe is re-patched right after (idempotent).
+  info "Installing RTK global hook (rtk init -g --auto-patch)..."
+  rtk_hook_rc=0
+  rtk_hook_out=$("$RTK_CMD" init -g --auto-patch </dev/null 2>&1) || rtk_hook_rc=$?
+  if [ "$rtk_hook_rc" -eq 0 ]; then
+    ok "rtk global hook installed (rtk init -g --auto-patch)"
+    echo "$rtk_hook_out" | awk 'NF { print; if (++n == 3) exit }' | sed 's/^/    /'
+  else
+    warn "rtk global hook install failed - run manually: rtk init -g --auto-patch"
+    echo "$rtk_hook_out" | head -5 | sed 's/^/    /'
+  fi
+  # Hook init may regenerate rtk.ts — re-apply the Windows-safe probe patch.
+  RTK_OC_PLUGIN="$HOME/.config/opencode/plugins/rtk.ts"
+  if [ -f "$RTK_OC_PLUGIN" ] && grep -q '`which rtk`' "$RTK_OC_PLUGIN"; then
+    sed -i.bak 's/`which rtk`/`rtk --version`/' "$RTK_OC_PLUGIN" && rm -f "$RTK_OC_PLUGIN.bak"
+    info "  [PATCH] opencode plugin probe re-applied after hook init (Windows-safe)"
+  fi
   info "RTK wiring done."
 fi
 

@@ -60,15 +60,15 @@ impl SymbolPatterns {
             // C#: public/private/internal [static] void/int/string ReturnType(
             // Java: public/private [static] ReturnType methodName(
             function_pattern: regex::Regex::new(
-                r"(?m)^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)|^def\s+(\w+)|^(?:export\s+)?(?:async\s+)?function\s+(\w+)|^(?:pub\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(|^(?:pub\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\()|^\s*(?:public|private|protected|internal)\s+(?:static\s+)?(?:async\s+)?(?:void|bool|int|long|float|double|string|var|IEnumerable|Task|ValueTask|IActionResult|ActionResult|ObjectResult)\s+(\w+)\s*\("
+                r"(?m)^(?:pub\s+)?(?:async\s+)?fn\s+(\w+)|^def\s+(\w+)|^(?:export\s+)?(?:declare\s+)?(?:async\s+)?function\s+(\w+)|^(?:pub\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(|^(?:pub\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function|\()|^\s*(?:public|private|protected|internal)\s+(?:static\s+)?(?:async\s+)?(?:void|bool|int|long|float|double|string|var|IEnumerable|Task|ValueTask|IActionResult|ActionResult|ObjectResult)\s+(\w+)\s*\("
             ).unwrap(),
             // struct ClassName, class ClassName, C# public class Name, interface IName
             struct_pattern: regex::Regex::new(
-                r"(?m)^(?:pub\s+)?struct\s+(\w+)|^class\s+(\w+)|^(?:export\s+)?class\s+(\w+)|^\s*(?:public|private|protected|internal)\s+(?:static\s+|abstract\s+|sealed\s+)?class\s+(\w+)|^\s*(?:public|private|protected|internal)\s+interface\s+(\w+)"
+                r"(?m)^(?:pub\s+)?struct\s+(\w+)|^class\s+(\w+)|^(?:export\s+)?(?:declare\s+)?(?:abstract\s+)?class\s+(\w+)|^(?:export\s+)?(?:declare\s+)?interface\s+(\w+)|^\s*(?:public|private|protected|internal)\s+(?:static\s+|abstract\s+|sealed\s+)?class\s+(\w+)|^\s*(?:public|private|protected|internal)\s+interface\s+(\w+)"
             ).unwrap(),
             // enum EnumName, C# public enum Name
             enum_pattern: regex::Regex::new(
-                r"(?m)^(?:pub\s+)?enum\s+(\w+)|^\s*(?:public|private|protected|internal)\s+enum\s+(\w+)"
+                r"(?m)^(?:pub\s+)?enum\s+(\w+)|^(?:export\s+)?(?:declare\s+)?enum\s+(\w+)|^\s*(?:public|private|protected|internal)\s+enum\s+(\w+)"
             ).unwrap(),
             // impl TypeName (Rust)
             impl_pattern: regex::Regex::new(
@@ -80,7 +80,7 @@ impl SymbolPatterns {
             ).unwrap(),
             // type Alias = Type (Rust/TS), C# using alias
             type_pattern: regex::Regex::new(
-                r"(?m)^(?:pub\s+)?type\s+(\w+)"
+                r"(?m)^(?:pub\s+)?type\s+(\w+)|^(?:export\s+)?(?:declare\s+)?type\s+(\w+)"
             ).unwrap(),
         }
     }
@@ -222,11 +222,32 @@ impl RepositoryIntelligence {
         let mut tantivy_writer = tantivy_index.as_ref().and_then(|idx| idx.writer().ok());
 
         // Load existing file meta — Phase2 mtime+size shortcut (avoids 63k reads on warm re-index)
-        let existing_records = self.db.get_all_files_meta().unwrap_or_default();
+        let existing_records = self.db.get_all_files_meta(&self.repository_id).unwrap_or_default();
         let existing_hashes: HashMap<String, (i64, String)> = existing_records
             .iter()
             .map(|r| (r.path.clone(), (r.id, r.hash.clone())))
             .collect();
+
+        // Heal interrupted runs: the Phase1 DB batch commits file records BEFORE
+        // symbol extraction, so a run killed mid-write leaves rows whose files the
+        // mtime+size shortcut would skip forever — the index stays silently crippled
+        // at 0 symbols (seen on a 53k-file repo). If this repo's known files have no
+        // symbols at all, force a full re-extraction this run.
+        let heal_symbolless_index = {
+            let ids: Vec<i64> = existing_hashes.values().map(|(id, _)| *id).collect();
+            !ids.is_empty()
+                && self
+                    .db
+                    .count_symbols_for_file_ids(&ids)
+                    .unwrap_or(1) // on query error, assume healthy and don't pay the re-extract
+                    == 0
+        };
+        if heal_symbolless_index {
+            warn!(
+                files = existing_hashes.len(),
+                "Index has file records but 0 symbols (previous run interrupted mid-write) — forcing full re-extraction"
+            );
+        }
         let existing_meta: HashMap<String, knocode_storage::FileRecord> = existing_records
             .into_iter()
             .map(|r| (r.path.clone(), r))
@@ -307,10 +328,13 @@ impl RepositoryIntelligence {
             }
 
             // mtime+size shortcut — skip reading unchanged files on warm re-index
-            if let Some(rec) = existing_meta.get(&path_str) {
-                if is_file_unchanged_fast(&path, rec) {
-                    files_indexed += 1; // counted but no I/O
-                    continue;
+            // (disabled when healing a symbol-less index from an interrupted run)
+            if !heal_symbolless_index {
+                if let Some(rec) = existing_meta.get(&path_str) {
+                    if is_file_unchanged_fast(&path, rec) {
+                        files_indexed += 1; // counted but no I/O
+                        continue;
+                    }
                 }
             }
 
@@ -378,7 +402,7 @@ impl RepositoryIntelligence {
         // Insert new files and map path→file_id for deferred assignment
         let mut new_file_ids: HashMap<String, i64> = HashMap::new();
         for ins in &deferred_inserts {
-            if let Ok(fid) = self.db.insert_file(&ins.path, &ins.hash, ins.size, ins.language.as_deref()) {
+            if let Ok(fid) = self.db.insert_file(&ins.path, &ins.hash, ins.size, ins.language.as_deref(), &self.repository_id) {
                 new_file_ids.insert(ins.path.clone(), fid);
             }
         }
@@ -388,9 +412,11 @@ impl RepositoryIntelligence {
             let _ = self.db.update_file(upd.file_id, &upd.hash, upd.size);
         }
 
-        if batch_ok {
-            let _ = self.db.commit_batch();
-        }
+        // NOTE: no commit here — the transaction stays open through Phase2/Phase3
+        // and commits once at the end of the run (see the CRASH SAFETY note in
+        // Phase3). A mid-run crash rolls back the file rows along with their
+        // (never-written) symbols, so the next run re-indexes them instead of the
+        // mtime+size shortcut skipping symbol-less files forever.
 
         // Assign existing_file_id for new files now that we have the IDs
         for job in file_jobs.iter_mut() {
@@ -490,9 +516,15 @@ impl RepositoryIntelligence {
 
         // ── Phase 3: Sequential DB writes + tantivy upsert ──
         // DB and tantivy writer need &mut — cannot parallelize. Sequential but fast.
+        // CRASH SAFETY: reuse the transaction opened in Phase1 and commit ONCE at
+        // the end (no mid-run chunk commits). File records and their symbols are
+        // therefore always committed together — an interrupted run leaves NO rows,
+        // so the next run re-indexes fully instead of the mtime+size shortcut
+        // skipping symbol-less files forever (the 0-symbols DT failure mode).
+        // Cost: the SQLite write lock is held for the whole run; with busy_timeout
+        // concurrent writers wait instead of corrupting each other.
         let t_write = Instant::now();
-        let batch_enabled = self.db.begin_batch().is_ok();
-        let mut batch_ops: usize = 0;
+        let batch_enabled = batch_ok;
         let mut write_count = 0usize;
 
         for (job, extract_result) in file_jobs.iter().zip(extraction_results.iter()) {
@@ -538,49 +570,40 @@ impl RepositoryIntelligence {
             }
 
             files_indexed += 1;
-            batch_ops += 1;
             write_count += 1;
             if write_count % 128 == 0 {
                 report(write_count, file_jobs.len(), "writing index");
             }
-
-            // Batch commit every 1000 files — keeps WAL small, limits transaction size
-            if batch_enabled && batch_ops >= 1000 {
-                let _ = self.db.commit_batch();
-                let _ = self.db.begin_batch();
-                batch_ops = 0;
-                if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
-                    let _ = idx.commit(writer);
-                }
-            }
+            // NOTE: no mid-run chunk commits — see the CRASH SAFETY note above.
         }
 
         let write_ms = t_write.elapsed().as_millis() as u64;
         info!(files = files_indexed, write_ms, "Phase3: DB + tantivy write complete");
 
         // Remove deleted files from database (and tantivy)
+        // Progress report: the delete loop + final commit below can take tens of
+        // seconds on large repos (50k+ docs) — without this the counter freezes
+        // at its last value and the run looks hung.
+        report(write_count, file_jobs.len(), "removing deleted files");
         for path in existing_hashes.keys() {
             if !seen_paths.contains(path) {
-                self.db.delete_file(path)?;
+                self.db.delete_file(path, &self.repository_id)?;
                 if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
                     let _ = idx.delete_document(writer, path, &self.repository_id);
                 }
                 files_deleted += 1;
-                batch_ops += 1;
-                if batch_enabled && batch_ops >= 1000 {
-                    let _ = self.db.commit_batch();
-                    let _ = self.db.begin_batch();
-                    batch_ops = 0;
-                }
+                // NOTE: no mid-run chunk commits — see the CRASH SAFETY note above.
             }
         }
 
-        // Finalize DB batch
+        // Finalize DB batch — single commit for the whole run (file rows + symbols
+        // + deletions land atomically, so a crash can never half-commit)
         if batch_enabled {
             let _ = self.db.commit_batch();
         }
 
         // Commit tantivy if writer present
+        report(write_count, file_jobs.len(), "committing index");
         if let (Some(ref idx), Some(ref mut writer)) = (&tantivy_index, &mut tantivy_writer) {
             let _ = idx.commit(writer);
         }
@@ -631,6 +654,12 @@ impl RepositoryIntelligence {
         drop(tantivy_index);
         knocode_storage::tantivy_index::TantivyIndex::invalidate_cached(&default_index_path(&self.repository_id));
 
+        // P0: seed the file-count cache with the walk result. Without this, the FIRST
+        // graph-gated query on a large repo paid a second full directory walk inside
+        // file_count() (~1.4s on DT's 53k files) just to decide whether graph boost
+        // applies. The index walk already knows the answer.
+        let _ = self.cached_file_count.set(files_indexed);
+
         Ok(stats)
     }
 
@@ -645,9 +674,14 @@ impl RepositoryIntelligence {
         self.search_text_ripgrep(query, language_filter, max_results)
     }
 
-    /// Search for symbols by name pattern — returns file paths + line numbers
+    /// Search for symbols by name pattern — returns file paths + line numbers.
+    /// Scoped to THIS repository and bounded by `max_results` (P0: the old
+    /// `find_symbol` LIKE '%<sentence>%' scanned all 236k symbols across every
+    /// repo with no limit — 13-22ms per query, the retrieval hot-path bottleneck).
     pub fn search_symbols(&self, query: &str, max_results: usize) -> Result<Vec<SearchResult>, String> {
-        let symbols = self.db.find_symbol(query)?;
+        let symbols = self
+            .db
+            .find_symbols_scoped(query, &self.repository_id, max_results)?;
         let mut results = Vec::new();
         for symbol in symbols.into_iter().take(max_results) {
             if let Ok(Some(file)) = self.db.get_file_by_id(symbol.file_id) {
@@ -686,7 +720,29 @@ impl RepositoryIntelligence {
                     eprintln!("[profile] code_search.tantivy_open_cached: {}ms", _st.elapsed().as_millis());
                 }
                 let reader = idx.cached_reader().map_err(|e| format!("tantivy reader: {e}"))?;
-                match idx.search(&reader, query, language_filter, max_results, repository_id) {
+                // P0: catch panics HERE — tantivy occasionally panics mid-search
+                // ("target should be >= doc", index-state-dependent). The panic
+                // previously unwound past this Err handling to the engine's
+                // catch_unwind, whose only fallback is a full ripgrep walk
+                // (~1.3s on 53k files). Catching here lets us retry with a fresh
+                // reader first (usually succeeds → ~5ms instead of ~1.3s).
+                let searched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    idx.search(&reader, query, language_filter, max_results, repository_id)
+                }));
+                // Normalize: a panic becomes an Err so one retry path handles both.
+                let search_out: Result<Vec<knocode_storage::tantivy_index::SearchHit>, String> = match searched {
+                    Ok(inner) => inner,
+                    Err(panic_info) => {
+                        let msg = panic_info
+                            .downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| panic_info.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "unknown tantivy panic".to_string());
+                        warn!(panic = %msg, "tantivy search panicked on cached reader — retrying with fresh reader");
+                        Err(msg)
+                    }
+                };
+                match search_out {
                     Ok(hits) => {
                         if hits.is_empty() {
                             debug!("tantivy returned 0 hits for '{}', falling back to ripgrep", query);
@@ -701,9 +757,24 @@ impl RepositoryIntelligence {
                         let total = results.len();
                         Ok(SearchResults { results, total_count: total })
                     }
-                    Err(e) => {
-                        warn!(error = %e, "tantivy search failed, falling back to ripgrep");
-                        self.search_text(query, language_filter, max_results)
+                    Err(search_err) => {
+                        // Stale/corrupted searcher (error or panic) — retry once with a
+                        // freshly reopened index + reader BEFORE paying for a full
+                        // ripgrep walk (1.3s on 53k files).
+                        match self.search_fulltext_fresh(&index_path, query, language_filter, max_results, repository_id) {
+                            Ok(Some(results)) => {
+                                warn!("tantivy search failed on cached reader, fresh-reader retry succeeded for '{}'", query);
+                                Ok(results)
+                            }
+                            Ok(None) => {
+                                warn!("tantivy search failed, fresh-reader retry empty for '{}', falling back to ripgrep", query);
+                                self.search_text(query, language_filter, max_results)
+                            }
+                            Err(retry_err) => {
+                                warn!(error = %search_err, retry_error = %retry_err, "tantivy search failed incl. fresh-reader retry for '{}', falling back to ripgrep", query);
+                                self.search_text(query, language_filter, max_results)
+                            }
+                        }
                     }
                 }
             }
@@ -712,6 +783,42 @@ impl RepositoryIntelligence {
                 self.search_text(query, language_filter, max_results)
             }
         }
+    }
+
+    /// One-shot search with a freshly opened index + reader (no caches).
+    /// `Ok(None)` means the fresh search succeeded but returned no hits.
+    fn search_fulltext_fresh(
+        &self,
+        index_path: &str,
+        query: &str,
+        language_filter: Option<&str>,
+        max_results: usize,
+        repository_id: Option<&str>,
+    ) -> Result<Option<SearchResults>, String> {
+        knocode_storage::tantivy_index::TantivyIndex::invalidate_cached(index_path);
+        let idx = knocode_storage::tantivy_index::TantivyIndex::open(index_path)
+            .map_err(|e| format!("fresh index open: {e}"))?;
+        let reader = idx.reader().map_err(|e| format!("fresh reader: {e}"))?;
+        // If even the fresh reader panics, report it as an Err so the caller can
+        // use the (slower) ripgrep path instead of unwinding.
+        let hits = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            idx.search(&reader, query, language_filter, max_results, repository_id)
+        }))
+        .map_err(|_| "fresh-reader search panicked".to_string())??;
+        if hits.is_empty() {
+            return Ok(None);
+        }
+        let results = hits
+            .into_iter()
+            .map(|hit| SearchResult {
+                path: hit.path,
+                line: 1,
+                content: hit.content.chars().take(200).collect::<String>(),
+                score: hit.score as f64,
+            })
+            .collect::<Vec<_>>();
+        let total = results.len();
+        Ok(Some(SearchResults { results, total_count: total }))
     }
 
     /// Search using ripgrep (grep-searcher crate)
@@ -1354,6 +1461,17 @@ mod tests {
 
     /// Serializes tests that touch the shared global tantivy index / KNOCODE_INDEX_DIR env
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_extract_symbols_typescript_declarations() {
+        // DefinitelyTyped-style .d.ts: ambient declarations must yield symbols via
+        // the regex fallback (or AST path) — the DT repo regressed to 0 symbols.
+        let patterns = SymbolPatterns::new();
+        let code = "export declare function add(a: number, b: number): number;\nexport interface Options { timeout?: number; }\nexport type Handler = (e: Event) => void;\ndeclare class Widget { render(): void; }\n";
+        let symbols = extract_symbols(code, &patterns, Some("typescript"));
+        eprintln!("d.ts symbols: {:?}", symbols.iter().map(|s| (s.kind.as_str(), s.name.as_str())).collect::<Vec<_>>());
+        assert!(!symbols.is_empty(), "0 symbols extracted from .d.ts content");
+    }
 
     #[test]
     fn test_detect_language() {
