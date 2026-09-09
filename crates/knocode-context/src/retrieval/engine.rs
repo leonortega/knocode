@@ -609,7 +609,6 @@ fn infer_file_class(path: &str) -> String {
         FileClass::Vendor => "Vendor".to_string(),
         FileClass::Dependency => "Dependency".to_string(),
         FileClass::Binary => "Binary".to_string(),
-        FileClass::Stylesheet => "Stylesheet".to_string(),
         FileClass::Unknown => "Source".to_string(),
     }
 }

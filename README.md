@@ -312,6 +312,22 @@ Display the effective configuration.
 
 Validate the configuration file.
 
+### `knocode config set-log-level`
+
+Change log verbosity without re-running the installer. Upserts `[logging] level` in the
+user config (`~/.config/knocode/config.toml`) and the project config
+(`.knocode/config.toml`, when it has a `[logging]` section), and persists the user
+`KNOCODE_LOG_LEVEL` env var exactly like the installer (HKCU Environment on Windows,
+`export` in `~/.profile`/`~/.bashrc` on Unix) so agent plugins pick it up too. Accepts
+`error`, `warn`, `info`, `debug`, `trace`, plus the installer's verbosity aliases
+(`quiet`, `normal`, `verbose` = every daemon call). Setting `info` (the default)
+removes a previously persisted env var instead of writing one, since env beats files.
+
+```bash
+knocode config set-log-level verbose   # = debug; daemon logs every MCP call
+knocode config set-log-level info      # back to normal
+```
+
 ### `knocode doctor`
 
 Health check for all dependencies.
@@ -372,7 +388,7 @@ Configuration is loaded in order of priority (highest wins):
 | Variable | Overrides | Default |
 |----------|-----------|---------|
 | `KNOCODE_DATABASE_PATH` | database.path | ~/.knocode/data.db |
-| `KNOCODE_LOG_LEVEL` | logging.level | info |
+| `KNOCODE_LOG_LEVEL` | logging.level — daemon filter AND agent-plugin verbosity: `error`/`warn` = quiet (errors only), `info` = normal (default), `debug`/`trace` = verbose (log every daemon call). Set by the installer's log-verbosity prompt (0/1/2). | info |
 | `KNOCODE_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
 | `KNOCODE_CANDIDATE_K` | context.candidate_k | 100 |
 | `KNOCODE_MAX_FILES` | context.max_files | 20 |

@@ -31,13 +31,19 @@
 .PARAMETER SkipPrereqs
   Do not auto-install missing prerequisites (Node.js, Git) - only warn/fail.
 
+.PARAMETER LogVerbosity
+  Log verbosity: 0 quiet (errors only) / 1 normal (default) / 2 verbose (log every daemon call).
+  Persisted as KNOCODE_LOG_LEVEL (user env: error/info/debug) and [logging] level in
+  ~/.config/knocode/config.toml (the daemon config). Asked interactively when omitted.
+
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -Agents opencode
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -AllAgents
   powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -NoAgents
+  powershell -ExecutionPolicy Bypass -File scripts/install.ps1 -LogVerbosity 2
 #>
-param([switch]$SkipBuild, [string]$Agents = "", [switch]$AllAgents, [switch]$NoAgents, [switch]$WithRtk, [switch]$NoRtk, [switch]$SkipPrereqs)
+param([switch]$SkipBuild, [string]$Agents = "", [switch]$AllAgents, [switch]$NoAgents, [switch]$WithRtk, [switch]$NoRtk, [switch]$SkipPrereqs, [string]$LogVerbosity = "")
 
 $ErrorActionPreference = "Stop"
 # Always English in scripts (avoid localized ShouldProcess/WhatIf)
@@ -148,6 +154,29 @@ function Select-Agents {
 Info "Knocode installer"
 $agentSel = @(Select-Agents)
 if ($agentSel.Count -gt 0) { Info "Agent integrations: $($agentSel -join ', ')" } else { Info "Agent integrations: none" }
+
+# --- Log verbosity selection (0 quiet / 1 normal / 2 verbose) --------------------
+# Shared knob: KNOCODE_LOG_LEVEL feeds BOTH the daemon ([logging] level fallback /
+# env override) and the agent plugins (0 = errors only, 1 = outcome lines, 2 = one
+# line per daemon call).
+function Select-LogVerbosity {
+  if ($LogVerbosity -ne "") {
+    if ("0", "1", "2" -notcontains $LogVerbosity) { Warn "invalid -LogVerbosity '$LogVerbosity' - valid: 0, 1, 2"; return "1" }
+    return $LogVerbosity
+  }
+  $interactive = $true
+  try { if ([Console]::IsInputRedirected) { $interactive = $false } } catch { $interactive = $false }
+  if (-not $interactive) { return "1" }
+  $r = Read-Host "  Log verbosity? [0] quiet (errors only) [1] normal [2] verbose (every daemon call) [1]"
+  switch ($r) { "0" { return "0" } "2" { return "2" } default { return "1" } }
+}
+$verbosity = Select-LogVerbosity
+switch ($verbosity) {
+  "0" { $logLevelStr = "error"; $verbosityDesc = "quiet (errors only)" }
+  "2" { $logLevelStr = "debug"; $verbosityDesc = "verbose (every daemon call logged)" }
+  default { $logLevelStr = "info"; $verbosityDesc = "normal"; $verbosity = "1" }
+}
+Info "Log verbosity: $verbosity ($verbosityDesc)"
 
 # 0a. Stop any running daemon/CLI up front - later steps REPLACE binaries (~\.knocode\bin)
 # and a locked exe would fail the copy. The fresh daemon is restarted at the end (step 4).
@@ -269,6 +298,54 @@ Info "Verifying installation (doctor)..."
 $prevEA2 = $ErrorActionPreference; $ErrorActionPreference = "Continue"
 try { & $installedCli doctor } catch {}
 $ErrorActionPreference = $prevEA2
+
+# 1c. Persist log verbosity (shared KNOCODE_LOG_LEVEL knob)
+#     a) user env var (agents/plugins read it regardless of shell),
+#     b) [logging] level in the USER config (~/.config/knocode/config.toml) so the
+#        daemon honors it even when started outside a shell that has the var.
+#     Env wins over config for the daemon; config keeps it discoverable via `knocode doctor`.
+$userCfgDir = Join-Path $env:USERPROFILE ".config\knocode"
+$userCfg = Join-Path $userCfgDir "config.toml"
+try {
+  New-Item -ItemType Directory -Force -Path $userCfgDir | Out-Null
+  if (Test-Path $userCfg) {
+    $cfgText = Get-Content -LiteralPath $userCfg -Raw
+    $line = 'level = "' + $logLevelStr + '"'
+    if ($cfgText -match '(?m)^\s*level\s*=') {
+      # Replace the WHOLE line — '$1' alone (group 1 = leading indent) + full line would
+      # duplicate the key ('level = level = "x"') and produce TOML the daemon can't parse.
+      $cfgText = [regex]::Replace($cfgText, '(?m)^\s*level\s*=.*$', $line)
+    } elseif ($cfgText -match '(?m)^\[logging\]') {
+      $cfgText = [regex]::Replace($cfgText, '(?m)^(\[logging\]\r?\n)', ('${1}' + $line + "`n"))
+    } else {
+      if (-not $cfgText.EndsWith("`n")) { $cfgText += "`n" }
+      $cfgText += "`n[logging]`n$line`n"
+    }
+    Set-Content -LiteralPath $userCfg -Value $cfgText -Encoding UTF8 -NoNewline
+    Ok "user config [logging] level = $logLevelStr ($userCfg)"
+  } else {
+    @"
+[logging]
+level = "$logLevelStr"
+file_path = "~/.knocode/logs/knocode.log"
+max_size_mb = 100
+retention_days = 7
+"@ | Set-Content -LiteralPath $userCfg -Encoding UTF8
+    Ok "user config written ($userCfg, logging.level = $logLevelStr)"
+  }
+} catch { Warn "could not update $userCfg : $_" }
+# User env var: plugins/agents read KNOCODE_LOG_LEVEL in any shell; also set it for
+# this session so the daemon started below (step 4) inherits the chosen level.
+$envLogLevel = switch ($verbosity) { "0" { "error" } "2" { "debug" } default { "info" } }
+try {
+  [Environment]::SetEnvironmentVariable('KNOCODE_LOG_LEVEL', $envLogLevel, 'User')
+  $env:KNOCODE_LOG_LEVEL = $envLogLevel
+  if ($verbosity -ne "1") {
+    Ok "KNOCODE_LOG_LEVEL=$envLogLevel persisted in user environment (HKCU)"
+  } else {
+    Ok "KNOCODE_LOG_LEVEL=info set (default)"
+  }
+} catch { Warn "could not persist KNOCODE_LOG_LEVEL: $_" }
 
 # =====================================================================================
 # 3. Agent integrations (OpenCode / Copilot) - selected above
@@ -657,5 +734,5 @@ if ($daemonUp) {
   $ErrorActionPreference = $prevEA3
 }
 
-Info "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | agents: $(if ($agentSel.Count -gt 0) { $agentSel -join ', ' } else { 'none' }) | rtk: $rtkStatus | knocode doctor"
+Info "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | agents: $(if ($agentSel.Count -gt 0) { $agentSel -join ', ' } else { 'none' }) | rtk: $rtkStatus | log verbosity: $verbosity ($envLogLevel; logs: ~/.knocode/logs/knocode.log) | knocode doctor"
 Info "Docs: docs/*.md | knocode doctor"

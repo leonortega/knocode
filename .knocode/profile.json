@@ -7,61 +7,59 @@
     "cargo",
     "rust-workspace"
   ],
-  "generated_at_unix": 1788365741,
+  "generated_at_unix": 1788989300,
   "git_branch": "dev",
   "important_dirs": [
     "crates",
     "packages",
     "docs",
-    "scripts",
-    "benches",
-    "deploy"
+    "scripts"
   ],
   "index": {
-    "dependency_edges": 971,
-    "files_indexed": 156,
-    "symbols_extracted": 1431
+    "dependency_edges": 792,
+    "files_indexed": 167,
+    "symbols_extracted": 1508
   },
   "languages": [
     {
-      "files": 63,
+      "files": 57,
       "name": "rust"
     },
     {
-      "files": 32,
+      "files": 24,
       "name": "markdown"
     },
     {
-      "files": 17,
-      "name": "toml"
-    },
-    {
-      "files": 12,
+      "files": 20,
       "name": "json"
     },
     {
-      "files": 10,
-      "name": "shell"
-    },
-    {
-      "files": 8,
+      "files": 14,
       "name": "typescript"
     },
     {
-      "files": 8,
+      "files": 13,
+      "name": "toml"
+    },
+    {
+      "files": 11,
+      "name": "shell"
+    },
+    {
+      "files": 9,
+      "name": "sql"
+    },
+    {
+      "files": 9,
       "name": "yaml"
     },
     {
       "files": 6,
-      "name": "sql"
+      "name": "javascript"
     },
     {
       "files": 4,
       "name": "python"
-    },
-    {
-      "files": 2,
-      "name": "yaml"
     }
   ],
   "project": "knocode",

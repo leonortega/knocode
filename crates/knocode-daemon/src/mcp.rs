@@ -77,6 +77,33 @@ fn tool_result(text: String, structured: Value, is_error: bool) -> Value {
 
 // ── Tool registry ────────────────────────────────────────────────────────
 
+/// Resolve the deduplication session for an MCP `knocode_context` call.
+///
+/// The context engine dedups retrieved content per `session_id` (spec §3): a
+/// session that asks the same question twice gets the repeat block suppressed.
+/// That is correct for the HTTP `/hook` transport (each opencode session sends
+/// its own `session_id`), but MCP is STATELESS — the transport has no session
+/// concept. The previous hard-coded `"mcp"` put EVERY MCP caller (every plugin
+/// window, every repo, every prompt) into ONE shared fingerprint bucket, so the
+/// second identical prompt from anyone was silently deduped to an empty pack →
+/// `no_context_hits` passthrough even though the repo index was fine.
+///
+/// Fix: scope the fingerprint bucket per CALLER.
+///  - client supplied a `request_id` (the plugins generate a fresh UUID per
+///    call) → bucket is that exact request id: nothing is ever deduped across
+///    calls, restoring correct behavior for stateless callers;
+///  - no `request_id` (curl, hand tests) → a fresh random UUID per call, same
+///    guarantee;
+///  - both fall back to a distinct `mcp:` prefix so the buckets can never
+///    collide with real `/hook` session ids in the shared fingerprint map.
+fn mcp_session_id(request_id: &Option<String>) -> String {
+    const PREFIX: &str = "mcp:";
+    match request_id {
+        Some(id) if !id.trim().is_empty() => format!("{PREFIX}{}", id.trim()),
+        _ => format!("{PREFIX}{}", uuid::Uuid::new_v4()),
+    }
+}
+
 fn tools_list() -> Value {
     json!([
         {
@@ -95,7 +122,7 @@ fn tools_list() -> Value {
                     },
                     "request_id": {
                         "type": "string",
-                        "description": "Optional client-generated correlation id (UUID). Echoed in the daemon log lines and structuredContent so a plugin log line can be joined with the daemon log line for the same request."
+                        "description": "Optional client-generated correlation id (UUID). Echoed in the daemon log lines and structuredContent so a plugin log line can be joined with the daemon log line for the same request. Also scopes this call's deduplication fingerprint: stateless MCP callers should send a fresh id per call so repeat prompts are never suppressed."
                     }
                 },
                 "required": ["prompt"]
@@ -112,11 +139,13 @@ pub async fn handle_mcp(
     body: String,
 ) -> (StatusCode, Json<Value>) {
     if body.trim().is_empty() {
+        tracing::debug!(code = -32700, "MCP call rejected: empty body");
         return error_response(None, -32700, "parse error: empty body", StatusCode::BAD_REQUEST);
     }
     let value: Value = match serde_json::from_str(&body) {
         Ok(v) => v,
         Err(_) => {
+            tracing::debug!(code = -32700, "MCP call rejected: body is not valid JSON");
             return error_response(
                 None,
                 -32700,
@@ -126,11 +155,13 @@ pub async fn handle_mcp(
         }
     };
     if value.is_array() {
+        tracing::debug!(code = -32600, "MCP call rejected: batch requests are not supported");
         return error_response(None, -32600, "invalid request: batch requests are not supported", StatusCode::BAD_REQUEST);
     }
     let req: McpRequest = match serde_json::from_value(value) {
         Ok(r) => r,
         Err(_) => {
+            tracing::debug!(code = -32600, "MCP call rejected: not a valid JSON-RPC 2.0 request object");
             return error_response(
                 None,
                 -32600,
@@ -140,8 +171,16 @@ pub async fn handle_mcp(
         }
     };
     if req.jsonrpc.as_deref() != Some("2.0") || req.method.is_empty() {
+        tracing::debug!(code = -32600, "MCP call rejected: jsonrpc must be \"2.0\" with a method");
         return error_response(req.id.clone(), -32600, "invalid request: jsonrpc must be \"2.0\" with a method", StatusCode::BAD_REQUEST);
     }
+
+    // Verbosity: log EVERY inbound MCP call (method + id) at debug, so
+    // `[logging] level = "debug"` / `KNOCODE_LOG_LEVEL=debug` (installer verbosity 2)
+    // shows literally every daemon call in the log file — the info lines below only
+    // cover the knocode_context outcome, not initialize/ping/tools/list/health.
+    tracing::debug!(id = ?req.id, method = %req.method, "MCP call received");
+
 
     // Notification (no id) — nothing to answer. Per the streamable-HTTP convention we
     // acknowledge with 202 and an empty body (Json payload is not consumed on 202).
@@ -246,7 +285,7 @@ async fn tool_context(
     crate::metrics::global().inc_requests("mcp_context");
     match handle_pre_generation(
         prompt.to_string(),
-        "mcp".to_string(),
+        mcp_session_id(&request_id),
         None,
         repository_path,
         &state.context_engine,
@@ -498,5 +537,114 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(resp.0["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn mcp_session_id_scopes_per_request_id() {
+        // Same request_id → same bucket (stable echo), prefixed to never collide
+        // with real /hook session ids.
+        assert_eq!(
+            mcp_session_id(&Some("abc-123".to_string())),
+            "mcp:abc-123"
+        );
+        // Whitespace-trimmed echo.
+        assert_eq!(
+            mcp_session_id(&Some("  abc-123  ".to_string())),
+            "mcp:abc-123"
+        );
+        // Absent / blank request_id → fresh random bucket per call.
+        let a = mcp_session_id(&None);
+        let b = mcp_session_id(&None);
+        let c = mcp_session_id(&Some("   ".to_string()));
+        assert_ne!(a, b, "no request_id must yield a unique bucket per call");
+        assert_ne!(a, c);
+        assert!(a.starts_with("mcp:"));
+        assert!(b.starts_with("mcp:"));
+        assert!(c.starts_with("mcp:"));
+        // Never equal to a real /hook session id shape (no prefix).
+        assert_ne!(mcp_session_id(&Some("real-session".to_string())), "real-session");
+    }
+
+    /// REGRESSION: the daemon used to pass session_id="mcp" for every MCP call,
+    /// putting all callers in ONE dedup bucket — the second identical prompt was
+    /// silently deduped to an empty pack (no_context_hits passthrough). With the
+    /// per-request bucket, two identical calls must BOTH produce enriched packs.
+    #[tokio::test]
+    async fn test_context_repeat_call_not_deduped() {
+        // Isolated tantivy index + seeded repo so retrieval has a real hit.
+        // Env-var mutation happens before any await and the temp dirs are unique
+        // per run, so the test is self-isolating (e2e_mcp runs in its own binary).
+        let dir = std::env::temp_dir().join(format!("knocode_mcp_dedup_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index_dir = dir.join("idx");
+        std::env::set_var("KNOCODE_INDEX_DIR", index_dir.to_string_lossy().to_string());
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            repo.join("marker.rs"),
+            "// dedup regression marker gamma unique_159753\nfn unique_159753() {}",
+        )
+        .unwrap();
+        let mut ri = RepositoryIntelligence::new(
+            repo.clone(),
+            Database::open(&PathBuf::from(":memory:")).unwrap(),
+            EventBus::new(),
+        );
+        ri.index_repository().unwrap();
+
+        let engine = ContextEngine::new(
+            ri,
+            KnowledgeHub::new(Database::open(&PathBuf::from(":memory:")).unwrap(), EventBus::new()),
+            EventBus::new(),
+            ContextConfig::default(),
+        );
+        let state = HttpServerState {
+            context_engine: Arc::new(tokio::sync::Mutex::new(engine)),
+        };
+        let previous = crate::metrics::global().readiness();
+        crate::metrics::global().set_readiness(crate::metrics::Readiness::Ready);
+
+        let prompt = "dedup regression marker gamma unique_159753";
+        let repo_path = repo.to_string_lossy().to_string();
+        // Build via serde_json (NOT string interpolation): the repo path contains
+        // Windows backslashes that must be JSON-escaped.
+        let call = |id: i64, req_id: &str| {
+            serde_json::to_string(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": "knocode_context",
+                    "arguments": {
+                        "prompt": prompt,
+                        "repository_path": repo_path,
+                        "request_id": req_id,
+                    }
+                }
+            }))
+            .unwrap()
+        };
+
+        // Call 1 — enriched.
+        let (status, resp) = handle_mcp(State(state.clone()), call(1, "dedup-req-1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp.0["error"], serde_json::Value::Null, "call 1: {}", resp.0);
+        assert_eq!(resp.0["result"]["structuredContent"]["passthrough"], false, "call 1 must enrich: {}", resp.0["result"]);
+        assert!(resp.0["result"]["content"][0]["text"].as_str().unwrap().contains("unique_159753"), "call 1: {}", resp.0["result"]);
+
+        // Call 2 — IDENTICAL prompt, fresh request_id (what plugins send per call).
+        let (status, resp) = handle_mcp(State(state), call(2, "dedup-req-2")).await;
+        crate::metrics::global().set_readiness(previous); // restore before asserts
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp.0["error"], serde_json::Value::Null, "call 2: {}", resp.0);
+        assert_eq!(
+            resp.0["result"]["structuredContent"]["passthrough"], false,
+            "repeat prompt must NOT be deduped into a passthrough: {}",
+            resp.0["result"]
+        );
+        assert!(resp.0["result"]["content"][0]["text"].as_str().unwrap().contains("unique_159753"), "call 2 must still enrich: {}", resp.0["result"]);
+
+        std::env::remove_var("KNOCODE_INDEX_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

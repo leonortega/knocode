@@ -2,10 +2,11 @@
 # Knocode installer v0.9.11 minimal (Unix: Linux/macOS, bash)
 # Minimal v1: Git + SQLite(bundled)/tree-sitter/tantivy/tiktoken embedded + RTK optional (no Rust - prebuilt binaries; compile via scripts/compile.sh)
 # Agent integrations (OpenCode/Copilot) are selectable: --agents opencode,copilot | --all-agents | --no-agents
-# Idempotent. Usage: bash scripts/install.sh [--skip-build] [--agents a,b,c|--all-agents|--no-agents] [--skip-prereqs]
+# Log verbosity: --log-verbosity 0|1|2 (0 quiet / 1 normal / 2 verbose: log every daemon call); asked interactively otherwise
+# Idempotent. Usage: bash scripts/install.sh [--skip-build] [--agents a,b,c|--all-agents|--no-agents] [--log-verbosity 0|1|2] [--skip-prereqs]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SKIP_BUILD=false; AGENTS=""; ALL_AGENTS=false; NO_AGENTS=false; WITH_RTK=false; NO_RTK=false; SKIP_PREREQS=false
+SKIP_BUILD=false; AGENTS=""; ALL_AGENTS=false; NO_AGENTS=false; WITH_RTK=false; NO_RTK=false; SKIP_PREREQS=false; LOG_VERBOSITY=""
 for arg in "$@"; do case "$arg" in
   --skip-build) SKIP_BUILD=true;;
   --agents) AGENTS="$2"; shift;;
@@ -15,7 +16,9 @@ for arg in "$@"; do case "$arg" in
   --with-rtk) WITH_RTK=true;;
   --no-rtk) NO_RTK=true;;
   --skip-prereqs) SKIP_PREREQS=true;;
-  -h|--help) echo "Usage: $0 [--skip-build] [--agents opencode,copilot | --all-agents | --no-agents] [--with-rtk|--no-rtk] [--skip-prereqs]"; exit 0;;
+  --log-verbosity) LOG_VERBOSITY="$2"; shift;;
+  --log-verbosity=*) LOG_VERBOSITY="${arg#--log-verbosity=}";;
+  -h|--help) echo "Usage: $0 [--skip-build] [--agents opencode,copilot | --all-agents | --no-agents] [--log-verbosity 0|1|2] [--with-rtk|--no-rtk] [--skip-prereqs]"; exit 0;;
 esac; done
 info(){ echo -e "\033[36m[knocode]\033[0m $*"; } ; ok(){ echo -e "  \033[32m[OK]\033[0m $*"; } ; warn(){ echo -e "  \033[33m[WARN]\033[0m $*"; } ; skip(){ echo -e "  \033[90m[SKIP]\033[0m $*"; }
 
@@ -51,6 +54,31 @@ select_agents() {
 info "Knocode installer"
 AGENT_SEL="$(select_agents)"
 if [ -n "$AGENT_SEL" ]; then info "Agent integrations:$(echo "$AGENT_SEL")"; else info "Agent integrations: none"; fi
+
+# --- Log verbosity selection (0 quiet / 1 normal / 2 verbose) --------------------
+# Shared knob: KNOCODE_LOG_LEVEL feeds BOTH the daemon ([logging] level fallback /
+# env override) and the agent plugins (0 = errors only, 1 = outcome lines, 2 = one
+# line per daemon call). select_verbosity echoes the chosen 0|1|2.
+select_verbosity() {
+  case "$LOG_VERBOSITY" in
+    0|1|2) echo "$LOG_VERBOSITY"; return;;
+    "") ;; # fall through to interactive/default
+    *) warn "invalid --log-verbosity '$LOG_VERBOSITY' - valid: 0, 1, 2"; LOG_VERBOSITY="";;
+  esac
+  if [ ! -t 0 ]; then
+    echo "1"; return
+  fi
+  printf "  Log verbosity? [0] quiet (errors only) [1] normal [2] verbose (every daemon call) [1] "
+  read -r r
+  case "$r" in 0) echo 0;; 2) echo 2;; *) echo 1;; esac
+}
+VERBOSITY="$(select_verbosity)"
+case "$VERBOSITY" in
+  0) LOG_LEVEL_STR="error"; VERBOSITY_DESC="quiet (errors only)";;
+  2) LOG_LEVEL_STR="debug"; VERBOSITY_DESC="verbose (every daemon call logged)";;
+  *) LOG_LEVEL_STR="info";  VERBOSITY_DESC="normal"; VERBOSITY=1;;
+esac
+info "Log verbosity: $VERBOSITY ($VERBOSITY_DESC)"
 
 # 0a. Stop any running daemon/CLI up front - later steps REPLACE binaries (~/.knocode/bin)
 # and a locked exe would fail the copy. The fresh daemon is restarted at the end (step 4).
@@ -139,6 +167,49 @@ for rc in "$HOME/.profile" "$HOME/.bashrc"; do
   fi
 done
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) export PATH="$BIN_DIR:$PATH" ;; esac
+
+# 1c. Persist log verbosity (shared KNOCODE_LOG_LEVEL knob)
+#     a) user env var (agents/plugins read it regardless of shell/profile),
+#     b) [logging] level in the USER config (~/.config/knocode/config.toml) so the
+#        daemon honors it even when started outside a shell that has the var.
+#     Env wins over config for the daemon; config keeps it discoverable via `knocode doctor`.
+USER_CFG="$HOME/.config/knocode/config.toml"
+if [ -f "$USER_CFG" ] && command -v node >/dev/null 2>&1; then
+  USER_CFG_PATH="$USER_CFG" LOG_LEVEL_STR="$LOG_LEVEL_STR" node -e '
+    const fs = require("fs");
+    const p = process.env.USER_CFG_PATH;
+    let t = fs.readFileSync(p, "utf8");
+    if (/^\s*level\s*=/m.test(t)) t = t.replace(/^(\s*level\s*=).*/m, "$1 \"" + process.env.LOG_LEVEL_STR + "\"");
+    else if (/^\[logging\]/m.test(t)) t = t.replace(/^(\[logging\]\n)/m, "$1level = \"" + process.env.LOG_LEVEL_STR + "\"\n");
+    else t += (t.endsWith("\n") ? "" : "\n") + "\n[logging]\nlevel = \"" + process.env.LOG_LEVEL_STR + "\"\n";
+    fs.writeFileSync(p, t);
+  ' && ok "user config [logging] level = $LOG_LEVEL_STR ($USER_CFG)" || warn "failed to update [logging] level in $USER_CFG"
+else
+  mkdir -p "$(dirname "$USER_CFG")"
+  printf '[logging]
+level = "%s"
+file_path = "~/.knocode/logs/knocode.log"
+max_size_mb = 100
+retention_days = 7
+' "$LOG_LEVEL_STR" > "$USER_CFG" && ok "user config written ($USER_CFG, logging.level = $LOG_LEVEL_STR)" || warn "failed to write $USER_CFG"
+fi
+case "$VERBOSITY" in
+  0) export KNOCODE_LOG_LEVEL="error";;
+  2) export KNOCODE_LOG_LEVEL="debug";;
+  *) export KNOCODE_LOG_LEVEL="info";;
+esac
+# Persist the env var for future shells: profile exports on Unix, HKCU on Windows (install.ps1).
+if [ "$VERBOSITY" != "1" ]; then
+  for rc in "$HOME/.profile" "$HOME/.bashrc"; do
+    if [ -f "$rc" ]; then
+      if grep -qs "KNOCODE_LOG_LEVEL" "$rc"; then
+        ok "KNOCODE_LOG_LEVEL already set in $rc"
+      else
+        printf '\n# KNOCODE_LOG_LEVEL: knocode log verbosity (0 quiet / 1 normal / 2 verbose = every daemon call)\nexport KNOCODE_LOG_LEVEL="%s"\n' "$KNOCODE_LOG_LEVEL" >> "$rc" && ok "KNOCODE_LOG_LEVEL=$KNOCODE_LOG_LEVEL added to $rc"
+      fi
+    fi
+  done
+fi
 
 # 2. Verify installation (doctor)
 # NOTE: `knocode init` / `knocode index` are NOT run here on purpose - they bootstrap the
@@ -472,5 +543,5 @@ else
   if [ "$DAEMON_UP" = yes ]; then ok "knocode daemon RUNNING (http://127.0.0.1:9527, from $INSTALLED_DAEMON)"; else warn "daemon not responding on :9527 within 20s - start manually: $INSTALLED_DAEMON"; fi
 fi
 
-info "Done - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | agents: $(if [ -n "$AGENT_SEL" ]; then echo "$AGENT_SEL"; else echo none; fi) | rtk: ${RTK_STATUS:-unknown} | knocode doctor"
+info "Done - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | agents: $(if [ -n "$AGENT_SEL" ]; then echo "$AGENT_SEL"; else echo none; fi) | rtk: ${RTK_STATUS:-unknown} | log verbosity: $VERBOSITY ($KNOCODE_LOG_LEVEL; logs: ~/.knocode/logs/knocode.log) | knocode doctor"
 info "Docs: docs/*.md | knocode doctor"

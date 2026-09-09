@@ -194,7 +194,7 @@ max_output_tokens = 8000              # Budget used by the compressor fallback
 compression_level = "balanced"        # Tool-output compression itself is RTK's (external binary)
 
 [logging]
-level = "info"                        # Log level: error, warn, info, debug, trace
+level = "info"                        # Log level: error, warn, info, debug, trace. Verbose = debug/trace: every inbound MCP call (debug) + /health polls (trace) appear in the log
 file_path = "~/.knocode/logs/knocode.log"  # Log file path
 max_size_mb = 100                     # Max log file size
 retention_days = 7                    # Log retention
@@ -206,7 +206,7 @@ retention_days = 7                    # Log retention
 |----------|-----------|---------|
 | `KNOCODE_DAEMON_URL` | Daemon URL used by `knocode status`/`preview` and the JS clients | http://127.0.0.1:9527 |
 | `KNOCODE_DATABASE_PATH` | database.path | ~/.knocode/data.db |
-| `KNOCODE_LOG_LEVEL` | logging.level | info |
+| `KNOCODE_LOG_LEVEL` | logging.level — daemon filter AND agent-plugin verbosity (`error`/`warn` = quiet, `info` = normal, `debug`/`trace` = verbose: one log line per daemon call, incl. every inbound MCP request at debug and every `/health` poll at trace) | info |
 | `KNOCODE_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
 | `KNOCODE_CANDIDATE_K` | context.candidate_k | 100 |
 | `KNOCODE_MAX_FILES` | context.max_files | 20 |

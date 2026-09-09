@@ -137,6 +137,10 @@ async fn handle_health() -> Json<serde_json::Value> {
     // Readiness: "indexing" while the initial index / an auto-reindex runs, "ready" after.
     // Clients should poll until `state` is "ready" before sending requests.
     let m = crate::metrics::global();
+    // Trace level: /health is polled every 250ms by clients during a wait — log each
+    // poll only at trace (installer verbosity 2 sets KNOCODE_LOG_LEVEL=trace/debug),
+    // never at info, to keep the log file readable.
+    tracing::trace!(state = %m.readiness_str(), "GET /health");
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
@@ -446,11 +450,39 @@ pub(crate) async fn handle_pre_generation(
         message, yaml
     );
 
+    // Verbosity 2+ payload visibility — the enriched text is THE thing a verbose log
+    // should show ("what did the agent actually receive?"). Shared by the MCP
+    // (`tools/call knocode_context`) and HTTP `/hook` transports. debug = one-line
+    // preview (first 400 chars); trace = the FULL payload, every character.
+    tracing::debug!(
+        correlation_id = %context_pack.metadata.correlation_id,
+        total_tokens = %context_pack.token_usage.total_tokens,
+        payload_preview = %payload_preview(&rewritten, 400),
+        "context payload ready"
+    );
+    tracing::trace!(
+        correlation_id = %context_pack.metadata.correlation_id,
+        payload = %rewritten,
+        "context payload (full)"
+    );
+
     Ok(HttpResponsePayload::RewrittenMessage {
         original: message,
         rewritten,
         context_pack: Box::new(Some(context_pack)),
     })
+}
+
+/// One-line preview of a multi-line payload for debug logs: newlines escaped,
+/// truncated to `max` chars with an ellipsis + remaining-length suffix.
+fn payload_preview(s: &str, max: usize) -> String {
+    let one_line = s.replace('\r', "").replace('\n', "\\n");
+    if one_line.chars().count() <= max {
+        return one_line;
+    }
+    let cut: String = one_line.chars().take(max).collect();
+    let total = one_line.chars().count();
+    format!("{}… (+{} chars)", cut, total - max)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────

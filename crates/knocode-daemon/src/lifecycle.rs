@@ -479,11 +479,27 @@ async fn wait_for_shutdown(shutdown_flag: Arc<AtomicBool>, force_flag: Arc<Atomi
 
 // ── Helper Functions ────────────────────────────────────────────────────
 
+/// Translate `[logging] level` into an `EnvFilter` directive.
+///
+/// Verbose levels (`debug`/`trace` = installer/CLI verbosity 2) are scoped to
+/// FIRST-PARTY crates only: `info,knocode=<level>` prefix-matches every `knocode_*`
+/// target (`knocode_daemon`, `knocode_context`, `knocode_storage`, …) so per-call
+/// detail is kept while third-party debug noise (tantivy mmap opens, HTTP
+/// handshakes, SQLite internals) stays capped at info. Quiet/normal levels pass
+/// through unchanged. `RUST_LOG`, when set in the environment, still overrides
+/// everything (`EnvFilter::try_from_default_env` is tried first).
+fn filter_directive(level: &str) -> String {
+    match level {
+        "debug" | "trace" => format!("info,knocode={level}"),
+        other => other.to_string(),
+    }
+}
+
 fn initialize_logging(level: &str, file_path: &str) {
     use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(level));
+        .unwrap_or_else(|_| EnvFilter::new(filter_directive(level)));
 
     let log_path = expand_path(file_path);
     let (dir, name) = (
@@ -589,6 +605,16 @@ mod tests {
     fn test_expand_path_relative() {
         let path = expand_path("relative/path");
         assert_eq!(path, PathBuf::from("relative/path"));
+    }
+
+    #[test]
+    fn test_filter_directive_scopes_verbose_levels_to_first_party() {
+        assert_eq!(filter_directive("debug"), "info,knocode=debug");
+        assert_eq!(filter_directive("trace"), "info,knocode=trace");
+        // Quiet/normal levels stay global (there is nothing to scope).
+        assert_eq!(filter_directive("info"), "info");
+        assert_eq!(filter_directive("warn"), "warn");
+        assert_eq!(filter_directive("error"), "error");
     }
 
 }

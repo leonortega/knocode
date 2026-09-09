@@ -3,6 +3,8 @@ import {
   getDaemonUrl,
   getTimeoutMs,
   getReadyTimeoutMs,
+  getVerbosity,
+  logAtVerbosity,
   mcpCall,
   waitForDaemonReady,
   requestContextEnrichment,
@@ -310,5 +312,69 @@ describe("requestContextEnrichment (MCP knocode_context)", () => {
     expect(result.kind).toBe("enriched");
     const [, init] = mockFetch.mock.calls[0];
     expect(JSON.parse(init.body).params.arguments.request_id).toBe("fixed-id-for-test");
+  });
+});
+
+describe("log verbosity (KNOCODE_LOG_LEVEL → 0 quiet / 1 normal / 2 verbose)", () => {
+  const origEnv = { ...process.env };
+  afterEach(() => {
+    process.env = { ...origEnv };
+    vi.restoreAllMocks();
+  });
+
+  it("maps levels: error/warn→0, info→1 (default), debug/trace→2; unknown→1", () => {
+    delete process.env.KNOCODE_LOG_LEVEL;
+    expect(getVerbosity()).toBe(1);
+    for (const [level, expected] of [
+      ["error", 0], ["warn", 0], ["info", 1], ["debug", 2], ["trace", 2],
+      ["DEBUG", 2], ["  info  ", 1], ["bogus", 1],
+    ] as const) {
+      process.env.KNOCODE_LOG_LEVEL = level;
+      expect(getVerbosity()).toBe(expected);
+    }
+  });
+
+  it("verbosity 2 logs every mcpCall; verbosity 1 stays quiet; verbosity 0 hides nothing but errors", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const okFetch = vi.fn().mockImplementation(async () => okResponse({}));
+
+    process.env.KNOCODE_LOG_LEVEL = "debug";
+    await mcpCall("ping", {}, { url: URL_, fetchImpl: okFetch as any });
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    expect(String(logSpy.mock.calls[0][0])).toMatch(/^\[knocode\] mcp ping → ok \d+ms$/);
+
+    logSpy.mockClear();
+    process.env.KNOCODE_LOG_LEVEL = "info";
+    await mcpCall("ping", {}, { url: URL_, fetchImpl: okFetch as any });
+    expect(logSpy).not.toHaveBeenCalled();
+
+    process.env.KNOCODE_LOG_LEVEL = "error";
+    await mcpCall("ping", {}, { url: URL_, fetchImpl: okFetch as any });
+    expect(logSpy).not.toHaveBeenCalled();
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it("transport failures log to console.error at every verbosity (fail-open must be visible)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const failingFetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+    for (const level of ["error", "info", "debug"]) {
+      errSpy.mockClear();
+      process.env.KNOCODE_LOG_LEVEL = level;
+      await mcpCall("ping", {}, { url: URL_, fetchImpl: failingFetch as any });
+      expect(errSpy).toHaveBeenCalledTimes(1);
+      expect(String(errSpy.mock.calls[0][0])).toMatch(/^\[knocode\] mcp ping failed: /);
+    }
+  });
+
+  it("logAtVerbosity gates host-plugin lines by the shared knob", () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    process.env.KNOCODE_LOG_LEVEL = "info";
+    logAtVerbosity(1, "[knocode] visible at 1");
+    logAtVerbosity(2, "[knocode] hidden at 1");
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    process.env.KNOCODE_LOG_LEVEL = "trace";
+    logAtVerbosity(2, "[knocode] visible at 2");
+    expect(logSpy).toHaveBeenCalledTimes(2);
   });
 });

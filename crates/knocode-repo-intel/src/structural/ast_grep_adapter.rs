@@ -442,8 +442,9 @@ mod tests {
     #[test]
     fn test_ext_to_lang_pack_name_unknown() {
         assert_eq!(ext_to_lang_pack_name("xyz"), None);
-        assert_eq!(ext_to_lang_pack_name("md"), None);
-        assert_eq!(ext_to_lang_pack_name("toml"), None);
+        // Markup/config languages now map to real pack names (registry truth)
+        assert_eq!(ext_to_lang_pack_name("md"), Some("markdown"));
+        assert_eq!(ext_to_lang_pack_name("toml"), Some("toml"));
     }
 
     #[test]

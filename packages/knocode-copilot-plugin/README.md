@@ -19,7 +19,7 @@ this plugin maps the context behavior onto the Copilot hook surface:
 | Hook | OpenCode analog | What Knocode does |
 |------|-----------------|-------------------|
 | `SessionStart` | prompt enrichment (warm) | injects a repository-context digest via `knocode_context` |
-| `UserPromptSubmit` | `session.prompt` (per-prompt) | injects context retrieved from the user's actual prompt via `knocode_context` |
+| `UserPromptSubmit` | `session.prompt` (per-prompt) | injects the context block retrieved from the user's actual prompt via `knocode_context` (the daemon returns prompt + context as one replacement; the hook strips the prompt prefix so it is never duplicated) |
 
 > **Tool-output compression?** That is [RTK](https://github.com/rtk-ai/rtk)'s job now —
 > the knocode installer can install RTK and wire its own Copilot integration for you.

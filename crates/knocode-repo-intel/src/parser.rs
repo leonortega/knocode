@@ -300,10 +300,16 @@ type Config struct { Name string }
     }
 
     #[test]
-    fn test_validate_grammar_non_code_fails() {
-        assert!(validate_grammar(LanguageId::Markdown).is_err());
-        assert!(validate_grammar(LanguageId::Json).is_err());
+    fn test_validate_grammar_text_fails() {
+        // The pack has no grammar for plain text
         assert!(validate_grammar(LanguageId::Text).is_err());
+    }
+
+    #[test]
+    fn test_validate_grammar_markup_langs() {
+        // Pack grammars exist for markup/config languages (downloads on demand)
+        assert!(validate_grammar(LanguageId::Markdown).is_ok());
+        assert!(validate_grammar(LanguageId::Json).is_ok());
     }
 
     #[test]

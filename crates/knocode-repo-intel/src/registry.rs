@@ -37,10 +37,17 @@ pub fn language_pack_name(id: LanguageId) -> &'static str {
         LanguageId::Terraform => "hcl",
         LanguageId::Vue => "vue",
         LanguageId::Svelte => "svelte",
-        // Non-code — no parser
-        LanguageId::Markdown | LanguageId::Yaml | LanguageId::Toml |
-        LanguageId::Json | LanguageId::Xml | LanguageId::Html |
-        LanguageId::Css | LanguageId::Scss | LanguageId::Text => "",
+        // Markup/config languages — grammars exist in tree-sitter-language-pack
+        LanguageId::Markdown => "markdown",
+        LanguageId::Yaml => "yaml",
+        LanguageId::Toml => "toml",
+        LanguageId::Json => "json",
+        LanguageId::Xml => "xml",
+        LanguageId::Html => "html",
+        LanguageId::Css => "css",
+        LanguageId::Scss => "scss",
+        // No grammar in the pack for plain text
+        LanguageId::Text => "",
     }
 }
 
@@ -144,14 +151,15 @@ impl LanguageId {
     }
 
     /// Does this language have a tree-sitter parser?
-    /// With tree-sitter-language-pack, most languages have parsers available.
+    /// Delegates to tree-sitter-language-pack — no hardcoded allow/deny list.
+    /// Note: answers from statically compiled grammars or already-downloaded
+    /// dynamic grammars; never triggers a network download.
     pub fn has_parser(&self) -> bool {
-        // All non-metadata languages have parsers via tree-sitter-language-pack (371 languages)
-        !matches!(
-            self,
-            Self::Markdown | Self::Yaml | Self::Toml | Self::Json |
-            Self::Xml | Self::Html | Self::Css | Self::Scss | Self::Text
-        )
+        let name = language_pack_name(*self);
+        if name.is_empty() {
+            return false;
+        }
+        tree_sitter_language_pack::has_parser(name)
     }
 
     /// Parse from string (case-insensitive)
@@ -302,15 +310,16 @@ impl ParserRegistry {
         self.register_builtin(LanguageDefinition::new(LanguageId::Terraform, &["tf", "hcl"], &[]), has_pack_parser(LanguageId::Terraform));
         self.register_builtin(LanguageDefinition::new(LanguageId::Vue, &["vue"], &[]), has_pack_parser(LanguageId::Vue));
         self.register_builtin(LanguageDefinition::new(LanguageId::Svelte, &["svelte"], &[]), has_pack_parser(LanguageId::Svelte));
-        // Non-code (metadata/search only — no tree-sitter parsers needed)
-        self.register_builtin(LanguageDefinition::new(LanguageId::Markdown, &["md"], &[]), false);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Yaml, &["yaml", "yml"], &[]), false);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Toml, &["toml"], &[]), false);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Json, &["json"], &[]), false);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Xml, &["xml"], &[]), false);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Html, &["html"], &[]), false);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Css, &["css"], &[]), false);
-        self.register_builtin(LanguageDefinition::new(LanguageId::Scss, &["scss"], &[]), false);
+        // Markup/config languages — grammars available via tree-sitter-language-pack
+        self.register_builtin(LanguageDefinition::new(LanguageId::Markdown, &["md"], &[]), has_pack_parser(LanguageId::Markdown));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Yaml, &["yaml", "yml"], &[]), has_pack_parser(LanguageId::Yaml));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Toml, &["toml"], &[]), has_pack_parser(LanguageId::Toml));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Json, &["json"], &[]), has_pack_parser(LanguageId::Json));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Xml, &["xml"], &[]), has_pack_parser(LanguageId::Xml));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Html, &["html"], &[]), has_pack_parser(LanguageId::Html));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Css, &["css"], &[]), has_pack_parser(LanguageId::Css));
+        self.register_builtin(LanguageDefinition::new(LanguageId::Scss, &["scss"], &[]), has_pack_parser(LanguageId::Scss));
+        // Plain text — no grammar in the pack
         self.register_builtin(LanguageDefinition::new(LanguageId::Text, &["txt"], &[]), false);
     }
 
@@ -454,7 +463,19 @@ pub fn detect_language(path: &Path) -> Option<&'static LanguageDefinition> {
     None
 }
 
-// ── File Classification ──────────────────────────────────────────────────
+// ── File Classification ──────────────────────────────────────────────
+
+/// Path-independent file classification for a language id (counterpart to
+/// `classify_file`). Used where only the language is known — e.g. init's
+/// parser validation decides between loading/downloading a grammar (code)
+/// and an offline availability check (docs/config).
+pub fn file_class_for_language(id: LanguageId) -> FileClass {
+    match id {
+        LanguageId::Markdown | LanguageId::Text => FileClass::Documentation,
+        LanguageId::Yaml | LanguageId::Toml | LanguageId::Json | LanguageId::Xml => FileClass::Config,
+        _ => FileClass::Source,
+    }
+}
 
 /// Classifies a file path into a category for indexing decisions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,7 +488,6 @@ pub enum FileClass {
     Config,
     Documentation,
     Binary,
-    Stylesheet,
     Unknown,
 }
 
@@ -491,10 +511,6 @@ pub fn classify_file(path: &Path) -> FileClass {
             "ico" | "pdf" | "zip" | "tar" | "gz" | "woff" | "woff2" | "ttf"
         ) {
             return FileClass::Binary;
-        }
-        // Stylesheet files — never useful for code search, exclude from index
-        if matches!(ext, "css" | "scss" | "less" | "sass" | "styl") {
-            return FileClass::Stylesheet;
         }
     }
 
@@ -580,20 +596,27 @@ mod tests {
         assert_eq!(classify_file(&PathBuf::from("target/debug/binary")), FileClass::Dependency);
         assert_eq!(classify_file(&PathBuf::from("README.md")), FileClass::Documentation);
         assert_eq!(classify_file(&PathBuf::from("image.png")), FileClass::Binary);
+        // Stylesheets are code now — indexed and parsed
+        assert_eq!(classify_file(&PathBuf::from("styles/main.scss")), FileClass::Source);
+        assert_eq!(classify_file(&PathBuf::from("styles/main.css")), FileClass::Source);
+        // Path-independent language classification (init validation policy)
+        assert_eq!(file_class_for_language(LanguageId::Markdown), FileClass::Documentation);
+        assert_eq!(file_class_for_language(LanguageId::Json), FileClass::Config);
+        assert_eq!(file_class_for_language(LanguageId::TypeScriptReact), FileClass::Source);
     }
 
     #[test]
     fn test_has_parser() {
-        // With tree-sitter-language-pack, all source languages have parsers
+        // Delegates to tree-sitter-language-pack — source languages have parsers
         assert!(LanguageId::Rust.has_parser());
         assert!(LanguageId::CSharp.has_parser());
         assert!(LanguageId::Python.has_parser());
         assert!(LanguageId::Ruby.has_parser());
         assert!(LanguageId::Go.has_parser());
         assert!(LanguageId::Kotlin.has_parser());
-        // Non-metadata languages have parsers
-        assert!(!LanguageId::Markdown.has_parser());
-        assert!(!LanguageId::Json.has_parser());
+        // Markup/config languages have pack grammars too (pack truth, no download triggered)
+        assert!(LanguageId::Markdown.has_parser() || !tree_sitter_language_pack::has_parser("markdown"));
+        // Plain text has no grammar in the pack
         assert!(!LanguageId::Text.has_parser());
     }
 
@@ -623,7 +646,6 @@ mod tests {
         let registry = ParserRegistry::new();
         assert!(registry.has_parser(LanguageId::Rust));
         assert!(registry.has_parser(LanguageId::Python));
-        assert!(!registry.has_parser(LanguageId::Markdown));
     }
 
     #[test]

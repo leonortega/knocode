@@ -34,9 +34,22 @@ impl DependencyGraph {
 
     /// Build graph from file list — local AST+regex
     pub fn build_from_files(repo_root: &Path, files: &[PathBuf]) -> Self {
+        Self::build_from_files_with_progress(repo_root, files, &mut |_, _| {})
+    }
+
+    /// Build graph from file list with progress reporting.
+    /// Callback receives (files_done, files_total); called once with (0, total) up front
+    /// and once after each file is processed.
+    pub fn build_from_files_with_progress(
+        repo_root: &Path,
+        files: &[PathBuf],
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Self {
         let mut graph = Self::new();
         let file_index = FileIndex::new(repo_root, files);
-        for file in files {
+        let total = files.len();
+        progress(0, total);
+        for (done, file) in files.iter().enumerate() {
             let rel = file.strip_prefix(repo_root).unwrap_or(file).to_string_lossy().replace('\\', "/");
             if let Ok(content) = std::fs::read_to_string(file) {
                 let language = tree_sitter_language_pack::detect_language_from_path(&rel);
@@ -45,6 +58,7 @@ impl DependencyGraph {
                     graph.add_edge(rel.clone(), dep);
                 }
             }
+            progress(done + 1, total);
         }
         graph
     }

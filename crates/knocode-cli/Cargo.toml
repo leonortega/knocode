@@ -28,5 +28,9 @@ reqwest = { version = "0.13", features = ["json"] }
 uuid = { version = "1", features = ["v4"] }
 tree-sitter-language-pack = "1"
 
+# `config set-log-level` persists KNOCODE_LOG_LEVEL in the user environment (HKCU)
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
 [features]
 default = []

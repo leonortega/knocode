@@ -75,15 +75,14 @@ const handler: vscode.ChatRequestHandler = async (request, chatContext, stream, 
     }
   }
 
-  // Inject repository context, then the user's prompt.
-  if (contextText) {
-    messages.push(
-      vscode.LanguageModelChatMessage.User(
-        `[Repository context from Knocode]\n${contextText}`,
-      ),
-    );
-  }
-  messages.push(vscode.LanguageModelChatMessage.User(request.prompt));
+  // Final user message: the daemon's `knocode_context` answer is a FULL replacement
+  // (the original prompt is preserved verbatim as its prefix), so when enrichment
+  // succeeded we send enrichedText alone — pushing request.prompt again would make
+  // the model read the ask twice (once buried in the context block, once after it).
+  // On passthrough there is no replacement, so the bare prompt is sent instead.
+  messages.push(
+    vscode.LanguageModelChatMessage.User(contextText ?? request.prompt),
+  );
 
   // Send to the user's own Copilot model and stream the reply.
   try {

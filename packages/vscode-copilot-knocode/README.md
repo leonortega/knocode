@@ -15,7 +15,9 @@ Use it alongside the
 ## What it gives you
 
 - **Per-turn repository context** — `@knocode <your prompt>` fetches context from
-  the daemon (`knocode_context`) and prepends it before the model sees the prompt.
+  the daemon (`knocode_context`); the daemon's answer is a full replacement whose
+  prefix is your prompt, and it is sent as the final user message (no duplicated ask
+  in front of the model).
 - **Uses your own model** — calls `request.model.sendRequest`, so it consumes your
   normal Copilot model (no self-hosted LLM, unlike a GitHub App extension).
 - **Conversation history** — prior turns are included so the reply stays on track.

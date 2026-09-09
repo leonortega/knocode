@@ -25,6 +25,8 @@
  *     a plugin log line joins with the daemon log line for the same request.
  *   - Fail-open: any error, timeout, indexing-in-progress, or zero-hit returns a
  *     tagged `ContextPassthrough` so the caller always runs with the bare prompt.
+ *   - Log verbosity: `KNOCODE_LOG_LEVEL` maps to 0 (quiet) / 1 (normal) / 2 (verbose,
+ *     one log line per daemon call) — shared with the daemon, settable by the installer.
  *
  * Host shims are injectable: `fetchImpl` for tests and alternative runtimes, and
  * `timeoutFactory` for hosts where `AbortSignal.timeout` is unsafe (the VS Code
@@ -62,6 +64,57 @@ export function getReadyTimeoutMs(): number {
     if (Number.isFinite(n) && n > 0) return n;
   }
   return DEFAULT_READY_TIMEOUT_MS;
+}
+
+// ── Log verbosity ────────────────────────────────────────────────────────────
+
+/** Three verbosity levels, selected by `KNOCODE_LOG_LEVEL` (shared with the daemon). */
+export type Verbosity = 0 | 1 | 2;
+
+const VERBOSITY_BY_LEVEL: Record<string, Verbosity> = {
+  error: 0,
+  warn: 0,
+  info: 1,
+  debug: 2,
+  trace: 2,
+};
+
+/**
+ * Resolve the client/plugin verbosity from `KNOCODE_LOG_LEVEL` (default 1):
+ *   0 = quiet   (errors only)
+ *   1 = normal  (outcome/metric lines — the historical default)
+ *   2 = verbose (1 + one log line per daemon call: method, outcome, latency)
+ *
+ * The daemon maps the same variable to its `tracing` filter (error/warn → quieter,
+ * debug/trace → per-request lines), so one knob tunes the whole runtime.
+ */
+export function getVerbosity(): Verbosity {
+  const raw = process.env.KNOCODE_LOG_LEVEL;
+  if (raw) {
+    const v = VERBOSITY_BY_LEVEL[raw.trim().toLowerCase()];
+    if (v !== undefined) return v;
+  }
+  return 1;
+}
+
+function logAt(verbosity: Verbosity, message: string): void {
+  if (getVerbosity() < verbosity) return;
+  console.log(message);
+}
+
+function errorAt(verbosity: Verbosity, message: string): void {
+  if (getVerbosity() < verbosity) return;
+  console.error(message);
+}
+
+/**
+ * Host-plugin log line, gated by the shared `KNOCODE_LOG_LEVEL` verbosity
+ * (0 = quiet, 1 = normal, 2 = verbose). Lets plugins route their integration-
+ * boundary lines through the same knob as the client without duplicating the
+ * mapping. Vendored into every agent plugin.
+ */
+export function logAtVerbosity(verbosity: Verbosity, message: string): void {
+  logAt(verbosity, message);
 }
 
 /**
@@ -117,6 +170,7 @@ export async function mcpCall(
   const fetchFn = opts?.fetchImpl ?? (fetch as any);
   const newTimeoutSignal = opts?.timeoutFactory ?? defaultTimeoutFactory;
   const id = ++mcpRequestId;
+  const startedAt = Date.now();
 
   try {
     const res: KnocodeFetchResponse = await fetchFn(`${url}/mcp`, {
@@ -127,31 +181,42 @@ export async function mcpCall(
     });
 
     if (res.status === 404 || res.status === 405) {
-      return { kind: "unsupported", status: res.status };
+      const out: McpCallOutcome = { kind: "unsupported", status: res.status };
+      logAt(2, `[knocode] mcp ${method} → unsupported (HTTP ${res.status}) ${Date.now() - startedAt}ms`);
+      return out;
     }
     if (!res.ok) {
-      return { kind: "failure", reason: `HTTP ${res.status}` };
+      const out: McpCallOutcome = { kind: "failure", reason: `HTTP ${res.status}` };
+      logAt(2, `[knocode] mcp ${method} → failure (HTTP ${res.status}) ${Date.now() - startedAt}ms`);
+      return out;
     }
 
     let body: any;
     try {
       body = await res.json();
     } catch {
-      return { kind: "failure", reason: "non-JSON /mcp response" };
+      const out: McpCallOutcome = { kind: "failure", reason: "non-JSON /mcp response" };
+      logAt(2, `[knocode] mcp ${method} → failure (non-JSON response) ${Date.now() - startedAt}ms`);
+      return out;
     }
     // JSON-RPC application error (e.g. -32001 daemon_indexing) — NOT "unsupported":
     // the daemon speaks MCP, it just can't serve this call right now.
     if (body?.error) {
-      return { kind: "error", code: body.error.code, message: body.error.message };
+      const out: McpCallOutcome = { kind: "error", code: body.error.code, message: body.error.message };
+      logAt(2, `[knocode] mcp ${method} → error ${body.error.code} ${Date.now() - startedAt}ms`);
+      return out;
     }
     if (body?.result === undefined) {
-      return { kind: "failure", reason: "malformed JSON-RPC response" };
+      const out: McpCallOutcome = { kind: "failure", reason: "malformed JSON-RPC response" };
+      logAt(2, `[knocode] mcp ${method} → failure (malformed response) ${Date.now() - startedAt}ms`);
+      return out;
     }
+    logAt(2, `[knocode] mcp ${method} → ok ${Date.now() - startedAt}ms`);
     return { kind: "ok", result: body.result };
   } catch (error) {
-    // No console logging here: mcpCall failures surface via the typed outcome
-    // (`reason: String(error)`) and callers decide how/whether to log — keeps
-    // fire-and-forget setup handshakes from double-logging stderr noise.
+    // Fail-open transport error. Always user-visible (verbosity ≥ 0) — this is the
+    // only signal that the daemon is down — then surface via the typed outcome.
+    errorAt(0, `[knocode] mcp ${method} failed: ${String(error)}`);
     return { kind: "failure", reason: String(error) };
   }
 }
@@ -205,6 +270,7 @@ export async function waitForDaemonReady(
       // Reachable with an error status — keep polling until the deadline.
     } catch {
       // Unreachable (connection refused / aborted) — the daemon is not running.
+      logAt(2, `[knocode] /health unreachable — daemon not running`);
       return false;
     }
     await new Promise((r) => setTimeout(r, pollMs));
@@ -227,7 +293,7 @@ export async function ensureDaemonReady(opts: ClientOptions & { pollMs?: number 
   const ready = await waitForDaemonReady(opts);
   readinessCheckedAt = Date.now();
   if (ready && Date.now() - waitStartedAt > 1_000) {
-    console.log(`[knocode] Daemon became ready after ${Date.now() - waitStartedAt}ms`);
+    logAt(1, `[knocode] Daemon became ready after ${Date.now() - waitStartedAt}ms`);
   }
 }
 

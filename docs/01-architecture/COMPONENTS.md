@@ -691,6 +691,7 @@ Provide command-line interface for daemon management, repository inspection, and
 | `knocode status` | Show daemon status and metrics |
 | `knocode config show` | Show effective configuration |
 | `knocode config validate` | Validate configuration file |
+| `knocode config set-log-level <level>` | Set `[logging] level` in user (+ project) config — `error|warn|info|debug|trace` or aliases `quiet|normal|verbose` |
 | `knocode doctor` | Health check: verify all dependencies are available |
 
 ### Dependencies

@@ -93,6 +93,12 @@ enum ConfigAction {
     Show,
     /// Validate configuration file
     Validate,
+    /// Set the log verbosity (upserts [logging] level in user + project config)
+    SetLogLevel {
+        /// Log level: error, warn, info, debug, trace (aliases: quiet, normal, verbose)
+        #[arg(value_parser = clap::value_parser!(String))]
+        level: String,
+    },
     /// Migrate config from external agent (claude, cursor, continue)
     Migrate {
         /// Source to migrate from
@@ -419,12 +425,78 @@ fn run_index_with_progress(
     match result {
         Ok(stats) => {
             println!(
-                "      ✓ indexed {} files ({} symbols) in {}ms",
+                "      ✓ indexed {} files ({} symbols this run) in {}ms",
                 stats.files_indexed,
                 stats.symbols_extracted,
                 started.elapsed().as_millis()
             );
             Ok(stats)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Build the init status box with content-driven widths — every line (borders
+/// included) is exactly as wide as the widest row, so the box stays aligned no
+/// matter how long the values are. Replaces the old hand-padded literal box,
+/// which drifted out of alignment whenever a value exceeded its fixed pad.
+fn format_status_box(title: &str, rows: &[(&str, String)]) -> String {
+    let label_width = rows.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+    let inner = rows
+        .iter()
+        .map(|(_l, v)| label_width + 2 + v.len())
+        .chain(std::iter::once(title.len()))
+        .max()
+        .unwrap_or(0);
+    let border = "─".repeat(inner + 2);
+    let mut out = format!("┌{}┐\n│ {:<inner$} │\n├{}┤\n", border, title, border, inner = inner);
+    for (label, value) in rows {
+        let field = format!("{:<lw$}  {}", label, value, lw = label_width);
+        out.push_str(&format!("│ {:<inner$} │\n", field, inner = inner));
+    }
+    out.push_str(&format!("└{}┘", border));
+    out
+}
+
+/// Build the dependency graph with the same progress display as indexing.
+/// Progress counts files scanned for imports; on a warm cache (in-memory or
+/// .knocode/graphs/<repo>.json) the callback never fires and this returns instantly.
+fn run_graph_with_progress(
+    repo_intel: &mut knocode_repo_intel::RepositoryIntelligence,
+) -> Result<usize, String> {
+    let is_tty = std::io::stdout().is_terminal();
+    let started = Instant::now();
+
+    let mut progress_cb = move |done: usize, total: usize| {
+        // Same style as the indexing counter: elapsed seconds prove liveness when
+        // the counter stalls on the final graph serialization.
+        let elapsed = started.elapsed().as_secs();
+        if is_tty {
+            let mut stdout = std::io::stdout();
+            let _ = write!(stdout, "\r      {}/{} files — graph ({}s)\x1b[K", done, total, elapsed);
+            let _ = stdout.flush();
+        } else if done > 0 && done % 5000 == 0 {
+            println!("      … {}/{} files (graph; {}s)", done, total, elapsed);
+        }
+    };
+
+    let result = repo_intel.build_dependency_graph_with_progress(&mut progress_cb);
+
+    // Erase the in-place counter line before printing the summary
+    if is_tty {
+        print!("\r\x1b[2K");
+        let _ = std::io::stdout().flush();
+    }
+
+    match result {
+        Ok(graph) => {
+            println!(
+                "      ✓ graph: {} edges ({} files) in {}ms",
+                graph.edge_count(),
+                graph.all_files().len(),
+                started.elapsed().as_millis()
+            );
+            Ok(graph.edge_count())
         }
         Err(e) => Err(e),
     }
@@ -494,36 +566,37 @@ fn cmd_init(wizard: bool, _no_anim: bool) -> Result<(), String> {
         }
     }
 
-    // ── Step 3: Download tree-sitter grammars ──────────────────────
-    println!("[3/7] Downloading tree-sitter grammars");
-    let lang_names: Vec<&str> = discovery.languages.iter()
-        .map(|(name, _)| name.as_str())
-        .filter(|name| tree_sitter_language_pack::has_language(name))
-        .collect();
-    if lang_names.is_empty() {
-        println!("      (no downloadable grammars found)");
-    } else {
-        match tree_sitter_language_pack::download(&lang_names) {
-            Ok(count) => println!("      ✓ {}/{} grammars downloaded", count, lang_names.len()),
-            Err(e) => println!("      ⚠ Download failed: {}", e),
-        }
-    }
-
-    // ── Step 4: Parser validation ────────────────────────────────────
-    println!("[4/7] Parser validation (verify tree-sitter grammars)");
+    // ── Step 3: Parser validation ────────────────────────────────────
+    // tree-sitter-language-pack auto-downloads grammars on first use, so there is
+    // no separate download step. Validation applies a per-language policy:
+    //   Source/Test (code knocode parses for symbols) → validate_grammar(), which
+    //     loads the grammar and auto-downloads it if missing (online warm-up).
+    //   Documentation/Config (full-text only, symbols skipped) → offline pack check
+    //     only; downloading grammars knocode never parses would be waste.
+    //   Text → the pack has no grammar for it; reported as full-text-only.
+    println!("[3/7] Parser validation (verify tree-sitter grammars)");
+    use knocode_repo_intel::registry::{LanguageId, FileClass, file_class_for_language};
     let mut parser_status: Vec<(String, bool, String)> = Vec::new();
     for (lang_name, _count) in &discovery.languages {
-        if let Some(id) = knocode_repo_intel::registry::LanguageId::from_str(lang_name) {
-            let has_parser = id.has_parser();
-            let grammar_status = if has_parser {
+        if let Some(id) = LanguageId::from_str(lang_name) {
+            let file_class = file_class_for_language(id);
+            let pack_name = knocode_repo_intel::registry::language_pack_name(id);
+            let (ready, grammar_status) = if pack_name.is_empty() {
+                (false, "no grammar in pack — full-text only".to_string())
+            } else if matches!(file_class, FileClass::Source | FileClass::Test) {
                 match knocode_repo_intel::parser::validate_grammar(id) {
-                    Ok(()) => "loaded".to_string(),
-                    Err(e) => e, // e.g. "grammar load failed for Rust"
+                    Ok(()) => (true, "loaded".to_string()),
+                    Err(e) => (false, e), // e.g. "grammar load failed for Rust"
                 }
             } else {
-                "no parser available".to_string()
+                // Documentation/Config: check availability without downloading
+                if tree_sitter_language_pack::has_parser(pack_name) {
+                    (true, "ready (on-demand)".to_string())
+                } else {
+                    (false, "grammar not downloaded — full-text only".to_string())
+                }
             };
-            parser_status.push((lang_name.clone(), has_parser, grammar_status));
+            parser_status.push((lang_name.clone(), ready, grammar_status));
         } else {
             parser_status.push((lang_name.clone(), false, "unknown language".to_string()));
         }
@@ -536,8 +609,8 @@ fn cmd_init(wizard: bool, _no_anim: bool) -> Result<(), String> {
         println!("        {} {:<20} {}", icon, lang, status);
     }
 
-    // ── Step 5: Indexing ─────────────────────────────────────────────
-    println!("[5/7] Indexing (full-text BM25 + symbol extraction)");
+    // ── Step 4: Indexing ─────────────────────────────────────────────
+    println!("[4/7] Indexing (full-text BM25 + symbol extraction)");
     let event_bus = knocode_events::EventBus::new();
     let mut repo_intel = knocode_repo_intel::RepositoryIntelligence::new(
         project_root.clone(),
@@ -550,10 +623,7 @@ fn cmd_init(wizard: bool, _no_anim: bool) -> Result<(), String> {
         println!("      Graph: deferred (lazy on first query, set KNOCODE_BUILD_GRAPH=1 to force during init)");
         0
     } else {
-        repo_intel
-            .build_dependency_graph()
-            .map(|g| g.edge_count())
-            .unwrap_or(0)
+        run_graph_with_progress(&mut repo_intel).unwrap_or(0)
     };
     drop(repo_intel);
     // Autoconfigure large-repo tuning: persist candidate_k/max_files for next preview/daemon (V1_FIX_PLAN_0_8_1.md:31)
@@ -582,13 +652,13 @@ fn cmd_init(wizard: bool, _no_anim: bool) -> Result<(), String> {
     let db = knocode_storage::Database::open(&db_path)
         .map_err(|e| format!("Failed to reopen database: {}", e))?;
 
-    // ── Step 5: Knowledge Hub ────────────────────────────────────────
-    println!("[6/7] Knowledge Hub initialization");
+    // ── Step 5: Knowledge Hub ────────────────────────────────
+    println!("[5/7] Knowledge Hub initialization");
     let (knowledge_seeded, _readme) = ingest_seed_documents(&project_root, &db);
     println!("      ✓ knowledge: {} entries seeded", knowledge_seeded);
 
-    // ── Step 6: Validation (smoke test all components) ───────────────
-    println!("[7/7] Validation queries (smoke test)");
+    // ── Step 6: Validation (smoke test all components) ───────────
+    println!("[6/7] Validation queries (smoke test)");
     let repo_id = knocode_core::repository_id_from_path(&project_root.to_string_lossy());
 
     // Tantivy (via RepositoryIntelligence::validate_index)
@@ -609,13 +679,24 @@ fn cmd_init(wizard: bool, _no_anim: bool) -> Result<(), String> {
         }
     };
 
-    // Symbols
-    let symbol_count = db.get_all_files().map(|f| f.len()).unwrap_or(0);
-    println!("      Symbols:   {} files tracked", symbol_count);
+    // Symbols — scoped to THIS repo. The DB is shared across repositories
+    // (get_all_files has no repo filter), so a global count both overstates
+    // (mattermost + knocode rows mixed) and mislabels files as symbols.
+    let repo_files = db.get_all_files_meta(&repo_id).unwrap_or_default();
+    let repo_file_ids: Vec<i64> = repo_files.iter().map(|r| r.id).collect();
+    let repo_symbols = db.count_symbols_for_file_ids(&repo_file_ids).unwrap_or(0);
+    println!(
+        "      Symbols:   {} in {} files",
+        repo_symbols,
+        repo_files.len()
+    );
 
-    // Graph
-    let _graph_ok = dep_edges > 0;
-    println!("      Graph:     {} edges", dep_edges);
+    // Graph (deferred on large repos — not a failure, see step 5)
+    println!(
+        "      Graph:     {} edges{}",
+        dep_edges,
+        if dep_edges == 0 && stats.files_indexed > 5000 { " (deferred — lazy on first query)" } else { "" }
+    );
 
     // Knowledge
     let _knowledge_ok = knowledge_seeded > 0;
@@ -640,16 +721,20 @@ fn cmd_init(wizard: bool, _no_anim: bool) -> Result<(), String> {
     println!();
     println!("✓ Bootstrap complete in {}ms", started.elapsed().as_millis());
     println!();
-    println!("┌─────────────────────────────────────────┐");
-    let status_label = if tantivy_ok && symbol_count > 0 { "READY" } else { "PARTIAL" };
-    println!("│ Repository Status: {:<21} │", status_label);
-    println!("├─────────────────────────────────────────┤");
-    println!("│ Tree-sitter:  {:<24} │", format!("{}/{} grammars", ready_count, total_count));
-    println!("│ Symbols:      {:<24} │", format!("{} extracted", stats.symbols_extracted));
-    println!("│ Graph:        {:<24} │", format!("{} edges", dep_edges));
-    println!("│ Tantivy:      {:<24} │", format!("{} files", stats.files_indexed));
-    println!("│ Knowledge:    {:<24} │", format!("{} entries", knowledge_seeded));
-    println!("└─────────────────────────────────────────┘");
+    let status_label = if tantivy_ok && repo_files.len() > 0 { "READY" } else { "PARTIAL" };
+    println!(
+        "{}",
+        format_status_box(
+            &format!("Repository Status: {}", status_label),
+            &[
+                ("Tree-sitter:", format!("{}/{} grammars", ready_count, total_count)),
+                ("Symbols:", format!("{} extracted", repo_symbols)),
+                ("Graph:", format!("{} edges{}", dep_edges, if dep_edges == 0 && stats.files_indexed > 5000 { " (deferred)" } else { "" })),
+                ("Tantivy:", format!("{} files", stats.files_indexed)),
+                ("Knowledge:", format!("{} entries", knowledge_seeded)),
+            ],
+        )
+    );
     println!();
 
     if !discovery.languages.is_empty() {
@@ -842,11 +927,35 @@ fn update_config_languages(
     Ok(true)
 }
 
-fn detect_stack(root: &Path, d: &mut Discovery) {    if root.join("Cargo.toml").exists() {
-        d.frameworks.push("cargo".to_string());
+fn detect_stack(root: &Path, d: &mut Discovery) {
+    // Root first, then immediate subdirectories (one level deep) so monorepos
+    // (e.g. server/go.mod, webapp/channels/package.json) are also detected.
+    detect_stack_at_root(root, d);
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if SKIP_DIRS.contains(&name.as_str()) || name.starts_with('.') {
+                    continue;
+                }
+                detect_stack_at_root(&entry.path(), d);
+            }
+        }
+    }
+}
+
+/// Stack detection for a single directory (repo root or monorepo subproject).
+fn detect_stack_at_root(root: &Path, d: &mut Discovery) {
+    let push_unique = |v: &mut Vec<String>, s: &str| {
+        if !v.iter().any(|x| x == s) {
+            v.push(s.to_string());
+        }
+    };
+    if root.join("Cargo.toml").exists() {
+        push_unique(&mut d.frameworks, "cargo");
         if let Ok(s) = std::fs::read_to_string(root.join("Cargo.toml")) {
             if s.contains("[workspace]") {
-                d.frameworks.push("rust-workspace".to_string());
+                push_unique(&mut d.frameworks, "rust-workspace");
             }
         }
         d.build_command.get_or_insert_with(|| "cargo build".into());
@@ -854,14 +963,14 @@ fn detect_stack(root: &Path, d: &mut Discovery) {    if root.join("Cargo.toml").
     }
     let pkg = root.join("package.json");
     if pkg.exists() {
-        d.frameworks.push("node".to_string());
+        push_unique(&mut d.frameworks, "node");
         if let Ok(content) = std::fs::read_to_string(&pkg) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
                 for fw in ["react", "vue", "svelte", "next", "express", "@nestjs/core"] {
                     if v["dependencies"].get(fw).is_some()
                         || v["devDependencies"].get(fw).is_some()
                     {
-                        d.frameworks.push(fw.trim_start_matches('@').replace('/', "-"));
+                        push_unique(&mut d.frameworks, fw.trim_start_matches('@').replace('/', "-").as_str());
                     }
                 }
                 if let Some(b) = v["scripts"]["build"].as_str() {
@@ -877,7 +986,7 @@ fn detect_stack(root: &Path, d: &mut Discovery) {    if root.join("Cargo.toml").
         }
     }
     if root.join("go.mod").exists() {
-        d.frameworks.push("go-modules".to_string());
+        push_unique(&mut d.frameworks, "go-modules");
         d.build_command
             .get_or_insert_with(|| "go build ./...".into());
         d.test_command.get_or_insert_with(|| "go test ./...".into());
@@ -886,29 +995,34 @@ fn detect_stack(root: &Path, d: &mut Discovery) {    if root.join("Cargo.toml").
         || root.join("requirements.txt").exists()
         || root.join("setup.py").exists()
     {
-        d.frameworks.push("python".to_string());
+        push_unique(&mut d.frameworks, "python");
         if let Ok(s) = std::fs::read_to_string(root.join("pyproject.toml")) {
             if s.contains("[tool.poetry]") {
-                d.frameworks.push("poetry".to_string());
+                push_unique(&mut d.frameworks, "poetry");
                 d.test_command
                     .get_or_insert_with(|| "poetry run pytest".into());
             } else if s.contains("[tool.uv]") {
-                d.frameworks.push("uv".to_string());
+                push_unique(&mut d.frameworks, "uv");
             }
         }
         d.test_command.get_or_insert_with(|| "pytest".into());
     }
     if root.join("pom.xml").exists() {
-        d.frameworks.push("maven".to_string());
+        push_unique(&mut d.frameworks, "maven");
         d.build_command.get_or_insert_with(|| "mvn package".into());
         d.test_command.get_or_insert_with(|| "mvn test".into());
     } else if root.join("build.gradle").exists() || root.join("build.gradle.kts").exists() {
-        d.frameworks.push("gradle".to_string());
+        push_unique(&mut d.frameworks, "gradle");
         d.build_command.get_or_insert_with(|| "gradle build".into());
         d.test_command.get_or_insert_with(|| "gradle test".into());
     }
     if root.join("Makefile").exists() || root.join("makefile").exists() {
-        d.frameworks.push("make".to_string());
+        push_unique(&mut d.frameworks, "make");
+        // Makefile-only projects (no other manifest) get make commands as fallback
+        if d.build_command.is_none() && d.test_command.is_none() {
+            d.build_command.get_or_insert_with(|| "make".into());
+            d.test_command.get_or_insert_with(|| "make test".into());
+        }
     }
 }
 
@@ -1180,9 +1294,25 @@ fn cmd_status() -> Result<(), String> {
         
         println!("Database:");
         println!("  Path:          {}", db_path.display());
-        println!("  Files indexed: {}", file_count);
-        println!("  Symbols:       {}", symbol_count);
+        println!("  Files indexed: {} (all repositories)", file_count);
+        println!("  Symbols:       {} (all repositories)", symbol_count);
         println!();
+
+        // Current repository — the DB is shared across repos, so the global
+        // totals above don't answer "what does THIS repo's index look like?".
+        if let Ok(cwd) = std::env::current_dir() {
+            let repo_id = knocode_core::repository_id_from_path(&cwd.to_string_lossy());
+            let repo_files = db.get_all_files_meta(&repo_id).unwrap_or_default();
+            if !repo_files.is_empty() {
+                let ids: Vec<i64> = repo_files.iter().map(|r| r.id).collect();
+                let repo_symbols = db.count_symbols_for_file_ids(&ids).unwrap_or(0);
+                println!("Current repository:");
+                println!("  Path:          {}", cwd.display());
+                println!("  Files indexed: {}", repo_files.len());
+                println!("  Symbols:       {}", repo_symbols);
+                println!();
+            }
+        }
         println!("Token Usage:");
         println!("  Total input tokens:  {}", usage.total_input_tokens);
         println!("  Total output tokens: {}", usage.total_output_tokens);
@@ -1229,6 +1359,7 @@ fn cmd_config(action: ConfigAction) -> Result<(), String> {
                 }
             }
         }
+        ConfigAction::SetLogLevel { level } => cmd_config_set_log_level(&level)?,
         ConfigAction::Migrate { from } => {
             println!("Migrating config from '{}' (claude|continue|cursor)...", from);
             let project_root = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -1262,6 +1393,396 @@ fn cmd_config(action: ConfigAction) -> Result<(), String> {
     }
     
     Ok(())
+}
+
+/// `knocode config set-log-level <level>` — change log verbosity without re-running
+/// the installer. Upserts `[logging] level` in the USER config
+/// (`~/.config/knocode/config.toml`, what the daemon reads when started outside a
+/// repo) and the PROJECT config (`.knocode/config.toml`, when present), so the next
+/// `knocode serve` picks it up. Accepts tracing levels (error/warn/info/debug/trace)
+/// plus the installer's verbosity aliases (quiet/normal/verbose). Env
+/// `KNOCODE_LOG_LEVEL` still overrides these files at daemon startup.
+fn cmd_config_set_log_level(level: &str) -> Result<(), String> {
+    let level = level.trim().to_lowercase();
+    // Aliases mirror the installer's 3-level verbosity prompt (0 quiet / 1 normal / 2 verbose).
+    let level = match level.as_str() {
+        "0" | "quiet" => "error".to_string(),
+        "1" | "normal" => "info".to_string(),
+        "2" | "verbose" => "debug".to_string(),
+        other => other.to_string(),
+    };
+    // Same valid set as Config::validate — reject before touching any file.
+    let valid = ["error", "warn", "info", "debug", "trace"];
+    if !valid.contains(&level.as_str()) {
+        return Err(format!(
+            "invalid log level '{}': must be one of {} (aliases: quiet, normal, verbose)",
+            level,
+            valid.join(", ")
+        ));
+    }
+
+    let mut updated: Vec<String> = Vec::new();
+
+    // 1. USER config — always written (the daemon's [logging] level fallback lives here).
+    if let Some(user_cfg) = user_config_path() {
+        upsert_logging_level(&user_cfg, &level)?;
+        updated.push(user_cfg.display().to_string());
+    }
+
+    // 2. PROJECT config (.knocode/config.toml) — only when it exists AND carries a
+    //    [logging] section (or is fresh); project merge would otherwise keep overriding
+    //    the user value the user just set.
+    let project_root = std::env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+    let project_cfg = project_root.join(".knocode").join("config.toml");
+    if project_cfg.exists() {
+        let has_logging_section = std::fs::read_to_string(&project_cfg)
+            .map(|t| t.contains("[logging]"))
+            .unwrap_or(false);
+        if has_logging_section {
+            upsert_logging_level(&project_cfg, &level)?;
+            updated.push(project_cfg.display().to_string());
+        }
+    }
+
+    println!("✓ Log level set to '{}' (verbosity: {})", level, verbosity_label(&level));
+    for p in &updated {
+        println!("  updated: {}", p);
+    }
+    // 3. Persist the user env var (plugins read KNOCODE_LOG_LEVEL from the environment,
+    //    not from config files) — HKCU\Environment on Windows (with WM_SETTINGCHANGE so
+    //    new processes pick it up), `export` lines in ~/.profile + ~/.bashrc on Unix.
+    //    Best-effort: a failure warns but does not fail the command (files are updated).
+    match persist_user_env_log_level(&level) {
+        Ok(Some(lines)) => {
+            for w in lines {
+                println!("  env: {}", w);
+            }
+        }
+        Ok(None) => {} // default level (info) — nothing persisted, matching the installer
+        Err(e) => println!("  ⚠ env not persisted: {}", e),
+    }
+    println!();
+    println!("  Restart the daemon (knocode serve) to apply.");
+    println!("  Note: KNOCODE_LOG_LEVEL env overrides these files when set.");
+    Ok(())
+}
+
+/// Persist KNOCODE_LOG_LEVEL in the user environment (best-effort).
+/// Windows: HKCU\Environment + WM_SETTINGCHANGE broadcast (what
+/// `[Environment]::SetEnvironmentVariable(..., 'User')` does). Unix: idempotent
+/// `export KNOCODE_LOG_LEVEL="..."` lines in ~/.profile and ~/.bashrc using the
+/// same `# KNOCODE_LOG_LEVEL:` marker the installers write. Returns human-readable
+/// confirmations; `None` when there was nothing to change.
+/// Setting the default level (`info`) REMOVES a previously persisted var instead —
+/// env beats config files for the daemon and is the only thing plugins read, so a
+/// stale `KNOCODE_LOG_LEVEL=debug` must not silently outlive `set-log-level info`.
+fn persist_user_env_log_level(level: &str) -> Result<Option<Vec<String>>, String> {
+    // Default level: remove a previously persisted var (env beats config files, so a
+    // stale KNOCODE_LOG_LEVEL must not silently outlive `set-log-level info`).
+    if level == "info" {
+        return remove_user_env_log_level();
+    }
+    set_user_env_log_level(level)
+}
+
+/// Set the user env var to `level` (non-default levels).
+fn set_user_env_log_level(level: &str) -> Result<Option<Vec<String>>, String> {
+
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
+        use winreg::RegKey;
+        let env_key = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags("Environment", KEY_READ | KEY_SET_VALUE)
+            .map_err(|e| format!("cannot open HKCU\\Environment: {}", e))?;
+        env_key
+            .set_value("KNOCODE_LOG_LEVEL", &level)
+            .map_err(|e| format!("cannot write HKCU\\Environment\\KNOCODE_LOG_LEVEL: {}", e))?;
+        broadcast_wm_settingchange();
+        Ok(Some(vec![
+            "KNOCODE_LOG_LEVEL=... persisted in user environment (HKCU; new processes see it, existing shells don't)".to_string(),
+        ]))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut written: Vec<String> = Vec::new();
+        let home = dirs().ok_or_else(|| "cannot determine home directory".to_string())?;
+        for rc in [".profile", ".bashrc"] {
+            let rc_path = home.join(rc);
+            if !rc_path.exists() {
+                continue; // mirrors the installer: never create rc files that don't exist
+            }
+            let text = std::fs::read_to_string(&rc_path)
+                .map_err(|e| format!("cannot read {}: {}", rc_path.display(), e))?;
+            if let Some(new_text) = upsert_rc_export(&text, level) {
+                std::fs::write(&rc_path, new_text)
+                    .map_err(|e| format!("cannot write {}: {}", rc_path.display(), e))?;
+                written.push(format!(
+                    "KNOCODE_LOG_LEVEL=\"{}\" updated in ~/{}, restart your shell to see it",
+                    level, rc
+                ));
+            }
+        }
+        if written.is_empty() {
+            written.push(
+                "no ~/.profile or ~/.bashrc found — add 'export KNOCODE_LOG_LEVEL=\"...\"' to your shell profile manually"
+                    .to_string(),
+            );
+        }
+        Ok(Some(written))
+    }
+}
+
+/// Remove a previously persisted KNOCODE_LOG_LEVEL from the user environment
+/// (backing `set-log-level info` — the default needs no persisted override, and env
+/// beats config files for both the daemon and the agent plugins).
+fn remove_user_env_log_level() -> Result<Option<Vec<String>>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE};
+        use winreg::RegKey;
+        let env_key = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey_with_flags("Environment", KEY_QUERY_VALUE | KEY_SET_VALUE)
+            .map_err(|e| format!("cannot open HKCU\\Environment: {}", e))?;
+        match env_key.get_value::<String, _>("KNOCODE_LOG_LEVEL") {
+            Ok(old) => {
+                env_key
+                    .delete_value("KNOCODE_LOG_LEVEL")
+                    .map_err(|e| format!("cannot delete HKCU\\Environment\\KNOCODE_LOG_LEVEL: {}", e))?;
+                broadcast_wm_settingchange();
+                Ok(Some(vec![format!(
+                    "KNOCODE_LOG_LEVEL={} removed from user environment (HKCU); config files now decide",
+                    old
+                )]))
+            }
+            Err(_) => Ok(None), // nothing persisted — nothing to remove
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut written: Vec<String> = Vec::new();
+        let home = dirs().ok_or_else(|| "cannot determine home directory".to_string())?;
+        for rc in [".profile", ".bashrc"] {
+            let rc_path = home.join(rc);
+            if !rc_path.exists() {
+                continue;
+            }
+            let text = std::fs::read_to_string(&rc_path)
+                .map_err(|e| format!("cannot read {}: {}", rc_path.display(), e))?;
+            if let Some(new_text) = remove_rc_export(&text) {
+                std::fs::write(&rc_path, new_text)
+                    .map_err(|e| format!("cannot write {}: {}", rc_path.display(), e))?;
+                written.push(format!(
+                    "KNOCODE_LOG_LEVEL export removed from ~/{}, restart your shell to see it",
+                    rc
+                ));
+            }
+        }
+        if written.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(written))
+    }
+}
+
+/// Remove any `export KNOCODE_LOG_LEVEL=...` line from rc-file `text`, together with
+/// the installer's marker comment when it sits directly above the removed export.
+/// Returns `None` when nothing would change. Cross-platform and unit-tested.
+#[cfg(any(test, not(target_os = "windows")))]
+fn remove_rc_export(text: &str) -> Option<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut changed = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("export KNOCODE_LOG_LEVEL") {
+            changed = true;
+            // Drop the marker comment directly above the removed export (installer format).
+            if let Some(last) = out.last() {
+                if last.trim_start().starts_with("# KNOCODE_LOG_LEVEL:") {
+                    out.pop();
+                }
+            }
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    if !changed {
+        return None;
+    }
+    let mut result = out.join("\n");
+    if text.is_empty() || text.ends_with('\n') {
+        result.push('\n');
+    }
+    Some(result)
+}
+
+/// Rewrite rc-file `text` so it carries exactly one `export KNOCODE_LOG_LEVEL="<level>"`
+/// line: replaces an existing export (any indentation, installer- or CLI-written), or
+/// appends the installer's marker comment + export at the end. Returns `None` when the
+/// content would not change (idempotent re-runs skip the write). Cross-platform and
+/// unit-tested — only the surrounding file I/O is platform-gated.
+#[cfg(any(test, not(target_os = "windows")))]
+fn upsert_rc_export(text: &str, level: &str) -> Option<String> {
+    let export_line = format!("export KNOCODE_LOG_LEVEL=\"{}\"", level);
+    let mut out: Vec<String> = Vec::new();
+    let mut replaced = false;
+    let mut changed = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("export KNOCODE_LOG_LEVEL") {
+            out.push(export_line.clone());
+            changed |= line != export_line;
+            replaced = true;
+        } else {
+            // All other lines (including the installer's marker comment) kept as-is.
+            out.push(line.to_string());
+        }
+    }
+    if !replaced {
+        if !out.is_empty() && out.last().map(|l| !l.trim().is_empty()).unwrap_or(false) {
+            out.push(String::new());
+        }
+        out.push(
+            "# KNOCODE_LOG_LEVEL: knocode log verbosity (0 quiet / 1 normal / 2 verbose = every daemon call)"
+                .to_string(),
+        );
+        out.push(export_line);
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+    let mut result = out.join("\n");
+    if text.is_empty() || text.ends_with('\n') {
+        result.push('\n');
+    }
+    Some(result)
+}
+
+/// Broadcast WM_SETTINGCHANGE ("Environment") so Explorer and newly launched
+/// processes notice an HKCU\Environment change without a logoff/logon.
+#[cfg(target_os = "windows")]
+fn broadcast_wm_settingchange() {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "user32")]
+    extern "system" {
+        fn SendMessageTimeoutW(
+            hwnd: isize,
+            msg: u32,
+            wparam: usize,
+            lparam: *const u16,
+            flags: u32,
+            timeout: u32,
+            out_result: *mut usize,
+        ) -> isize;
+    }
+    const HWND_BROADCAST: isize = 0xFFFF;
+    const WM_SETTINGCHANGE: u32 = 0x001A;
+    const SMTO_ABORTIFHUNG: u32 = 0x0002;
+    let env_wide: Vec<u16> = std::ffi::OsStr::new("Environment")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut result: usize = 0;
+    unsafe {
+        let _ = SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            0,
+            env_wide.as_ptr(),
+            SMTO_ABORTIFHUNG,
+            1000,
+            &mut result,
+        );
+    }
+}
+
+/// The installer's 3-level verbosity label for a tracing level (mirrors
+/// knocode-client's mapping: error/warn→0, info→1, debug/trace→2).
+fn verbosity_label(level: &str) -> &'static str {
+    match level {
+        "error" | "warn" => "0 quiet — errors only",
+        "info" => "1 normal",
+        _ => "2 verbose — every daemon call logged",
+    }
+}
+
+/// `~/.config/knocode/config.toml` (mirrors Config::user_config_path in knocode-core).
+fn user_config_path() -> Option<PathBuf> {
+    dirs().map(|home| home.join(".config").join("knocode").join("config.toml"))
+}
+
+/// Upsert `level = "<level>"` under the `[logging]` section of a TOML file.
+/// Line-oriented (no toml_edit dep): replaces an existing `level =` line inside
+/// [logging], inserts one after `[logging]`, or appends a new [logging] section.
+/// Other keys/sections are preserved byte-for-byte.
+fn upsert_logging_level(path: &Path, level: &str) -> Result<(), String> {
+    let text = if path.exists() {
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?
+    } else {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
+        }
+        String::new()
+    };
+
+    let new_line = format!("level = \"{}\"", level);
+    let mut out: Vec<String> = Vec::new();
+    let mut current_section: Option<String> = None;
+    let mut replaced = false;
+    let mut logging_found = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let incoming = trimmed.trim_start_matches('[').trim_end_matches(']').trim().to_string();
+            // Insert pending level line BEFORE switching sections: when the previous
+            // section was [logging] and it carried no `level =` key, the new key line
+            // belongs at the end of that section (before this new `[section]` header).
+            if current_section.as_deref() == Some("logging") && !replaced {
+                out.push(new_line.clone());
+                replaced = true;
+            }
+            current_section = Some(incoming);
+            if current_section.as_deref() == Some("logging") {
+                logging_found = true;
+            }
+        } else if current_section.as_deref() == Some("logging") && !replaced {
+            // Key line inside [logging]: strip comments, then compare the key
+            // (the part before the first '=') so `level=x`, `level = x`, and
+            // `level = x # comment` all match, while `levels=`/`level_max=` don't.
+            let key_only = trimmed.split('#').next().unwrap_or("").trim();
+            let key = key_only.split('=').next().unwrap_or("").trim();
+            if key == "level" && key_only.contains('=') {
+                out.push(new_line.clone());
+                replaced = true;
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+    if current_section.as_deref() == Some("logging") && !replaced {
+        out.push(new_line.clone());
+        replaced = true;
+    }
+    if !logging_found {
+        if !out.is_empty() && out.last().map(|l| !l.trim().is_empty()).unwrap_or(false) {
+            out.push(String::new());
+        }
+        out.push("[logging]".to_string());
+        out.push(new_line);
+        replaced = true;
+    }
+    let _ = replaced;
+
+    let mut result = out.join("\n");
+    // Restore/normalize the trailing newline for new and newline-terminated files;
+    // a file that deliberately lacked one keeps lacking it.
+    if text.is_empty() || text.ends_with('\n') {
+        result.push('\n');
+    }
+
+    std::fs::write(path, result).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
 }
 
 fn cmd_doctor() -> Result<(), String> {
@@ -1561,7 +2082,39 @@ fn dirs() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
+    #[test]
+    fn test_format_status_box_alignment() {
+        let box_str = format_status_box(
+            "Repository Status: READY",
+            &[
+                ("Tree-sitter:", "10/10 grammars".to_string()),
+                ("Symbols:", "36861 extracted".to_string()),
+                ("Graph:", "33446 edges".to_string()),
+                ("Tantivy:", "9850 files".to_string()),
+                ("Knowledge:", "1 entries".to_string()),
+            ],
+        );
+        let lines: Vec<&str> = box_str.lines().collect();
+        assert_eq!(lines.len(), 9);
+        // Every line must have identical display width (borders inclusive) so
+        // the │ edges line up — the bug this box style replaces.
+        let width = lines[0].chars().count();
+        for (i, line) in lines.iter().enumerate() {
+            assert_eq!(line.chars().count(), width, "line {} misaligned: {:?}", i, line);
+        }
+        // A long value must widen the whole box instead of breaking alignment.
+        let wide = format_status_box(
+            "Repository Status: READY",
+            &[("Graph:", "33446 edges (deferred — lazy on first query)".to_string())],
+        );
+        let wide_width = wide.lines().next().unwrap().chars().count();
+        for line in wide.lines() {
+            assert_eq!(line.chars().count(), wide_width);
+        }
+        assert!(wide_width > width);
+    }
+
     #[test]
     fn test_parse_cargo_metadata_target_dir() {
         // Unix-style path
@@ -1603,6 +2156,161 @@ mod tests {
             daemon_spawn_args(9527),
             vec!["--port".to_string(), "9527".to_string()]
         );
+    }
+
+    #[test]
+    fn test_upsert_logging_level_replaces_existing_key() {
+        let dir = std::env::temp_dir().join(format!("knocode_cfg_test_replace_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        std::fs::write(
+            &p,
+            "[logging]\nfile_path = \"~/.knocode/logs/knocode.log\"\nlevel = \"info\"\nretention_days = 7\n\n[rtk]\nenabled = true\n",
+        )
+        .unwrap();
+        upsert_logging_level(&p, "debug").unwrap();
+        let t = std::fs::read_to_string(&p).unwrap();
+        assert!(t.contains("[logging]"));
+        assert!(t.contains("level = \"debug\""));
+        assert!(!t.contains("level = \"info\""));
+        assert!(t.contains("file_path = \"~/.knocode/logs/knocode.log\""));
+        assert!(t.contains("[rtk]"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_upsert_logging_level_inserts_into_existing_section() {
+        let dir = std::env::temp_dir().join(format!("knocode_cfg_test_insert_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        std::fs::write(&p, "[logging]\nfile_path = \"x\"\n\n[rtk]\nenabled = true\n").unwrap();
+        upsert_logging_level(&p, "error").unwrap();
+        let t = std::fs::read_to_string(&p).unwrap();
+        // Assert semantics, not byte order: level lands inside [logging], the rest survives.
+        let v: toml::Value = toml::from_str(&t).unwrap();
+        assert_eq!(v["logging"]["level"].as_str(), Some("error"));
+        assert_eq!(v["logging"]["file_path"].as_str(), Some("x"));
+        assert_eq!(v["rtk"]["enabled"].as_bool(), Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_upsert_logging_level_appends_missing_section() {
+        let dir = std::env::temp_dir().join(format!("knocode_cfg_test_append_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        std::fs::write(&p, "[context]\nmax_tokens = 12000\n").unwrap();
+        upsert_logging_level(&p, "trace").unwrap();
+        let t = std::fs::read_to_string(&p).unwrap();
+        assert!(t.contains("[logging]\nlevel = \"trace\"\n"));
+        assert!(t.contains("[context]"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_upsert_rc_export_appends_marker_and_export() {
+        let out = upsert_rc_export("export PATH=\"$HOME/.knocode/bin:$PATH\"\n", "debug").unwrap();
+        assert!(out.contains("# KNOCODE_LOG_LEVEL: knocode log verbosity"));
+        assert!(out.contains("export KNOCODE_LOG_LEVEL=\"debug\"\n"));
+        assert!(out.contains("export PATH="));
+        // Blank line separates the appended block from existing content.
+        assert!(out.contains("$PATH\"\n\n# KNOCODE_LOG_LEVEL:"));
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn test_upsert_rc_export_replaces_existing_value() {
+        let text = "# KNOCODE_LOG_LEVEL: knocode log verbosity (0 quiet / 1 normal / 2 verbose = every daemon call)\nexport KNOCODE_LOG_LEVEL=\"error\"\n";
+        let out = upsert_rc_export(text, "trace").unwrap();
+        assert!(out.contains("export KNOCODE_LOG_LEVEL=\"trace\""));
+        assert!(!out.contains("\"error\""));
+        // Marker comment and everything else preserved.
+        assert_eq!(out.matches("KNOCODE_LOG_LEVEL").count(), 2);
+    }
+
+    #[test]
+    fn test_upsert_rc_export_idempotent_when_unchanged() {
+        let text = "# marker\nexport KNOCODE_LOG_LEVEL=\"debug\"\n";
+        assert!(upsert_rc_export(text, "debug").is_none());
+    }
+
+    #[test]
+    fn test_upsert_rc_export_replaces_indented_and_leaves_other_exports() {
+        let text = "export KNOCODE_TIMEOUT_MS=\"5000\"\n  export KNOCODE_LOG_LEVEL=\"info\"\n";
+        let out = upsert_rc_export(text, "error").unwrap();
+        assert!(out.contains("export KNOCODE_TIMEOUT_MS=\"5000\""));
+        assert!(out.contains("export KNOCODE_LOG_LEVEL=\"error\""));
+        assert_eq!(out.matches("export KNOCODE_LOG_LEVEL").count(), 1);
+    }
+
+    #[test]
+    fn test_upsert_rc_export_empty_file() {
+        let out = upsert_rc_export("", "warn").unwrap();
+        assert_eq!(
+            out,
+            "# KNOCODE_LOG_LEVEL: knocode log verbosity (0 quiet / 1 normal / 2 verbose = every daemon call)\nexport KNOCODE_LOG_LEVEL=\"warn\"\n"
+        );
+    }
+
+    #[test]
+    fn test_remove_rc_export_removes_export_and_marker() {
+        let text = "# KNOCODE_BIN_PATH: knocode AI runtime CLI + daemon\nexport PATH=\"$HOME/.knocode/bin:$PATH\"\n\n# KNOCODE_LOG_LEVEL: knocode log verbosity (0 quiet / 1 normal / 2 verbose = every daemon call)\nexport KNOCODE_LOG_LEVEL=\"debug\"\n";
+        let out = remove_rc_export(text).unwrap();
+        assert!(!out.contains("KNOCODE_LOG_LEVEL"));
+        assert!(out.contains("export PATH="));
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn test_remove_rc_export_noop_when_absent() {
+        assert!(remove_rc_export("export PATH=\"x\"\n").is_none());
+        // A marker comment with no export below it survives.
+        let text = "# KNOCODE_LOG_LEVEL: dangling marker\n";
+        assert!(remove_rc_export(text).is_none());
+    }
+
+    #[test]
+    fn test_upsert_logging_level_heals_duplicated_key_corruption() {
+        // Regression: an installer regex once wrote `level = level = "debug"`
+        // (group-ref + full-line replacement), which the daemon cannot parse.
+        // The upsert must replace the WHOLE broken line, not append to it.
+        let dir = std::env::temp_dir().join(format!("knocode_cfg_test_heal_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        std::fs::write(&p, "[logging]\nlevel = level = \"debug\"\n").unwrap();
+        upsert_logging_level(&p, "info").unwrap();
+        let t = std::fs::read_to_string(&p).unwrap();
+        let v: toml::Value = toml::from_str(&t).expect("healed file must be valid TOML");
+        assert_eq!(v["logging"]["level"].as_str(), Some("info"));
+        assert!(!t.contains("level = level"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_upsert_logging_level_creates_new_file() {
+        let dir = std::env::temp_dir().join(format!("knocode_cfg_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("nested").join("config.toml");
+        upsert_logging_level(&p, "warn").unwrap();
+        let t = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(t, "[logging]\nlevel = \"warn\"\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_upsert_logging_level_ignores_level_in_other_sections() {
+        let dir = std::env::temp_dir().join(format!("knocode_cfg_test_sections_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("config.toml");
+        // `level` under [rtk] must NOT be touched; [logging] has no level → insert one.
+        std::fs::write(&p, "[rtk]\nlevel = \"keepme\"\n\n[logging]\nfile_path = \"x\"\n").unwrap();
+        upsert_logging_level(&p, "info").unwrap();
+        let t = std::fs::read_to_string(&p).unwrap();
+        let v: toml::Value = toml::from_str(&t).unwrap();
+        assert_eq!(v["rtk"]["level"].as_str(), Some("keepme"));
+        assert_eq!(v["logging"]["level"].as_str(), Some("info"));
+        assert_eq!(v["logging"]["file_path"].as_str(), Some("x"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

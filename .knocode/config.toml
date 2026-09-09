@@ -20,17 +20,16 @@ path = "~/.knocode/data.db"
 languages = [
     "rust",
     "markdown",
-    "toml",
     "json",
-    "shell",
     "typescript",
-    "yaml",
+    "toml",
+    "shell",
     "sql",
-    "python",
     "yaml",
+    "javascript",
+    "python",
 ]
 path = "~/.knocode/index/"
-# Watch mode for auto-reindexing: "commit" (default, triggers on git commit) or "filesystem" (triggers on any file change)
 watch_mode = "commit"
 
 [knowledge]

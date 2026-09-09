@@ -308,9 +308,9 @@ impl RepositoryIntelligence {
             // Classify file using unified registry
             let file_class = classify_file(&path);
 
-            // Skip binary, vendor, dependency, generated, and stylesheet files
+            // Skip binary, vendor, dependency, and generated files
             match file_class {
-                FileClass::Binary | FileClass::Vendor | FileClass::Dependency | FileClass::Generated | FileClass::Stylesheet => {
+                FileClass::Binary | FileClass::Vendor | FileClass::Dependency | FileClass::Generated => {
                     debug!(path = %path_str, class = ?file_class, "Skipping file");
                     files_skipped += 1;
                     continue;
@@ -563,7 +563,6 @@ impl RepositoryIntelligence {
                     FileClass::Vendor => "Vendor",
                     FileClass::Dependency => "Dependency",
                     FileClass::Binary => "Binary",
-                    FileClass::Stylesheet => "Stylesheet",
                     FileClass::Unknown => "Unknown",
                 };
                 let _ = idx.add_document(writer, &job.path_str, &job.content, lang_str, &extract_result.sym_names, &extract_result.sym_kinds, &self.repository_id, file_class_str);
@@ -985,11 +984,32 @@ impl RepositoryIntelligence {
     /// Build dependency graph for the current repo (spec §3, ROADMAP.md:81).
     /// Result is cached in-memory + on disk — first call builds, subsequent calls (even new CLI processes) return instantly.
     pub fn build_dependency_graph(&self) -> Result<graph::DependencyGraph, String> {
+        if let Some(g) = self.graph_from_cache() {
+            return Ok(g);
+        }
+        self.build_and_cache_graph(&mut |_, _| {})
+    }
+
+    /// Build the dependency graph with per-file progress reporting.
+    /// Cache behavior matches `build_dependency_graph`; on a cache miss the progress
+    /// callback fires once with (0, total) before the first file and once after each file.
+    pub fn build_dependency_graph_with_progress(
+        &self,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<graph::DependencyGraph, String> {
+        if let Some(g) = self.graph_from_cache() {
+            return Ok(g);
+        }
+        self.build_and_cache_graph(progress)
+    }
+
+    /// In-memory + disk cache lookup for the dependency graph.
+    fn graph_from_cache(&self) -> Option<graph::DependencyGraph> {
         // 1. Check in-memory cache first
         {
-            let cache = graph_cache().lock().map_err(|e| format!("graph cache lock: {e}"))?;
+            let cache = graph_cache().lock().ok()?;
             if let Some(g) = cache.get(&self.repository_id) {
-                return Ok(g.clone());
+                return Some(g.clone());
             }
         }
         // 2. Check disk cache
@@ -997,25 +1017,32 @@ impl RepositoryIntelligence {
         if disk_path.exists() {
             if let Ok(data) = std::fs::read_to_string(&disk_path) {
                 if let Ok(graph) = serde_json::from_str::<graph::DependencyGraph>(&data) {
-                    let mut cache = graph_cache().lock().map_err(|e| format!("graph cache lock: {e}"))?;
-                    cache.insert(self.repository_id.clone(), graph.clone());
+                    if let Ok(mut cache) = graph_cache().lock() {
+                        cache.insert(self.repository_id.clone(), graph.clone());
+                    }
                     if std::env::var("KNOCODE_PROFILE").is_ok() {
                         eprintln!("[profile] code_search.build_dependency_graph: 0ms (disk cache hit)");
                     }
-                    return Ok(graph);
+                    return Some(graph);
                 }
             }
         }
-        // 3. Cache miss — build graph
+        None
+    }
+
+    /// Cache miss — build the graph from a fresh walk, then store in memory + on disk.
+    fn build_and_cache_graph(
+        &self,
+        progress: &mut dyn FnMut(usize, usize),
+    ) -> Result<graph::DependencyGraph, String> {
         let _t = Instant::now();
         let files = self.walk_directory(&self.repo_path)?;
-        let graph = graph::DependencyGraph::build_from_files(&self.repo_path, &files);
+        let graph = graph::DependencyGraph::build_from_files_with_progress(&self.repo_path, &files, progress);
         if std::env::var("KNOCODE_PROFILE").is_ok() {
             eprintln!("[profile] code_search.build_dependency_graph: {}ms ({} files)", _t.elapsed().as_millis(), files.len());
         }
-        // 4. Store in memory + disk cache
-        {
-            let mut cache = graph_cache().lock().map_err(|e| format!("graph cache lock: {e}"))?;
+        // Store in memory + disk cache
+        if let Ok(mut cache) = graph_cache().lock() {
             cache.insert(self.repository_id.clone(), graph.clone());
         }
         // Persist to disk for cross-process cache (CLI invocations)
