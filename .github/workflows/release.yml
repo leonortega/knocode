@@ -320,6 +320,8 @@ jobs:
             artifacts/**/*
             installers/knocode-install.ps1
             installers/knocode-install.sh
+            scripts/uninstall.ps1
+            scripts/uninstall.sh
           body_path: release-body.md
           draft: false
           prerelease: false

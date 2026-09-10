@@ -7,17 +7,24 @@
  * — the exact shape VS Code expects. It never prints anything else to stdout.
  *
  * Events (passed as argv[2], also read from hook_event_name):
- *   session-start        -> inject repository context via knocode_context  (additionalContext)
- *   user-prompt-submit   -> enrich the user's prompt context via knocode_context (additionalContext)
+ *   user-prompt-submit   -> enrich the user's prompt via knocode_context (additionalContext)
+ *   pre-tool-use         -> retry fallback: enriches the cached prompt when submit failed
+ *
+ * Verified on VS Code 1.137 / Copilot Chat 0.65: `UserPromptSubmit` DOES honor
+ * `hookSpecificOutput.additionalContext` (the Hooks log records it under Output
+ * and the agent answers with repo context), despite the reference docs claiming
+ * that event "uses the common output format only". So submit is the primary
+ * injection point — it fires on every turn, including tool-less answers where
+ * `PreToolUse` never runs. On submit failure (daemon down, timeout, passthrough)
+ * the prompt is cached per session and `PreToolUse` injects consume-once on the
+ * first tool call of the turn instead. Submit success writes no cache, so a turn
+ * never pays double injection. There is no `SessionStart` hook: a synthetic-probe
+ * overview fires once per session, is generic (not query-specific), and is stale
+ * after the first turn.
  *
  * Tool-output compression is intentionally NOT handled here: RTK (github.com/rtk-ai/rtk)
  * owns the command-rewriting/compression layer — the knocode installer wires RTK's own
  * Copilot integration when the user opts in. Knocode stays focused on repository context.
- *
- * The hooks that run this script can ONLY inject extra context or block — VS Code does
- * not expose a prompt-rewrite hook. So `UserPromptSubmit` is the faithful analog of the
- * opencode plugin's `session.prompt` admission hook: context is fetched from the USER'S
- * ACTUAL PROMPT (not a synthetic probe), while `SessionStart` seeds a warm overview.
  * (knocode's old PreToolUse hook was removed: RTK owns the Copilot PreToolUse layer for
  * command rewriting, and a second PreToolUse just duplicated daemon calls per tool.)
  *
@@ -27,18 +34,19 @@
  * Env:
  *   KNOCODE_DAEMON_URL              daemon base URL            (default http://127.0.0.1:9527)
  *   KNOCODE_TIMEOUT_MS              per MCP call timeout (ms)  (default 15000)
- *   KNOCODE_READY_TIMEOUT_MS        session-start readiness    (default 5000, 0 disables)
+ *   PLUGIN_DATA                     writable plugin state dir (cache location; falls back to os.tmpdir())
  *
  * Requires Node.js >= 18 (global fetch + AbortSignal.timeout).
  */
 
 import * as readline from "node:readline";
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 const DAEMON_URL = process.env.KNOCODE_DAEMON_URL || "http://127.0.0.1:9527";
 const TIMEOUT_MS = num("KNOCODE_TIMEOUT_MS", 15000);
-const READY_TIMEOUT_MS = num("KNOCODE_READY_TIMEOUT_MS", 5000);
-const READY_POLL_MS = 250;
 
 function num(env, def) {
   const n = Number(process.env[env]);
@@ -96,76 +104,59 @@ async function mcpCall(method, params) {
   }
 }
 
-/** Wait (bounded, fail-open) until the daemon reports ready via GET /health. */
-async function daemonReady(timeoutMs) {
-  if (!timeoutMs) return true; // readiness disabled
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const remaining = deadline - Date.now();
-    const controller = new AbortController();
-    // Manual timeout (NOT AbortSignal.timeout): its native timer can crash libuv
-    // on Windows when combined with process.exit() right after a response.
-    const timer = setTimeout(() => controller.abort(), Math.min(2000, Math.max(1, remaining)));
-    try {
-      const res = await fetch(`${DAEMON_URL}/health`, { signal: controller.signal });
-      clearTimeout(timer);
-      if (res.ok) {
-        let state;
-        try { state = (await res.json())?.state; } catch { /* non-JSON body => ready */ }
-        if (state === undefined || state === "ready") return true;
-      }
-    } catch {
-      clearTimeout(timer);
-      return false; // unreachable
-    }
-    await new Promise((r) => setTimeout(r, READY_POLL_MS));
+// ---------------------------------------------------------------------------
+// Per-turn prompt cache — fallback only. Submit is the primary injection point;
+// the prompt is stashed per session_id ONLY when submit-time enrichment failed,
+// so PreToolUse can retry once on the first tool call of the turn.
+// ---------------------------------------------------------------------------
+
+/** Session id from any known hook-input shape (VS Code uses snake_case). */
+function sessionIdOf(input) {
+  const id = input?.session_id ?? input?.sessionId ?? input?.sessionID;
+  return typeof id === "string" && id.trim().length > 0 ? id : undefined;
+}
+
+function cacheDir() {
+  const base = process.env.PLUGIN_DATA || os.tmpdir();
+  return path.join(base, "knocode-hooks");
+}
+
+function cachePath(sessionId) {
+  const safe = String(sessionId).replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128) || "default";
+  return path.join(cacheDir(), `${safe}.json`);
+}
+
+function writePromptCache(sessionId, entry) {
+  try {
+    fs.mkdirSync(cacheDir(), { recursive: true });
+    fs.writeFileSync(cachePath(sessionId), JSON.stringify(entry), "utf8");
+  } catch (err) {
+    log(`prompt cache write failed: ${err?.message || err}`);
   }
-  return false;
+}
+
+/** Read + delete (consume-once per user turn). Returns null on cache miss. */
+function consumePromptCache(sessionId) {
+  const file = cachePath(sessionId);
+  let raw;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  try {
+    fs.unlinkSync(file);
+  } catch { /* best-effort */ }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Per-event handlers — each returns a hook output object or {} (no-op)
 // ---------------------------------------------------------------------------
-
-async function handleSessionStart(input) {
-  if (READY_TIMEOUT_MS && !(await daemonReady(READY_TIMEOUT_MS))) {
-    if (verbosity() >= 1) log("daemon not ready; skipping session context");
-    return {};
-  }
-  const repositoryPath = input?.cwd || process.cwd();
-  const probe =
-    "Give a concise overview of this repository: project purpose, structure, key " +
-    "modules, and conventions. Use this to seed the session context.";
-  // §7 request correlation: client-generated id echoed by the daemon in its log line
-  // and structuredContent, so hook-side and daemon-side lines join per request.
-  const requestId = randomUUID();
-  const startedAt = Date.now();
-  const out = await mcpCall("tools/call", {
-    name: "knocode_context",
-    arguments: { prompt: probe, repository_path: repositoryPath, request_id: requestId },
-  });
-  // Correlation/metrics line at verbosity ≥ 1; failures stay visible at verbosity 0.
-  if (out.kind !== "ok" || verbosity() >= 1) {
-    log(`context request_id=${requestId} kind=${out.kind} latency=${Date.now() - startedAt}ms (session-start)`);
-  }
-  if (out.kind !== "ok") return {};
-  const text = resultText(out.result);
-  if (!text) return {};
-  // Verbosity 2: show the payload Copilot will actually receive (first 400 chars).
-  if (verbosity() >= 2) {
-    const total = text.length;
-    const preview = text.slice(0, 400).replace(/\r?\n/g, "\\n");
-    log(`payload (${total} chars): ${preview}${total > 400 ? `… (+${total - 400} chars)` : ""}`);
-  }
-  return {
-    hookSpecificOutput: {
-      hookEventName: "SessionStart",
-      // Context block only — the replacement's prefix is the synthetic probe text,
-      // which is noise in a session-seed digest.
-      additionalContext: `[knocode] repository context:\n${(splitContextPrefix(text).context ?? text)}`,
-    },
-  };
-}
 
 async function handleUserPromptSubmit(input) {
   const prompt = input?.prompt;
@@ -183,6 +174,65 @@ async function handleUserPromptSubmit(input) {
   if (out.kind !== "ok" || verbosity() >= 1) {
     log(`context request_id=${requestId} kind=${out.kind} latency=${Date.now() - startedAt}ms (user-prompt-submit)`);
   }
+  if (out.kind === "ok") {
+    const text = resultText(out.result);
+    if (text) {
+      // Verbosity 2: show the payload Copilot will actually receive (first 400 chars).
+      if (verbosity() >= 2) {
+        const total = text.length;
+        const preview = text.slice(0, 400).replace(/\r?\n/g, "\\n");
+        log(`payload (${total} chars): ${preview}${total > 400 ? `… (+${total - 400} chars)` : ""}`);
+      }
+      // Success writes NO cache — the turn already has its context, and PreToolUse
+      // must not inject a second time.
+      return {
+        hookSpecificOutput: {
+          hookEventName: "UserPromptSubmit",
+          additionalContext: userPromptContext(text),
+        },
+      };
+    }
+  }
+  // Submit failed (daemon down, timeout, passthrough): cache for the PreToolUse
+  // retry instead of dropping the turn's context entirely.
+  const sessionId = sessionIdOf(input);
+  if (sessionId) {
+    writePromptCache(sessionId, {
+      prompt,
+      cwd: repositoryPath,
+      timestamp: input?.timestamp,
+    });
+    if (verbosity() >= 2) log(`submit enrichment failed — prompt cached for session ${sessionId} (PreToolUse retry)`);
+  } else if (verbosity() >= 2) {
+    log("submit enrichment failed without session_id — prompt not cached");
+  }
+  return {};
+}
+
+async function handlePreToolUse(input) {
+  const toolName = typeof input?.tool_name === "string" ? input.tool_name : "";
+  // Never enrich knocode's own tool calls — the tool result already is context.
+  if (/knocode/i.test(toolName)) return {};
+  const sessionId = sessionIdOf(input);
+  if (!sessionId) return {};
+  const cached = consumePromptCache(sessionId);
+  if (!cached || typeof cached.prompt !== "string" || cached.prompt.trim().length === 0) {
+    return {}; // no cached prompt (later tool call in the same turn) — inject once only
+  }
+  const repositoryPath = cached.cwd || input?.cwd || process.cwd();
+  const prompt = cached.prompt;
+  // §7 request correlation — same contract as the OpenCode plugin (request_id echoed
+  // in the daemon's "MCP knocode_context built" log line and structuredContent).
+  const requestId = randomUUID();
+  const startedAt = Date.now();
+  const out = await mcpCall("tools/call", {
+    name: "knocode_context",
+    arguments: { prompt, repository_path: repositoryPath, request_id: requestId },
+  });
+  // Correlation/metrics line at verbosity ≥ 1; failures stay visible at verbosity 0.
+  if (out.kind !== "ok" || verbosity() >= 1) {
+    log(`context request_id=${requestId} kind=${out.kind} latency=${Date.now() - startedAt}ms (pre-tool-use tool=${toolName || "?"})`);
+  }
   if (out.kind !== "ok") return {};
   const text = resultText(out.result);
   if (!text) return {};
@@ -194,7 +244,7 @@ async function handleUserPromptSubmit(input) {
   }
   return {
     hookSpecificOutput: {
-      hookEventName: "UserPromptSubmit",
+      hookEventName: "PreToolUse",
       additionalContext: userPromptContext(text),
     },
   };
@@ -227,7 +277,7 @@ function splitContextPrefix(text) {
 }
 
 /**
- * Build the UserPromptSubmit additionalContext for a daemon replacement:
+ * Build the PreToolUse additionalContext for a daemon replacement:
  * context block only (never the prompt prefix — VS Code already has it).
  */
 function userPromptContext(replacement) {
@@ -244,12 +294,12 @@ function userPromptContext(replacement) {
 async function run(event, input) {
   try {
     switch (event) {
-      case "session-start":
-      case "sessionstart":
-        return await handleSessionStart(input);
       case "user-prompt-submit":
       case "userpromptsubmit":
         return await handleUserPromptSubmit(input);
+      case "pre-tool-use":
+      case "pretooluse":
+        return await handlePreToolUse(input);
       default:
         log(`unknown event: ${event}`);
         return {};

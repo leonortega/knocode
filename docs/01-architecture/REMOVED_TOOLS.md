@@ -77,11 +77,12 @@ the runtime should not own the concept:
   load/match, the daemon's skill loading, the CLI `skills` subcommand + `--community-skills` install,
   `[skills]` config, and the bundled skill library (`.knocode/skills`, `~/.knocode/skills`) are all
   gone. Context packs now carry docs + code context only.
-- **Retained — the agent-facing `knocode` skill** (`.knocode/skills/knocode/SKILL.md`). Skills live in
+- **Retained — the agent-facing `knocode` skill** (`.knocode/skills-universal/knocode/SKILL.md`, MCP-first wording). Skills live in
   the agent's own ecosystem, and knocode ships one skill that teaches the agent how to use the
-  runtime (binary location, init/doctor, MCP tools). The installers copy it to the agent's global
-  skills directory (`~/.config/opencode/skills/knocode/`) per-agent — opencode today, others as
-  adapters land — and the uninstallers remove that copy. This is an agent-native integration, not a
+  runtime (binary location, init/doctor, `knocode_context` MCP tool). The installers copy it to each
+  universal agent's global skills directory (Claude Code, Cursor, Gemini CLI, Codex, Cline) alongside
+  a `knocode` MCP server entry — opencode and Copilot get no skill (plugin/hooks cover them) — and the
+  uninstallers remove those copies. This is an agent-native integration, not a
   runtime-owned concept: the runtime never matches or injects skills itself.
 
 ### Model map / tier config (current change)

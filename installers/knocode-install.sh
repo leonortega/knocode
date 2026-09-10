@@ -556,4 +556,5 @@ fi
 
 info "Done - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | agents: $(if [ -n "$AGENT_SEL" ]; then echo "$AGENT_SEL"; else echo none; fi) | rtk: ${RTK_STATUS:-unknown}"
 info "Next steps: open a new terminal, run 'knocode init' inside a project."
+info "To uninstall later: curl -fsSL https://github.com/$REPO/releases/latest/download/uninstall.sh | bash -s -- --force"
 info "Docs: https://github.com/$REPO#readme"

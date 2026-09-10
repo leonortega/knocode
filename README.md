@@ -124,6 +124,26 @@ bash scripts/install.sh --agents opencode,copilot
 
 The integration bundles (`opencode-knocode`, `knocode-mcp`) ship inside every release zip — no npm registry needed; they only require Node.js, which the installer installs automatically if missing (along with Git). Pass `-AllAgents`/`--all-agents` to skip the prompt, `-NoAgents`/`--no-agents` to wire nothing, or `-SkipPrereqs`/`--skip-prereqs` to disable automatic prerequisite installs. Agent configs are written idempotently (re-running updates them).
 
+### Uninstall
+
+```powershell
+# Windows (one-liner, latest release)
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/leonortega/knocode/releases/latest/download/uninstall.ps1 | iex"
+```
+
+```bash
+# Linux / macOS (one-liner, latest release)
+curl -fsSL https://github.com/leonortega/knocode/releases/latest/download/uninstall.sh | bash -s -- --force
+```
+
+```bash
+# Developer uninstallers (source checkout)
+powershell -ExecutionPolicy Bypass -File scripts/uninstall.ps1 -Force  # add -RemoveRepo to also delete repo artifacts
+bash scripts/uninstall.sh --force                                       # add --remove-repo to also delete repo plugin files
+```
+
+By default the uninstaller removes binaries, agent integrations (OpenCode plugin + skill, Copilot hooks + skill, RTK integrations), external tools and global data (`~/.knocode`). Pass `-KeepExternal`/`--keep-external` or `-KeepData`/`--keep-data` to preserve tools or data, `-DryRun`/`--dry-run` to preview.
+
 ## Quick Start
 
 ```bash

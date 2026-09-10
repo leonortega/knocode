@@ -43,21 +43,28 @@ describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
   beforeEach(() => vi.restoreAllMocks());
   afterEach(() => vi.unstubAllGlobals());
 
-  /** Boot the plugin and capture the registered prompt-hook callback. */
-  async function makePromptHook(): Promise<{ hook: (event: any) => Promise<void> }> {
+  /** Boot the plugin and capture the registered prompt + context hook callbacks. */
+  async function makePromptHook(): Promise<{
+    hook: (event: any) => Promise<void>;
+    promptHook: (event: any) => Promise<void>;
+    contextHook: (event: any) => Promise<void>;
+  }> {
     const { KnocodePlugin } = await import("../src/index");
-    const hooks: Array<(event: any) => Promise<void>> = [];
+    const byName = new Map<string, (event: any) => Promise<void>>();
     await KnocodePlugin.setup({
       location: { directory: "/tmp", project: { canonical: "/repo/canonical" } },
       session: {
-        hook: async (_name: string, cb: any) => {
-          hooks.push(cb);
+        hook: async (name: string, cb: any) => {
+          byName.set(name, cb);
           return { dispose: async () => {} };
         },
       },
     } as any);
-    expect(hooks.length).toBe(1);
-    return { hook: hooks[0] };
+    expect(byName.has("prompt")).toBe(true);
+    expect(byName.has("context")).toBe(true);
+    const promptHook = byName.get("prompt")!;
+    // Legacy alias: existing tests call `hook(event)` for the prompt stage.
+    return { hook: promptHook, promptHook, contextHook: byName.get("context")! };
   }
 
   it("registers the session.prompt hook during setup", async () => {
@@ -66,7 +73,7 @@ describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
     expect(typeof hook).toBe("function");
   });
 
-  it("mutates event.prompt.text with the daemon context (canonical persisted input)", async () => {
+  it("leaves prompt.text untouched and injects context via the context hook", async () => {
     vi.stubGlobal(
       "fetch",
       stubDaemonFetch({
@@ -75,13 +82,25 @@ describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
         isError: false,
       }),
     );
-    const { hook } = await makePromptHook();
+    const { promptHook, contextHook } = await makePromptHook();
 
     const event: any = { sessionID: "s1", prompt: { text: "implement auth" } };
-    await hook(event);
+    await promptHook(event);
 
-    expect(event.prompt.text).toContain("\n\n---\n\nContext:\n");
-    expect(event.prompt.text.startsWith("implement auth")).toBe(true);
+    // Transcript stays exactly what the user typed.
+    expect(event.prompt.text).toBe("implement auth");
+
+    const ctxEvent: any = { sessionID: "s1", system: [] };
+    await contextHook(ctxEvent);
+
+    expect(ctxEvent.system).toHaveLength(1);
+    expect(ctxEvent.system[0].text).toContain("code_context: auth");
+    expect(ctxEvent.system[0].text).toContain("<repository context>");
+
+    // Consume-once: tool-driven continuations don't re-inject.
+    const ctxEvent2: any = { sessionID: "s1", system: [] };
+    await contextHook(ctxEvent2);
+    expect(ctxEvent2.system).toHaveLength(0);
   });
 
   it("sends the canonical project root as repository_path (TASK-036)", async () => {
@@ -132,15 +151,18 @@ describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
         isError: false,
       }),
     );
-    const { hook } = await makePromptHook();
+    const { hook, contextHook } = await makePromptHook();
 
     const event: any = { sessionID: "s1", prompt: { text: "unrelated prompt" } };
     await hook(event);
 
     expect(event.prompt.text).toBe("unrelated prompt");
+    const ctxEvent: any = { sessionID: "s1", system: [] };
+    await contextHook(ctxEvent);
+    expect(ctxEvent.system).toHaveLength(0);
   });
 
-  it("is idempotent: does not re-enrich a draft that already has context", async () => {
+  it("is idempotent: does not fetch when the draft already has context", async () => {
     const fetchMock = vi.fn().mockImplementation(async (url: any, init?: any) => {
       if (String(url).includes("/health")) {
         return { ok: true, status: 200, json: async () => ({ status: "ok", state: "ready" }) };
@@ -152,7 +174,7 @@ describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
       };
     });
     vi.stubGlobal("fetch", fetchMock);
-    const { hook } = await makePromptHook();
+    const { hook, contextHook } = await makePromptHook();
 
     const event: any = {
       sessionID: "s1",
@@ -161,6 +183,9 @@ describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
     await hook(event);
 
     expect(event.prompt.text).toBe("implement auth\n\n---\n\nContext:\ncode_context: auth");
+    const ctxEvent: any = { sessionID: "s1", system: [] };
+    await contextHook(ctxEvent);
+    expect(ctxEvent.system).toHaveLength(0);
     const toolsCalls = fetchMock.mock.calls.filter((c: any[]) => {
       try {
         return String(c[0]).includes("/mcp") && JSON.parse(c[1]?.body ?? "{}").method === "tools/call";
@@ -171,7 +196,7 @@ describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
     expect(toolsCalls).toHaveLength(0);
   });
 
-  it("stale attachment mention offsets are cleared when the rewrite breaks the prefix", async () => {
+  it("injects via context hook even when the rewrite breaks the prefix, prompt files untouched", async () => {
     vi.stubGlobal(
       "fetch",
       stubDaemonFetch({
@@ -180,16 +205,23 @@ describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
         isError: false,
       }),
     );
-    const { hook } = await makePromptHook();
+    const { hook, contextHook } = await makePromptHook();
 
     const file: any = { uri: "file:///repo/a.ts", mention: { start: 0, end: 4, text: "auth" } };
     const event: any = { sessionID: "s1", prompt: { text: "look at auth", files: [file] } };
     await hook(event);
 
-    expect(event.prompt.files[0].mention).toBeUndefined();
+    // Prompt never mutated, so attachment offsets stay valid.
+    expect(event.prompt.text).toBe("look at auth");
+    expect(event.prompt.files[0].mention).toEqual({ start: 0, end: 4, text: "auth" });
+
+    const ctxEvent: any = { sessionID: "s1", system: [] };
+    await contextHook(ctxEvent);
+    expect(ctxEvent.system).toHaveLength(1);
+    expect(ctxEvent.system[0].text).toContain("totally rewritten");
   });
 
-  it("preserves attachment mentions when the rewrite keeps the original text as prefix", async () => {
+  it("preserves attachment mentions and injects stripped context when prefix holds", async () => {
     vi.stubGlobal(
       "fetch",
       stubDaemonFetch({
@@ -198,7 +230,7 @@ describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
         isError: false,
       }),
     );
-    const { hook } = await makePromptHook();
+    const { hook, contextHook } = await makePromptHook();
 
     const mention = { start: 8, end: 12, text: "auth" };
     const event: any = {
@@ -207,7 +239,15 @@ describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
     };
     await hook(event);
 
+    expect(event.prompt.text).toBe("look at auth");
     expect(event.prompt.files[0].mention).toEqual(mention);
+
+    const ctxEvent: any = { sessionID: "s1", system: [] };
+    await contextHook(ctxEvent);
+    expect(ctxEvent.system).toHaveLength(1);
+    // Context-only strip: system carries the YAML, not the echoed prompt.
+    expect(ctxEvent.system[0].text).toContain("code_context: auth");
+    expect(ctxEvent.system[0].text).not.toContain("look at auth\n\n---");
   });
 
   it("skips empty/whitespace prompts without calling the daemon", async () => {
@@ -215,7 +255,7 @@ describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
     // an undefined-response mock and spam stderr (the bare vi.fn() used to).
     const fetchMock = stubDaemonFetch({ content: [] });
     vi.stubGlobal("fetch", fetchMock);
-    const { hook } = await makePromptHook();
+    const { hook, contextHook } = await makePromptHook();
     fetchMock.mockClear(); // setup's fire-and-forget MCP initialize may have raced ahead
 
     const event: any = { sessionID: "s1", prompt: { text: "   " } };
@@ -223,17 +263,23 @@ describe("KnocodePlugin (V2 spec: Plugin.define + session.prompt)", () => {
 
     expect(event.prompt.text).toBe("   ");
     expect(fetchMock).not.toHaveBeenCalled();
+    const ctxEvent: any = { sessionID: "s1", system: [] };
+    await contextHook(ctxEvent);
+    expect(ctxEvent.system).toHaveLength(0);
   });
 
   it("fails open when the daemon is unreachable", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
-    const { hook } = await makePromptHook();
+    const { hook, contextHook } = await makePromptHook();
 
     const event: any = { sessionID: "s1", prompt: { text: "implement auth" } };
     await hook(event);
 
     expect(event.prompt.text).toBe("implement auth");
+    const ctxEvent: any = { sessionID: "s1", system: [] };
+    await contextHook(ctxEvent);
+    expect(ctxEvent.system).toHaveLength(0);
     errSpy.mockRestore();
   });
 });
@@ -582,13 +628,13 @@ describe("resolveEventRepositoryPath (V2 per-prompt session lookup)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
     const { KnocodePlugin } = await import("../src/index");
-    const hooks: Array<(event: any) => Promise<void>> = [];
+    const byName = new Map<string, (event: any) => Promise<void>>();
     await KnocodePlugin.setup({
       // Simulates the reported bug: plugin instance loaded at drive root.
       location: { directory: "C:\\", project: { canonical: "C:\\", directory: "C:\\" } },
       session: {
-        hook: async (_name: string, cb: any) => {
-          hooks.push(cb);
+        hook: async (name: string, cb: any) => {
+          byName.set(name, cb);
           return { dispose: async () => {} };
         },
         get: async ({ sessionID }: any) => {
@@ -597,9 +643,10 @@ describe("resolveEventRepositoryPath (V2 per-prompt session lookup)", () => {
         },
       },
     } as any);
-    expect(hooks.length).toBe(1);
+    expect(byName.has("prompt")).toBe(true);
+    expect(byName.has("context")).toBe(true);
 
-    await hooks[0]({ sessionID: "sess-mattermost", prompt: { text: "what is the main class?" } });
+    await byName.get("prompt")!({ sessionID: "sess-mattermost", prompt: { text: "what is the main class?" } });
 
     const toolsCall = fetchMock.mock.calls.find((c: any[]) => {
       try {

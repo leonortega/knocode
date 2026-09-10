@@ -18,8 +18,8 @@ this plugin maps the context behavior onto the Copilot hook surface:
 
 | Hook | OpenCode analog | What Knocode does |
 |------|-----------------|-------------------|
-| `SessionStart` | prompt enrichment (warm) | injects a repository-context digest via `knocode_context` |
-| `UserPromptSubmit` | `session.prompt` (per-prompt) | injects the context block retrieved from the user's actual prompt via `knocode_context` (the daemon returns prompt + context as one replacement; the hook strips the prompt prefix so it is never duplicated) |
+| `UserPromptSubmit` | `session.prompt` (per-prompt) | injects the context block for the user's actual prompt via `knocode_context` (verified on VS Code 1.137 — fires every turn, including tool-less answers; the daemon returns prompt + context as one replacement and the hook strips the prompt prefix so it is never duplicated; on failure the prompt is cached for the `PreToolUse` retry so success never pays double) |
+| `PreToolUse` | `session.context` (retry) | consume-once fallback: injects the cached prompt's context on the first tool call when submit-time enrichment failed; knocode's own tool calls are skipped |
 
 > **Tool-output compression?** That is [RTK](https://github.com/rtk-ai/rtk)'s job now —
 > the knocode installer can install RTK and wire its own Copilot integration for you.
@@ -40,7 +40,7 @@ knocode-copilot/
 ├── servers/
 │   └── knocode-mcp.mjs          # GENERATED from packages/knocode-mcp (edits ignored)
 ├── com.github.copilot/
-│   └── hooks/hooks.json         # SessionStart / UserPromptSubmit wiring
+│   └── hooks/hooks.json         # UserPromptSubmit (cache) / PreToolUse (inject) wiring
 └── scripts/
     ├── knocode-hook.mjs         # cross-platform hook handler (fail-open)
     └── build.mjs                # regenerates servers/knocode-mcp.mjs
@@ -78,8 +78,8 @@ The hook handler and MCP server read the same env vars as the OpenCode plugin:
 | Variable | Default | Used by |
 |----------|---------|---------|
 | `KNOCODE_DAEMON_URL` | `http://127.0.0.1:9527` | hooks + MCP server |
-| `KNOCODE_TIMEOUT_MS` | `15000` | per MCP call timeout |
-| `KNOCODE_READY_TIMEOUT_MS` | `5000` (`0` disables) | `SessionStart` readiness wait |
+| `KNOCODE_TIMEOUT_MS` | `15000` | per MCP call timeout (`PreToolUse`) |
+| `PLUGIN_DATA` | `os.tmpdir()` | per-session prompt cache dir (`UserPromptSubmit` → `PreToolUse`) |
 
 ## Development
 

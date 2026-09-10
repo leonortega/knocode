@@ -7,7 +7,7 @@
     "cargo",
     "rust-workspace"
   ],
-  "generated_at_unix": 1789011844,
+  "generated_at_unix": 1789064391,
   "git_branch": "dev",
   "important_dirs": [
     "crates",
@@ -16,9 +16,9 @@
     "scripts"
   ],
   "index": {
-    "dependency_edges": 809,
+    "dependency_edges": 820,
     "files_indexed": 167,
-    "symbols_extracted": 1529
+    "symbols_extracted": 1543
   },
   "languages": [
     {
@@ -30,7 +30,7 @@
       "name": "markdown"
     },
     {
-      "files": 20,
+      "files": 22,
       "name": "json"
     },
     {

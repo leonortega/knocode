@@ -652,4 +652,5 @@ if ($daemonUp) {
 
 Write-Step "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | agents: $(if ($agentSel.Count -gt 0) { $agentSel -join ', ' } else { 'none' }) | rtk: $rtkStatus"
 Write-Step "Next steps: open a new terminal, run 'knocode init' inside a project."
+Write-Step "To uninstall later: powershell -ExecutionPolicy Bypass -c `"irm https://github.com/$Repo/releases/latest/download/uninstall.ps1 | iex`""
 Write-Step "Docs: https://github.com/$Repo#readme"

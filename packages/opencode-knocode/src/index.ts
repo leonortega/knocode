@@ -3,9 +3,11 @@
  *
  * OpenCode V2 plugin API (@opencode-ai/plugin "beta", Plugin.define + ctx.session.hook):
  * the `session.prompt` hook intercepts the incoming user prompt BEFORE attachment and
- * skill resolution and durable inbox admission, and receives an owned, mutable draft
- * (`prompt.text`, `prompt.files`, `metadata`, `delivery`). Edits become the canonical
- * persisted user input for that admission.
+ * skill resolution and durable inbox admission. It is fetch-only here: it never
+ * mutates `prompt.text`, so the transcript stays exactly what the user typed.
+ * The `session.context` hook injects the fetched repository context as a system
+ * part right before each model call — invisible in the chat transcript, visible
+ * to the model on that request only.
  *
  * OpenCode V1 plugin API (@opencode-ai/plugin 1.x, server() + hooks): the `chat.message`
  * hook signature is `(input:{sessionID...}, output:{message:UserMessage, parts:Part[]})`
@@ -14,8 +16,8 @@
  * the default export spreads Plugin.define({ id, setup }) AND carries a server() function;
  * V1 calls server(), V2 reads id/setup() and ignores server().
  *
- * Knocode uses both to enrich the prompt with repository context from the daemon
- * (MCP `POST /mcp` → `tools/call knocode_context`).
+ * Knocode uses prompt-fetch + system-inject on V2 (clean transcript) and keeps
+ * in-place enrichment on V1 (no system-transform hook there today).
  *
  * The daemon client (MCP transport, readiness gate, request correlation, tagged
  * context outcomes) is the shared single source of truth in
@@ -29,12 +31,13 @@
  * integrations when the user opts in. Knocode stays focused on repository context.
  *
  * Fail-open: any daemon error/timeout results in no-op passthrough (the user's prompt
- * is admitted byte-identical).
+ * is admitted byte-identical, no system part injected).
  *
  * Retry-safety (per V2 docs): prompt hooks are not an exactly-once boundary — a retry
  * of an already-admitted prompt ID does not re-run hooks, and only the first successful
- * admission wins. A delimiter guard additionally keeps the enrichment idempotent for
- * any replays that DO re-run the hook on an already-enriched draft.
+ * admission wins. The prompt hook never mutates text so replays cannot stack;
+ * the context hook consumes pending context once per user turn (delete after
+ * first injection) so tool-driven continuations don't re-pay tokens.
  */
 
 import { Plugin } from "@opencode-ai/plugin";
@@ -105,6 +108,28 @@ export const consoleServerLogger: ServerLogger = (verbosity, _level, message) =>
  * wire format or it can never fire against production output.)
  */
 export const CONTEXT_DELIMITER = "\n\n---\n\nContext:\n";
+
+/**
+ * Derive the context-only payload for system injection (interim client-side
+ * strip — the daemon returns only the full `message + delimiter + yaml` blob).
+ * When the daemon's prefix invariant holds (`enriched` starts with the original
+ * prompt), return just the context portion; otherwise fall back to the full
+ * enriched text so no context is silently dropped.
+ * Exported for tests.
+ */
+export function extractContextOnly(enriched: string, original: string): string {
+  if (enriched.startsWith(original)) return enriched.slice(original.length);
+  return enriched;
+}
+
+/**
+ * Wrap the stripped context as an explicit system block so the model sees a
+ * delimited section, not a bare YAML dump.
+ */
+export function wrapContextForSystem(contextOnly: string): string {
+  const inner = contextOnly.trim();
+  return `<repository context>\n${inner}\n</repository context>`;
+}
 
 /**
  * Resolve the agent workspace root from the V2 plugin context.
@@ -374,19 +399,25 @@ export const KnocodePlugin = Plugin.define({
 
     logAtVerbosity(1, `[knocode] Plugin initialized (repository fallback: ${setupRepositoryPath})`);
 
+    // Pending system injections, keyed by sessionID (last-write-wins for
+    // concurrent prompts in one session). Set by the prompt hook, consumed
+    // once by the context hook. Never persists across turns.
+    const pending = new Map<string, string>();
+
     // --- session.prompt hook ---------------------------------------------
-    // Runs once during prompt admission (before attachments/skills/inbox). Mutating
-    // `event.prompt.text` makes the enriched text the canonical persisted user input.
-    // Fail-open: passthrough leaves the draft untouched.
+    // Fetch-only: resolve repo, fetch context, stash for the context hook.
+    // Never touches `event.prompt.text` — the transcript stays exactly what
+    // the user typed. Fail-open: passthrough stores nothing.
     await ctx.session.hook("prompt", async (event: any) => {
       const text: string | undefined = event?.prompt?.text;
       if (!text || text.trim().length === 0) return;
 
-      // Idempotency guard: a replayed admission that re-runs this hook on an
-      // already-enriched draft must not stack a second context block. A prompt that
-      // naturally contains the daemon delimiter would skip enrichment too — the
-      // fail-open direction (no double-stacked context beats a missing one).
+      // Skip redundant fetch when the draft already carries context (e.g. user
+      // pasted a transcript back). Fail-open direction: no fetch beats double.
       if (text.includes(CONTEXT_DELIMITER)) return;
+
+      const sessionID: string | undefined = event?.sessionID ?? event?.sessionId;
+      if (!sessionID) return;
 
       // Per-prompt session directory (multi-repo): the setup-time fallback only
       // applies when the session lookup is unavailable.
@@ -394,16 +425,21 @@ export const KnocodePlugin = Plugin.define({
       const enriched = await enrichPromptText(text, repositoryPath);
       if (enriched === undefined) return;
 
-      event.prompt.text = enriched;
+      pending.set(sessionID, wrapContextForSystem(extractContextOnly(enriched, text)));
+    });
 
-      // V2 docs: "When rewriting text, update or remove attachment mention offsets
-      // that no longer match." The daemon preserves the original text as a prefix;
-      // only when that invariant breaks do the file-mention offsets go stale.
-      if (!enriched.startsWith(text) && Array.isArray(event.prompt.files)) {
-        for (const file of event.prompt.files) {
-          delete (file as any)?.mention;
-        }
-      }
+    // --- session.context hook --------------------------------------------
+    // Invisible injection: system part on the outgoing model call only, not
+    // persisted history. Consume-once per user turn — tool-driven
+    // continuations within the same turn don't re-inject (saves tokens).
+    await ctx.session.hook("context", async (event: any) => {
+      const sessionID: string | undefined = event?.sessionID ?? event?.sessionId;
+      if (!sessionID) return;
+      const ctxText = pending.get(sessionID);
+      if (!ctxText) return;
+      pending.delete(sessionID);
+      event.system ??= [];
+      event.system.push({ text: ctxText });
     });
   },
 });
