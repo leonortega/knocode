@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { resolveRepositoryPath, server as v1Server } from "../src/index";
+import {
+  resolveRepositoryPath,
+  extractSessionDirectory,
+  resolveEventRepositoryPath,
+  resolveV1MessageRepositoryPath,
+  server as v1Server,
+} from "../src/index";
 
 // Client contract tests (config env vars, readiness gate, mcpCall envelope,
 // requestContextEnrichment outcomes) live in packages/knocode-client/test —
@@ -249,7 +255,7 @@ describe("V1 server() (OpenCode 1.x: server() + chat.message)", () => {
     expect(typeof hooks["chat.message"]).toBe("function");
   });
 
-  it("enriches a user message in place (string content)", async () => {
+  it("enriches output.parts text in place (stable 1.x signature)", async () => {
     vi.stubGlobal(
       "fetch",
       stubDaemonFetch({
@@ -260,14 +266,18 @@ describe("V1 server() (OpenCode 1.x: server() + chat.message)", () => {
     );
     const hooks = await v1Server({ worktree: "/repo/worktree" });
 
-    const msg: any = { role: "user", content: "implement auth" };
-    await hooks["chat.message"]({ message: msg, sessionID: "s1" }, {});
+    const output: any = {
+      message: { role: "user" },
+      parts: [{ type: "text", text: "implement auth" }],
+    };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
 
-    expect(msg.content).toContain("\n\n---\n\nContext:\n");
-    expect(msg.content.startsWith("implement auth")).toBe(true);
+    expect(output.parts).toHaveLength(1);
+    expect(output.parts[0].text).toContain("\n\n---\n\nContext:\n");
+    expect(output.parts[0].text.startsWith("implement auth")).toBe(true);
   });
 
-  it("enriches array-part content by replacing text parts", async () => {
+  it("joins multiple text parts and preserves non-text parts", async () => {
     vi.stubGlobal(
       "fetch",
       stubDaemonFetch({
@@ -278,12 +288,20 @@ describe("V1 server() (OpenCode 1.x: server() + chat.message)", () => {
     );
     const hooks = await v1Server({ worktree: "/repo/worktree" });
 
-    const msg: any = { role: "user", content: [{ type: "text", text: "implement auth" }] };
-    await hooks["chat.message"]({ message: msg, sessionID: "s1" }, {});
+    const output: any = {
+      message: { role: "user" },
+      parts: [
+        { type: "text", text: "implement" },
+        { type: "file", path: "/repo/a.ts" },
+        { type: "text", text: "auth" },
+      ],
+    };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
 
-    expect(Array.isArray(msg.content)).toBe(true);
-    expect(msg.content).toHaveLength(1);
-    expect(msg.content[0].text).toContain("\n\n---\n\nContext:\n");
+    const texts = output.parts.filter((p: any) => p?.type === "text");
+    expect(texts).toHaveLength(1);
+    expect(texts[0].text).toContain("\n\n---\n\nContext:\n");
+    expect(output.parts.some((p: any) => p?.type === "file")).toBe(true);
   });
 
   it("passes through untouched on daemon passthrough (no_context_hits)", async () => {
@@ -297,10 +315,13 @@ describe("V1 server() (OpenCode 1.x: server() + chat.message)", () => {
     );
     const hooks = await v1Server({ worktree: "/repo/worktree" });
 
-    const msg: any = { role: "user", content: "unrelated prompt" };
-    await hooks["chat.message"]({ message: msg, sessionID: "s1" }, {});
+    const output: any = {
+      message: { role: "user" },
+      parts: [{ type: "text", text: "unrelated prompt" }],
+    };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
 
-    expect(msg.content).toBe("unrelated prompt");
+    expect(output.parts[0].text).toBe("unrelated prompt");
   });
 
   it("is idempotent: does not re-enrich an already-enriched message", async () => {
@@ -317,10 +338,13 @@ describe("V1 server() (OpenCode 1.x: server() + chat.message)", () => {
     vi.stubGlobal("fetch", fetchMock);
     const hooks = await v1Server({ worktree: "/repo/worktree" });
 
-    const msg: any = { role: "user", content: "already\n\n---\n\nContext:\ncode_context: auth" };
-    await hooks["chat.message"]({ message: msg, sessionID: "s1" }, {});
+    const output: any = {
+      message: { role: "user" },
+      parts: [{ type: "text", text: "already\n\n---\n\nContext:\ncode_context: auth" }],
+    };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
 
-    expect(msg.content).toBe("already\n\n---\n\nContext:\ncode_context: auth");
+    expect(output.parts[0].text).toBe("already\n\n---\n\nContext:\ncode_context: auth");
     const toolsCalls = fetchMock.mock.calls.filter((c: any[]) => {
       try {
         return String(c[0]).includes("/mcp") && JSON.parse(c[1]?.body ?? "{}").method === "tools/call";
@@ -343,13 +367,19 @@ describe("V1 server() (OpenCode 1.x: server() + chat.message)", () => {
     await new Promise((r) => setTimeout(r, 0));
     fetchMock.mockClear();
 
-    const assistant: any = { role: "assistant", content: "hi" };
-    await hooks["chat.message"]({ message: assistant, sessionID: "s1" }, {});
-    expect(assistant.content).toBe("hi");
+    const assistantOut: any = {
+      message: { role: "assistant" },
+      parts: [{ type: "text", text: "hi" }],
+    };
+    await hooks["chat.message"]({ sessionID: "s1" }, assistantOut);
+    expect(assistantOut.parts[0].text).toBe("hi");
 
-    const empty: any = { role: "user", content: "   " };
-    await hooks["chat.message"]({ message: empty, sessionID: "s1" }, {});
-    expect(empty.content).toBe("   ");
+    const emptyOut: any = {
+      message: { role: "user" },
+      parts: [{ type: "text", text: "   " }],
+    };
+    await hooks["chat.message"]({ sessionID: "s1" }, emptyOut);
+    expect(emptyOut.parts[0].text).toBe("   ");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -358,11 +388,52 @@ describe("V1 server() (OpenCode 1.x: server() + chat.message)", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
     const hooks = await v1Server({ worktree: "/repo/worktree" });
 
-    const msg: any = { role: "user", content: "implement auth" };
-    await hooks["chat.message"]({ message: msg, sessionID: "s1" }, {});
+    const output: any = {
+      message: { role: "user" },
+      parts: [{ type: "text", text: "implement auth" }],
+    };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
 
-    expect(msg.content).toBe("implement auth");
+    expect(output.parts[0].text).toBe("implement auth");
     errSpy.mockRestore();
+  });
+
+  it("routes init + outcome lines through client.app.log when a client is present", async () => {
+    vi.stubGlobal(
+      "fetch",
+      stubDaemonFetch({
+        content: [{ type: "text", text: "implement auth\n\n---\n\nContext:\ncode_context: auth" }],
+        structuredContent: { passthrough: false, total_tokens: 7, provenance: [{ path: "a" }] },
+        isError: false,
+      }),
+    );
+    const appLog = vi.fn().mockResolvedValue(true);
+    const hooks = await v1Server({ worktree: "/repo/worktree", client: { app: { log: appLog } } });
+
+    // Init line goes to the server logs, not stdout.
+    expect(appLog).toHaveBeenCalledWith(
+      expect.objectContaining({ body: expect.objectContaining({ service: "knocode", level: "info" }) }),
+    );
+    const initMsg = (appLog.mock.calls[0][0] as any).body.message as string;
+    expect(initMsg).toContain("Plugin initialized");
+
+    const output: any = {
+      message: { role: "user" },
+      parts: [{ type: "text", text: "implement auth" }],
+    };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
+
+    expect(output.parts[0].text).toContain("\n\n---\n\nContext:\n");
+    const messages = appLog.mock.calls.map((c: any[]) => (c[0] as any).body.message as string);
+    expect(messages.some((m: string) => m.includes("context request_id="))).toBe(true);
+  });
+
+  it("falls back to console.log when no client is present", async () => {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.stubGlobal("fetch", stubDaemonFetch({ content: [] }));
+    await v1Server({ worktree: "/repo/worktree" });
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("[knocode] Plugin initialized"));
+    logSpy.mockRestore();
   });
 
   it("sends the V1 worktree as repository_path (TASK-036)", async () => {
@@ -391,8 +462,11 @@ describe("V1 server() (OpenCode 1.x: server() + chat.message)", () => {
     vi.stubGlobal("fetch", fetchMock);
     const hooks = await v1Server({ worktree: "/repo/worktree" });
 
-    const msg: any = { role: "user", content: "hello" };
-    await hooks["chat.message"]({ message: msg, sessionID: "s1" }, {});
+    const output: any = {
+      message: { role: "user" },
+      parts: [{ type: "text", text: "hello" }],
+    };
+    await hooks["chat.message"]({ sessionID: "s1" }, output);
 
     const toolsCall = fetchMock.mock.calls.find((c: any[]) => {
       try {
@@ -425,6 +499,243 @@ describe("resolveRepositoryPath (V2 ctx.location precedence)", () => {
   it("falls back to location.directory, then cwd", () => {
     expect(resolveRepositoryPath({ location: { directory: "/a" } })).toBe("/a");
     expect(resolveRepositoryPath({})).toBe(process.cwd());
+  });
+});
+
+describe("extractSessionDirectory (Session.Info shapes)", () => {
+  it("reads location.directory", () => {
+    expect(extractSessionDirectory({ location: { directory: "/repo/session" } })).toBe("/repo/session");
+  });
+
+  it("joins subpath onto the session directory", () => {
+    const joined = extractSessionDirectory({
+      location: { directory: "/repo" },
+      subpath: "packages/app",
+    });
+    expect(joined).toContain("packages");
+    expect(joined).toContain("app");
+  });
+
+  it("tolerates { data } wrappers and legacy shapes", () => {
+    expect(extractSessionDirectory({ data: { location: { directory: "/wrapped" } } })).toBe("/wrapped");
+    expect(extractSessionDirectory({ directory: "/legacy" })).toBe("/legacy");
+    expect(extractSessionDirectory({ project: { canonical: "/proj" } })).toBe("/proj");
+  });
+
+  it("returns undefined when no directory is present", () => {
+    expect(extractSessionDirectory({})).toBeUndefined();
+    expect(extractSessionDirectory(undefined)).toBeUndefined();
+  });
+});
+
+describe("resolveEventRepositoryPath (V2 per-prompt session lookup)", () => {
+  it("prefers the session directory over the setup-time fallback", async () => {
+    const ctx: any = {
+      session: { get: async () => ({ location: { directory: "/sessions/mattermost" } }) },
+    };
+    await expect(
+      resolveEventRepositoryPath(ctx, { sessionID: "s1" }, "/plugin/load-location"),
+    ).resolves.toBe("/sessions/mattermost");
+  });
+
+  it("falls back when the session lookup throws", async () => {
+    const ctx: any = {
+      session: {
+        get: async () => {
+          throw new Error("gone");
+        },
+      },
+    };
+    await expect(resolveEventRepositoryPath(ctx, { sessionID: "s1" }, "/fallback")).resolves.toBe(
+      "/fallback",
+    );
+  });
+
+  it("falls back when there is no session getter", async () => {
+    await expect(resolveEventRepositoryPath({}, { sessionID: "s1" }, "/fallback")).resolves.toBe(
+      "/fallback",
+    );
+  });
+
+  it("hook sends the SESSION directory even when setup location is a drive root", async () => {
+    const fetchMock = vi.fn().mockImplementation(async (url: any, init?: any) => {
+      if (String(url).includes("/health")) {
+        return { ok: true, status: 200, json: async () => ({ status: "ok", state: "ready" }) };
+      }
+      const method = JSON.parse(init?.body ?? "{}").method;
+      if (method === "initialize" || method === "notifications/initialized") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ jsonrpc: "2.0", id: 1, result: { serverInfo: { version: "0.0.0" } } }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { content: [{ type: "text", text: "x" }], structuredContent: { passthrough: true } },
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { KnocodePlugin } = await import("../src/index");
+    const hooks: Array<(event: any) => Promise<void>> = [];
+    await KnocodePlugin.setup({
+      // Simulates the reported bug: plugin instance loaded at drive root.
+      location: { directory: "C:\\", project: { canonical: "C:\\", directory: "C:\\" } },
+      session: {
+        hook: async (_name: string, cb: any) => {
+          hooks.push(cb);
+          return { dispose: async () => {} };
+        },
+        get: async ({ sessionID }: any) => {
+          expect(sessionID).toBe("sess-mattermost");
+          return { location: { directory: "C:\\tmp\\mattermost-master" } };
+        },
+      },
+    } as any);
+    expect(hooks.length).toBe(1);
+
+    await hooks[0]({ sessionID: "sess-mattermost", prompt: { text: "what is the main class?" } });
+
+    const toolsCall = fetchMock.mock.calls.find((c: any[]) => {
+      try {
+        return String(c[0]).includes("/mcp") && JSON.parse(c[1]?.body ?? "{}").method === "tools/call";
+      } catch {
+        return false;
+      }
+    });
+    expect(toolsCall).toBeDefined();
+    const body = JSON.parse(toolsCall![1].body);
+    expect(body.params.arguments.repository_path).toBe("C:\\tmp\\mattermost-master");
+  });
+});
+
+describe("resolveV1MessageRepositoryPath (V1 per-message lookup)", () => {
+  it("prefers client.session.get over the server()-time fallback", async () => {
+    const client: any = {
+      session: { get: async () => ({ location: { directory: "/v1/session-repo" } }) },
+    };
+    await expect(
+      resolveV1MessageRepositoryPath(client, { sessionID: "s1" }, "/server/fallback"),
+    ).resolves.toBe("/v1/session-repo");
+  });
+
+  it("uses hook-input hints when no client lookup exists", async () => {
+    await expect(
+      resolveV1MessageRepositoryPath(undefined, { sessionID: "s1", worktree: "/hint/repo" }, "/fb"),
+    ).resolves.toBe("/hint/repo");
+  });
+
+  it("calls the hey-api shape { path: { id } } and unwraps { data }", async () => {
+    const seen: any[] = [];
+    const client: any = {
+      session: {
+        get: async (args: any) => {
+          seen.push(args);
+          if (args?.path?.id) return { data: { directory: "C:\\tmp\\mattermost-master" } };
+          throw new Error("bad request");
+        },
+      },
+    };
+    await expect(
+      resolveV1MessageRepositoryPath(client, { sessionID: "sess-hey" }, "C:\\"),
+    ).resolves.toBe("C:\\tmp\\mattermost-master");
+    expect(seen[0]).toEqual({ path: { id: "sess-hey" } });
+  });
+
+  it("falls back when the lookup throws", async () => {
+    const client: any = {
+      session: {
+        get: async () => {
+          throw new Error("down");
+        },
+      },
+    };
+    await expect(
+      resolveV1MessageRepositoryPath(client, { sessionID: "s1" }, "/fb"),
+    ).resolves.toBe("/fb");
+  });
+
+  it("hook sends the per-message session directory, not the server() fallback", async () => {    const fetchMock = vi.fn().mockImplementation(async (url: any, init?: any) => {
+      if (String(url).includes("/health")) {
+        return { ok: true, status: 200, json: async () => ({ status: "ok", state: "ready" }) };
+      }
+      const method = JSON.parse(init?.body ?? "{}").method;
+      if (method === "initialize" || method === "notifications/initialized") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ jsonrpc: "2.0", id: 1, result: { serverInfo: { version: "0.0.0" } } }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { content: [{ type: "text", text: "x" }], structuredContent: { passthrough: true } },
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const hooks = await v1Server({
+      worktree: "C:\\",
+      client: {
+        session: {
+          get: async ({ sessionID }: any) => {
+            expect(sessionID).toBe("sess-mm");
+            return { location: { directory: "C:\\tmp\\mattermost-master" } };
+          },
+        },
+      },
+    });
+
+    const output: any = {
+      message: { role: "user" },
+      parts: [{ type: "text", text: "what is the main class?" }],
+    };
+    await hooks["chat.message"]({ sessionID: "sess-mm" }, output);
+
+    const toolsCall = fetchMock.mock.calls.find((c: any[]) => {
+      try {
+        return String(c[0]).includes("/mcp") && JSON.parse(c[1]?.body ?? "{}").method === "tools/call";
+      } catch {
+        return false;
+      }
+    });
+    expect(toolsCall).toBeDefined();
+    const body = JSON.parse(toolsCall![1].body);
+    expect(body.params.arguments.repository_path).toBe("C:\\tmp\\mattermost-master");
+  });
+
+  it("outcome log lines carry the resolved repo for traceability", async () => {
+    vi.stubGlobal(
+      "fetch",
+      stubDaemonFetch({
+        content: [{ type: "text", text: "hi\n\n---\n\nContext:\ncode_context: x" }],
+        structuredContent: { passthrough: false, total_tokens: 3, provenance: [] },
+        isError: false,
+      }),
+    );
+    const appLog = vi.fn().mockResolvedValue(true);
+    const hooks = await v1Server({
+      worktree: "/fallback",
+      client: {
+        app: { log: appLog },
+        session: { get: async () => ({ location: { directory: "/session/repo" } }) },
+      },
+    });
+    await hooks["chat.message"](
+      { sessionID: "s9" },
+      { message: { role: "user" }, parts: [{ type: "text", text: "hi" }] },
+    );
+    const messages = appLog.mock.calls.map((c: any[]) => (c[0] as any).body.message as string);
+    expect(messages.some((m: string) => m.includes("repo=/session/repo"))).toBe(true);
   });
 });
 

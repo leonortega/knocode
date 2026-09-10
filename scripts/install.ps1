@@ -358,10 +358,15 @@ if ($agentSel.Count -gt 0) {
     Info "Configuring opencode plugin (GLOBAL: ~/.config/opencode)..."
     New-Item -ItemType Directory -Force -Path $ocGlobalDir | Out-Null
     $ocGlobalCfg = Join-Path $ocGlobalDir "opencode.jsonc"
+    # NOTE: file:// spec (not the bare npm name) — opencode-knocode is not
+    # published to the npm registry, and a bare spec makes the opencode
+    # loader fail at the install stage so the plugin never loads. The
+    # file:// URL loads the local build directly (dist must exist, see below).
+    $pluginFileUrl = "file://" + ((Join-Path $Root "packages\opencode-knocode") -replace '\\','/')
     $opencodeJsonc = @"
 {
     "`$schema": "https://opencode.ai/config.json",
-    "plugin": ["opencode-knocode"]
+    "plugin": ["$pluginFileUrl"]
 }
 "@
     try { Set-Content -LiteralPath $ocGlobalCfg -Value $opencodeJsonc -Encoding UTF8; Ok "opencode plugin at $ocGlobalCfg" } catch { Warn "failed to write $ocGlobalCfg : $_" }

@@ -45,6 +45,55 @@ fn is_documentation_path(path: &str) -> bool {
 
 
 
+// ── Unsafe repository paths (never index) ────────────────────────────────
+
+/// True when `path` must never become a repository root: a filesystem root
+/// (`C:\`, `/`, verbatim/UNC roots), a bare Windows drive (`C:`), anything that
+/// is not an existing directory, or knocode's own internal store
+/// (`~/.knocode`, which holds the SQLite DB, tantivy indices and logs).
+///
+/// Called by `resolve_repo_intel` BEFORE the repo cache lookup so unsafe paths
+/// are never cached, indexed, or watched — the request falls back to the
+/// daemon-CWD view instead.
+fn is_unsafe_repository_path(path: &std::path::Path) -> bool {
+    // Filesystem root has no parent (`C:\`.parent() == None, `/`.parent() == None).
+    if path.parent().is_none() {
+        return true;
+    }
+    // Bare drive (`C:`) or drive root with mixed separators — parent() may be
+    // Some on some platforms, so match the string form explicitly.
+    if let Some(s) = path.to_str() {
+        let trimmed = s.trim_end_matches(['/', '\\']);
+        if trimmed.len() == 2
+            && trimmed.as_bytes()[1] == b':'
+            && trimmed.as_bytes()[0].is_ascii_alphabetic()
+        {
+            return true;
+        }
+        // Verbatim (`\\?\C:\`) / UNC (`\\server\share`) roots.
+        if s.starts_with(r"\\?\") || s.starts_with(r"\\") {
+            let components = path.components().count();
+            if components <= 2 {
+                return true;
+            }
+        }
+    }
+    // Knocode's own internal store — indexing it walks the DB, all tantivy
+    // indices and logs (self-indexing feedback loop).
+    if let Some(home) = dirs_home() {
+        let internal = home.join(".knocode");
+        if path.starts_with(&internal) {
+            return true;
+        }
+    }
+    // Must be an existing directory — a stale/garbage hint degrades instead of
+    // indexing whatever `PathBuf::from(hint)` points at.
+    if !path.is_dir() {
+        return true;
+    }
+    false
+}
+
 // ── Configuration ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -142,6 +191,25 @@ impl ContextEngine {
         };
         let canonical = dunce::canonicalize(hint)
             .unwrap_or_else(|_| std::path::PathBuf::from(hint));
+        // Safety guard: never index a filesystem root (e.g. `C:\` or `/`), a bare
+        // drive (`C:`), a non-directory, or knocode's own internal store
+        // (`~/.knocode`). An EXPLICIT but unusable `repository_path` (stale plugin
+        // fallback, global plugin instance, drive-root CWD) is a hard error so the
+        // request degrades to passthrough — falling back to the default repo view
+        // would inject WRONG-REPO context (observed: knocode checkout content in a
+        // mattermost session after refusing `C:\`). Only a MISSING path uses the
+        // default (daemon-CWD) view. Either way, no multi-GB walk of a drive root
+        // (observed: lazy-index of `C:\` via `$Recycle.Bin`, `appverifUI.dll`, …).
+        if is_unsafe_repository_path(&canonical) {
+            warn!(
+                repo = %canonical.to_string_lossy(),
+                "refusing to resolve unsafe repository path — request will passthrough"
+            );
+            return Err(format!(
+                "unsafe_repository_path: refusing to resolve '{}' (filesystem root, non-directory, or knocode internal store)",
+                canonical.to_string_lossy()
+            ));
+        }
         let key = canonical.to_string_lossy().to_string();
         if let Ok(cache) = self.repo_cache.lock() {
             if let Some(ri) = cache.get(&key) {
@@ -1468,6 +1536,60 @@ mod tests {
 
         std::env::remove_var("KNOCODE_INDEX_DIR");
         let _ = std::fs::remove_dir_all(&idx_dir);
+    }
+
+    #[test]
+    fn test_unsafe_repository_path_errors_instead_of_fallback() {
+        // An EXPLICIT unsafe path must Err (→ request passthrough), never resolve
+        // to the default view (that would inject wrong-repo context). A MISSING
+        // path still resolves to the default.
+        use knocode_events::EventBus;
+        use knocode_knowledge::KnowledgeHub;
+        use knocode_repo_intel::RepositoryIntelligence;
+        use knocode_storage::Database;
+        use std::path::PathBuf;
+
+        let dir = std::env::temp_dir().join(format!("knocode_unsafe_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let event_bus = EventBus::new();
+        let engine = ContextEngine::new(
+            RepositoryIntelligence::new(dir.clone(), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone()),
+            KnowledgeHub::new(Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone()),
+            event_bus,
+            ContextConfig::default(),
+        );
+        let err = match engine.resolve_repo_intel(Some("C:\\")) {
+            Err(e) => e,
+            Ok(_) => panic!("unsafe path must not resolve"),
+        };
+        assert!(err.starts_with("unsafe_repository_path:"), "unexpected error: {err}");
+        assert!(engine.resolve_repo_intel(Some("/")).is_err());
+        assert!(engine.resolve_repo_intel(Some("")).is_ok(), "empty hint = missing → default");
+        assert!(engine.resolve_repo_intel(None).is_ok(), "missing path → default");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_unsafe_repository_paths_never_indexed() {
+        use std::path::Path;
+        // Filesystem roots (the reported `C:\` drive-walk bug).
+        assert!(is_unsafe_repository_path(Path::new("C:\\")), "drive root must be refused");
+        assert!(is_unsafe_repository_path(Path::new("C:/")), "drive root (slashes) must be refused");
+        assert!(is_unsafe_repository_path(Path::new("C:")), "bare drive must be refused");
+        assert!(is_unsafe_repository_path(Path::new("/")), "unix root must be refused");
+        // Non-existent paths degrade instead of indexing garbage.
+        assert!(is_unsafe_repository_path(Path::new(r"C:\definitely-not-a-real-knocode-repo-12345")));
+        // Knocode's own internal store (DB + indices + logs).
+        if let Some(home) = dirs_home() {
+            let internal = home.join(".knocode");
+            assert!(is_unsafe_repository_path(&internal), "~/.knocode must be refused");
+            assert!(is_unsafe_repository_path(&internal.join("index").join("abc123")));
+        }
+        // A real temp directory is safe.
+        let dir = std::env::temp_dir().join(format!("knocode_safe_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!is_unsafe_repository_path(&dir), "existing temp dir must be allowed");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

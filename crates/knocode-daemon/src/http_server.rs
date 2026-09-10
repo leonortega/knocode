@@ -419,7 +419,21 @@ pub(crate) async fn handle_pre_generation(
 
     let _timer = crate::metrics::Timer::start();
     let engine = context_engine.lock().await;
-    let context_pack = engine.build_context(&task).await?;
+    let context_pack = match engine.build_context(&task).await {
+        Ok(pack) => pack,
+        // Refused repository path (filesystem root, non-directory, knocode
+        // internals): passthrough WITHOUT the default-repo fallback — the
+        // fallback would inject wrong-repo context. Not a daemon fault, so no
+        // fail-open counter and no error log; the reason names the cause.
+        Err(e) if e.starts_with("unsafe_repository_path:") => {
+            tracing::info!(error = %e, "unsafe repository path — OriginalPassthrough");
+            return Ok(HttpResponsePayload::OriginalPassthrough {
+                original: message,
+                reason: "unsafe_repository_path".to_string(),
+            });
+        }
+        Err(e) => return Err(e),
+    };
     // TASK-022: wire metrics — context tokens + retrieval recall (was dead_code)
     crate::metrics::global().observe_context_tokens(context_pack.token_usage.total_tokens);
     // Retrieval-stage stats (files in pack, search latency, candidates before packing)
@@ -532,5 +546,47 @@ mod tests {
         // tests), so the health payload must report the indexing state + a count.
         assert_eq!(resp.0["state"], "indexing");
         assert!(resp.0["index_files"].is_u64() || resp.0["index_files"].is_null());
+    }
+
+    #[tokio::test]
+    async fn test_unsafe_repository_path_passthrough() {
+        // An explicit filesystem-root repository_path must passthrough with a
+        // named reason — never index the drive, never fall back to the default
+        // repo view (wrong-repo context).
+        use std::path::PathBuf;
+        use std::sync::Arc;
+        use knocode_context::{ContextConfig, ContextEngine};
+        use knocode_events::EventBus;
+        use knocode_knowledge::KnowledgeHub;
+        use knocode_repo_intel::RepositoryIntelligence;
+        use knocode_storage::Database;
+
+        let dir = std::env::temp_dir().join(format!("knocode_unsafe_hook_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let event_bus = EventBus::new();
+        let engine = ContextEngine::new(
+            RepositoryIntelligence::new(dir.clone(), Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone()),
+            KnowledgeHub::new(Database::open(&PathBuf::from(":memory:")).unwrap(), event_bus.clone()),
+            event_bus,
+            ContextConfig::default(),
+        );
+        let engine = Arc::new(Mutex::new(engine));
+        let payload = handle_pre_generation(
+            "what is the main class?".to_string(),
+            "sess1".to_string(),
+            None,
+            Some("C:\\".to_string()),
+            &engine,
+        )
+        .await
+        .unwrap();
+        match payload {
+            HttpResponsePayload::OriginalPassthrough { original, reason } => {
+                assert_eq!(original, "what is the main class?");
+                assert_eq!(reason, "unsafe_repository_path");
+            }
+            _ => panic!("expected OriginalPassthrough, got RewrittenMessage"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

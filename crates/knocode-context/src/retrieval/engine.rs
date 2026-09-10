@@ -219,6 +219,17 @@ fn merge_evidence(
     // Re-rank and truncate
     primary.evidence.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     let max = plan.max_evidence(policy.max_files);
+    // Docs-slot reservation: promote Documentation evidence into the kept
+    // region's tail before truncation (promote-only — see policy.rs
+    // reserve_doc_slots).
+    let docs_reserve = policy.effective_docs_reserve().min(max);
+    policy.reserve_doc_slots(
+        &mut primary.evidence,
+        max,
+        docs_reserve,
+        |ev| ev.file_class == "Documentation",
+        |ev| ev.file_class.clone(),
+    );
     primary.evidence.truncate(max);
 
     // Combine diagnostics
@@ -524,9 +535,30 @@ impl Retriever for TantivyRetriever {
             signals_by_path.insert(path.clone(), sigs);
         }
 
+        // Docs-slot reservation (floor of the documented 45% docs budget,
+        // REQUEST_LIFECYCLE.md:312): promote the top-scoring Documentation
+        // candidates into the kept region's tail slots AFTER damping
+        // re-ranking, BEFORE truncation. Promote-only — scores are never
+        // rescaled and the leading code-first order is untouched, so the P0
+        // damping eval result holds.
+        let docs_reserve = policy.effective_docs_reserve().min(effective_max);
+        {
+            let is_doc = |e: &(String, f64)| {
+                by_path.get(&e.0).map(|(_, fc, _)| fc.as_str() == "Documentation").unwrap_or(false)
+            };
+            let class_of = |e: &(String, f64)| {
+                by_path.get(&e.0).map(|(_, fc, _)| fc.clone()).unwrap_or_default()
+            };
+            policy.reserve_doc_slots(&mut merged, effective_max, docs_reserve, is_doc, class_of);
+        }
+
         let merged_len = merged.len();
         let mut evidence: Vec<Evidence> = Vec::new();
-        for (path, score) in merged.into_iter().take(effective_max) {
+        // Reserved slots sit at [kept_len - docs_reserve, kept_len) — kept_len
+        // may be less than effective_max when the repo has few candidates.
+        let kept_len = merged_len.min(effective_max);
+        let docs_tail_start = kept_len.saturating_sub(docs_reserve);
+        for (rank_pos, (path, score)) in merged.into_iter().take(effective_max).enumerate() {
             if let Some((_, file_class, source)) = by_path.get(&path) {
                 let mut ev = Evidence::new(path.clone(), score as f32 * 1000.0, file_class.clone());
                 ev.raw_score = score as f32;
@@ -534,6 +566,9 @@ impl Retriever for TantivyRetriever {
                 ev.matched_terms = expanded_tokens.clone();
                 if let Some(sigs) = signals_by_path.get(&path) {
                     ev.signals = sigs.clone();
+                }
+                if rank_pos >= docs_tail_start && file_class == "Documentation" {
+                    ev.signals.push(RetrievalSignal::DocsQuota { slot: rank_pos - docs_tail_start });
                 }
                 let mut extra = Vec::new();
                 ranking::apply_class_and_dir_boost_with_query_tokens(1.0, &path, file_class, &q_tokens, policy, &mut extra);

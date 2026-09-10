@@ -148,7 +148,7 @@ try{
   let changed=false;
   if(Array.isArray(j.plugin)){
     const orig=j.plugin.length;
-    j.plugin=j.plugin.filter(x=>x!=='opencode-knocode' && x!=='knocode');
+    j.plugin=j.plugin.filter(x=>x!=='opencode-knocode' && x!=='knocode' && !(typeof x==='string' && x.includes('opencode-knocode')));
     if(j.plugin.length!==orig) changed=true;
     if(j.plugin.length===0) delete j.plugin;
   }

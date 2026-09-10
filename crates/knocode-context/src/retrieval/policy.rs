@@ -1,6 +1,8 @@
 //! RetrievalPolicy — named, testable ranking policy.
 //! All magic numbers from `tantivy_index.rs` + `lib.rs` are centralized here.
 
+use std::collections::HashSet;
+
 use crate::retrieval::intent::QueryIntent;
 
 /// Field weights for Tantivy BM25 query parser.
@@ -294,6 +296,90 @@ pub struct RetrievalPolicy {
     /// Code/Config/Test never damped; path-token match ("indexing" vs
     /// INDEXING_PERF_PLAN.md) keeps full score.
     pub doc_prior_damping: f32,
+
+    /// Docs-slot reservation (REQUEST_LIFECYCLE.md:312 documents a 45% docs
+    /// budget; this enforces a minimal floor of it). The N highest-scoring
+    /// Documentation-class candidates are PROMOTED into the final evidence
+    /// list's tail slots when they would otherwise fall below the top-K cut —
+    /// promote-only: scores are never rescaled and leading code order is
+    /// untouched, so the P0 damping eval result is preserved. `0` disables.
+    /// Env override: `KNOCODE_DOCS_RESERVE`.
+    pub docs_reserve_slots: usize,
+}
+
+impl RetrievalPolicy {
+    /// Effective docs-slot reservation (`KNOCODE_DOCS_RESERVE` env override wins).
+    pub fn effective_docs_reserve(&self) -> usize {
+        if let Ok(v) = std::env::var("KNOCODE_DOCS_RESERVE") {
+            if let Ok(n) = v.parse::<usize>() {
+                return n;
+            }
+        }
+        self.docs_reserve_slots
+    }
+
+    /// Promote the highest-scoring Documentation-class entries into the last
+    /// `slots` positions of the KEPT region — the first `keep` entries of an
+    /// already-ranked list (candidates ranked below `keep` may be swapped in,
+    /// displacing non-docs outward past the cut). PROMOTE-ONLY: scores are
+    /// never rescaled and the relative order of the leading code entries is
+    /// preserved, so the P0 doc-damping eval result holds. Returns the file
+    /// classes of the entries occupying the reserved slots (docs already in
+    /// the tail keep their slot without being moved).
+    ///
+    /// Precondition: `ranked` is sorted best-first. Postcondition: the first
+    /// `min(keep, len)` entries contain at least `min(slots, len)` doc slots
+    /// at positions `[keep-slots, keep)`, provided that many docs exist.
+    pub fn reserve_doc_slots<E>(
+        &self,
+        ranked: &mut [E],
+        keep: usize,
+        slots: usize,
+        is_doc: impl Fn(&E) -> bool,
+        class_of: impl Fn(&E) -> String,
+    ) -> Vec<String> {
+        let keep = keep.min(ranked.len());
+        if slots == 0 || keep <= slots {
+            return Vec::new();
+        }
+        let tail_start = keep - slots;
+
+        // Docs already inside the reserved tail keep their slots.
+        let mut promoted: Vec<String> = Vec::new();
+        let mut reserved_tail: HashSet<usize> = HashSet::new();
+        for idx in tail_start..keep {
+            if is_doc(&ranked[idx]) {
+                reserved_tail.insert(idx);
+                promoted.push(class_of(&ranked[idx]));
+            }
+        }
+        if promoted.len() >= slots {
+            return promoted;
+        }
+
+        // Highest-scoring doc candidates outside the reserved tail, in ranked
+        // order (indices < tail_start first, then >= keep — both best-first).
+        let candidates: Vec<usize> = (0..ranked.len())
+            .filter(|&i| i < tail_start || i >= keep)
+            .filter(|&i| is_doc(&ranked[i]))
+            .take(slots - promoted.len())
+            .collect();
+
+        // Free tail slots (kept-tail positions not already held by a doc).
+        let free_tail: Vec<usize> = (tail_start..keep)
+            .filter(|i| !reserved_tail.contains(i))
+            .collect();
+
+        // Swap each chosen candidate into a free tail slot. Candidate and tail
+        // index ranges are disjoint, so swaps never collide with each other.
+        for (&src, &dst) in candidates.iter().zip(free_tail.iter()) {
+            if src != dst {
+                ranked.swap(src, dst);
+            }
+            promoted.push(class_of(&ranked[dst]));
+        }
+        promoted
+    }
 }
 
 impl Default for RetrievalPolicy {
@@ -319,6 +405,7 @@ impl Default for RetrievalPolicy {
             structural_candidate_k: 500,
             structural_max_files: 500,
             doc_prior_damping: 0.10,
+            docs_reserve_slots: 2,
         }
     }
 }
@@ -478,6 +565,98 @@ mod tests {
         let test_file = p.combined_boost("types/foo/test/run.ts", "Test", "How do I add a new package?", QueryIntent::Procedural);
         // README should dominate for procedural even though test might have lexical relevance
         assert!(readme > test_file, "readme {readme} should beat test {test_file} for procedural");
+    }
+
+    // ── Docs-slot reservation (promote-only) ──
+
+    fn doc_fixture() -> Vec<(String, &'static str)> {
+        vec![
+            ("src/a.rs".into(), "Source"),
+            ("src/b.rs".into(), "Source"),
+            ("src/c.rs".into(), "Source"),
+            ("src/d.rs".into(), "Source"),
+            ("src/e.rs".into(), "Source"),
+            ("docs/guide.md".into(), "Documentation"),
+            ("docs/other.md".into(), "Documentation"),
+            ("README.md".into(), "Documentation"),
+        ]
+    }
+
+    #[test]
+    fn reserve_promotes_docs_into_kept_tail() {
+        let p = RetrievalPolicy::default();
+        // 5 code (kept) + 3 docs (all below the cut, keep=5)
+        let mut ranked = doc_fixture();
+        p.reserve_doc_slots(&mut ranked, 5, 2,
+            |e| e.1 == "Documentation", |e| e.1.to_string());
+        // First 3 code entries untouched, last 2 kept slots are docs.
+        assert_eq!(ranked[0].0, "src/a.rs");
+        assert_eq!(ranked[1].0, "src/b.rs");
+        assert_eq!(ranked[2].0, "src/c.rs");
+        assert_eq!(ranked[3].0, "docs/guide.md");
+        assert_eq!(ranked[4].0, "docs/other.md");
+    }
+
+    #[test]
+    fn reserve_keeps_docs_already_in_tail() {
+        let p = RetrievalPolicy::default();
+        let mut ranked = doc_fixture();
+        ranked.reverse(); // README first, code last — docs own the tail
+        p.reserve_doc_slots(&mut ranked, 5, 2,
+            |e| e.1 == "Documentation", |e| e.1.to_string());
+        assert_eq!(ranked[3].1, "Documentation");
+        assert_eq!(ranked[4].1, "Documentation");
+    }
+
+    #[test]
+    fn reserve_noop_when_no_docs_below_cut() {
+        let p = RetrievalPolicy::default();
+        let mut ranked: Vec<(String, &str)> = (0..8)
+            .map(|i| (format!("src/f{i}.rs"), if i < 5 { "Source" } else { "Documentation" }))
+            .collect();
+        // Only code in kept region, no docs anywhere → nothing to promote.
+        ranked[5].1 = "Source";
+        ranked[6].1 = "Source";
+        ranked[7].1 = "Source";
+        p.reserve_doc_slots(&mut ranked, 5, 2,
+            |e| e.1 == "Documentation", |e| e.1.to_string());
+        assert!(ranked.iter().take(5).all(|e| e.1 == "Source"));
+    }
+
+    #[test]
+    fn reserve_disabled_when_slots_zero() {
+        let p = RetrievalPolicy::default();
+        let mut ranked = doc_fixture();
+        p.reserve_doc_slots(&mut ranked, 5, 0,
+            |e| e.1 == "Documentation", |e| e.1.to_string());
+        assert_eq!(ranked[3].0, "src/d.rs");
+        assert_eq!(ranked[4].0, "src/e.rs");
+    }
+
+    #[test]
+    fn reserve_uses_first_docs_in_ranked_order() {
+        let p = RetrievalPolicy::default();
+        let mut ranked = doc_fixture();
+        // Three docs below the cut, only 2 slots → the two best-ranked docs win.
+        p.reserve_doc_slots(&mut ranked, 5, 2,
+            |e| e.1 == "Documentation", |e| e.1.to_string());
+        assert_eq!(ranked[3].0, "docs/guide.md");
+        assert_eq!(ranked[4].0, "docs/other.md");
+        assert_eq!(ranked[5].0, "src/d.rs"); // displaced below the cut
+        assert_eq!(ranked[6].0, "src/e.rs"); // displaced below the cut
+        assert_eq!(ranked[7].0, "README.md"); // lowest-ranked doc, still outside
+    }
+
+    #[test]
+    fn reserve_partial_tail_doc_counts_toward_quota() {
+        let p = RetrievalPolicy::default();
+        let mut ranked = doc_fixture();
+        // One doc already in the kept tail (index 4); only 1 promotion needed.
+        ranked.swap(4, 5); // src/e.rs ↔ docs/guide.md
+        p.reserve_doc_slots(&mut ranked, 5, 2,
+            |e| e.1 == "Documentation", |e| e.1.to_string());
+        assert_eq!(ranked[4].0, "docs/guide.md"); // kept in place
+        assert_eq!(ranked[3].0, "docs/other.md"); // promoted to fill the other slot
     }
 
     // ── P1.4: Performance Budget Tests ──

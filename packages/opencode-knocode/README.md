@@ -23,11 +23,16 @@ npm install opencode-knocode
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode-knocode"]
+  "plugin": ["file:///path/to/knocode/packages/opencode-knocode"]
 }
 ```
 
-OpenCode installs npm plugins automatically via `bun` to `~/.cache/opencode/node_modules/` on startup. Alternatively keep a local copy in `.opencode/plugins/`.
+> Use a `file://` URL to the local build (the `knocode` installer writes this
+> automatically). The bare npm name (`"opencode-knocode"`) only works once the
+> package is published to the npm registry — with an unpublished package the
+> OpenCode loader fails at the install stage and the plugin never loads
+> (no hooks fire, no daemon requests). Alternatively keep a local copy in
+> `.opencode/plugins/`.
 
 ## Configuration
 

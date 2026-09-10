@@ -40,6 +40,10 @@ pub enum RetrievalSignal {
     /// its FULL score multiplied by `factor` (generic docs outranked code files
     /// via stacked priors plus broad-content BM25).
     DocPriorDamping { factor: f32 },
+    /// Docs-slot reservation: entry occupies one of the guaranteed tail slots
+    /// for Documentation-class evidence (policy `docs_reserve_slots`), so docs
+    /// reach Context's docs section even when ranked below the top-K cut.
+    DocsQuota { slot: usize },
     /// Structural/AST pattern match (ast-grep-core or tree-sitter fallback)
     StructuralMatch { pattern: String, score: f32 },
 }
@@ -63,6 +67,7 @@ impl std::fmt::Display for RetrievalSignal {
             Self::DocAuthority(b) => write!(f, "doc_authority:{:.2}", b),
             Self::QueryExpansion(b) => write!(f, "query_expansion:{:.2}", b),
             Self::DocPriorDamping { factor } => write!(f, "doc_prior_damping:{:.2}", factor),
+            Self::DocsQuota { slot } => write!(f, "docs_quota:slot={}", slot),
             Self::StructuralMatch { pattern, score } => write!(f, "structural_match:{}:{:.2}", pattern, score),
         }
     }

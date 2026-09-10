@@ -293,12 +293,15 @@ if [ -n "$AGENT_SEL" ]; then
         cp -rf "$PLUGIN_SRC" "$OC_GLOBAL/node_modules/"
         OC_CFG="$OC_GLOBAL/opencode.jsonc"
         if [ ! -f "$OC_CFG" ] || ! grep -q "opencode-knocode" "$OC_CFG" 2>/dev/null; then
-          cat > "$OC_CFG" <<'OCEOF'
+          # NOTE: file:// spec (not the bare npm name) — opencode-knocode is not
+          # published to the npm registry, and a bare spec makes the opencode
+          # loader fail at the install stage so the plugin never loads.
+          cat > "$OC_CFG" <<EOF
 {
-    "$schema": "https://opencode.ai/config.json",
-    "plugin": ["opencode-knocode"]
+    "\$schema": "https://opencode.ai/config.json",
+    "plugin": ["file://$OC_GLOBAL/node_modules/opencode-knocode"]
 }
-OCEOF
+EOF
         fi
         ok "opencode plugin installed (bundled opencode-knocode)"
         info "Restart opencode to load the plugin (daemon http://127.0.0.1:9527)"

@@ -271,7 +271,7 @@ function Remove-OpencodeMcp($configPath, $isRepo) {
     if ($json.ContainsKey('plugin')) {
       $plugins = $json['plugin']
       $origCount = 0; $newPlugins = @()
-      if ($plugins -is [System.Array]) { $origCount = $plugins.Count; $newPlugins = @($plugins | Where-Object { $_ -ne "opencode-knocode" -and $_ -ne "knocode" }) }
+      if ($plugins -is [System.Array]) { $origCount = $plugins.Count; $newPlugins = @($plugins | Where-Object { $_ -ne "opencode-knocode" -and $_ -ne "knocode" -and $_ -notlike "*opencode-knocode*" }) }
       elseif ($plugins -is [PSCustomObject]) { $origCount = 1; $newPlugins = @() }
       else { $origCount = 0; $newPlugins = @() }
       if ($origCount -ne $newPlugins.Count) {

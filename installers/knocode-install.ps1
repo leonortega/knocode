@@ -369,7 +369,11 @@ else {
         Copy-Item -Path $pluginSrc -Destination (Join-Path $ocDir "node_modules\opencode-knocode") -Recurse -Force
         $ocCfg = Join-Path $ocDir "opencode.jsonc"
         if (-not (Test-Path $ocCfg) -or -not ((Get-Content -LiteralPath $ocCfg -Raw -ErrorAction SilentlyContinue) -match "opencode-knocode")) {
-          Set-Content -LiteralPath $ocCfg -Value "{`n  `"`$schema`": `"https://opencode.ai/config.json`",`n  `"plugin`": [`"opencode-knocode`"]`n}`n" -Encoding UTF8
+          # NOTE: file:// spec (not the bare npm name) — opencode-knocode is not
+          # published to the npm registry, and a bare spec makes the opencode
+          # loader fail at the install stage so the plugin never loads.
+          $bundleFileUrl = "file://" + ((Join-Path $ocDir "node_modules\opencode-knocode") -replace '\\','/')
+          Set-Content -LiteralPath $ocCfg -Value "{`n  `"`$schema`": `"https://opencode.ai/config.json`",`n  `"plugin`": [`"$bundleFileUrl`"]`n}`n" -Encoding UTF8
         }
         Write-Ok "opencode plugin installed (bundled opencode-knocode)"
         Write-Step "Restart opencode to load the plugin (daemon http://127.0.0.1:9527)"

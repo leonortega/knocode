@@ -229,13 +229,17 @@ if [ -n "$AGENT_SEL" ]; then
     OC_GLOBAL_CFG="$OC_GLOBAL/opencode.jsonc"
     info "Configuring opencode plugin (global ~/.config/opencode)..."
     mkdir -p "$OC_GLOBAL"
+    # NOTE: file:// spec (not the bare npm name) — opencode-knocode is not
+    # published to the npm registry, and a bare spec makes the opencode
+    # loader fail at the install stage so the plugin never loads. The
+    # file:// URL loads the local build directly (dist must exist, see below).
     cat > "$OC_GLOBAL_CFG" <<EOF
 {
     "\$schema": "https://opencode.ai/config.json",
-    "plugin": ["opencode-knocode"]
+    "plugin": ["file://$ROOT/packages/opencode-knocode"]
 }
 EOF
-    ok "opencode plugin GLOBAL at $OC_GLOBAL_CFG (plugin: opencode-knocode, MCPs used internally by daemon)"
+    ok "opencode plugin GLOBAL at $OC_GLOBAL_CFG (plugin: file:// local build, MCPs used internally by daemon)"
     # Remove legacy global path plugin (now npm)
     GLOBAL_PLUGIN="$HOME/.config/opencode/plugins/knocode.ts"
     if [ -f "$GLOBAL_PLUGIN" ]; then rm -f "$GLOBAL_PLUGIN" 2>/dev/null && info "Removed legacy global path plugin knocode.ts" || true; fi
@@ -271,7 +275,7 @@ EOF
     if [ -f "$OC_SKILL_SRC/SKILL.md" ]; then
       mkdir -p "$OC_GLOBAL/skills" && cp -rf "$OC_SKILL_SRC" "$OC_GLOBAL/skills/" 2>/dev/null && ok "knocode skill installed to $OC_GLOBAL/skills/knocode (opencode agent-native)" || warn "knocode skill copy failed (source: $OC_SKILL_SRC)"
     else warn ".knocode/skills/knocode not found - skipping agent skill install"; fi
-    info "Restart opencode to load global plugin 'opencode-knocode' (hooks: chat.message + message.updated + tool.execute.before, daemon http://127.0.0.1:9527). Plugin loads in EVERY project (global ~/.config/opencode)."
+    info "Restart opencode to load global plugin 'opencode-knocode' (hook: chat.message, daemon http://127.0.0.1:9527). Plugin loads in EVERY project (global ~/.config/opencode)."
   fi
 
   # --- Copilot (VS Code): NO user-level MCP registration ---
