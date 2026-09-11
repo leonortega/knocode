@@ -2,7 +2,7 @@
   "name": "knocode-copilot-extension",
   "displayName": "Knocode for GitHub Copilot",
   "description": "Repository context enrichment for GitHub Copilot Chat via the Knocode daemon (@knocode participant).",
-  "version": "0.9.11",
+  "version": "0.9.12",
   "publisher": "knocode",
   "license": "MIT",
   "engines": {

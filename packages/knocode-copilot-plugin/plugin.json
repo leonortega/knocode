@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "knocode-copilot",
-  "version": "0.9.11",
+  "version": "0.9.12",
   "description": "Knocode AI Runtime for GitHub Copilot (VS Code) — repository context enrichment via the local Knocode daemon. Tool-output compression/command rewriting is handled by RTK (github.com/rtk-ai/rtk).",
   "author": {
     "name": "Knocode",

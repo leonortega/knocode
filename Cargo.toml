@@ -18,7 +18,7 @@ members = [
 # /health + daemon banner derive it at compile time (CARGO_PKG_VERSION); the npm
 # plugin consumes it via packages/opencode-knocode/scripts/sync-version.mjs on build.
 # To release: change this line, run scripts/compile.ps1, then tag vX.Y.Z and push.
-version = "0.9.11"
+version = "0.9.12"
 edition = "2021"
 license = "MIT"
 

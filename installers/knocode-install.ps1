@@ -32,10 +32,10 @@
     powershell -ExecutionPolicy Bypass -c "irm https://leonortega.github.io/knocode/install.ps1 | iex"
 
   Pinned version (download the script and pass -Version):
-    powershell -ExecutionPolicy Bypass -File knocode-install.ps1 -Version 0.9.11
+    powershell -ExecutionPolicy Bypass -File knocode-install.ps1 -Version <x.y.z>
 
 .PARAMETER Version
-  Release version to install, e.g. "0.9.11" (leading "v" is optional).
+  Release version to install, e.g. "x.y.z" (leading "v" is optional).
   Defaults to the latest GitHub release.
 
 .PARAMETER Agents

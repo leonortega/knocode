@@ -1,6 +1,6 @@
 {
   "name": "opencode-knocode",
-  "version": "0.9.11",
+  "version": "0.9.12",
   "description": "Knocode AI Runtime plugin for OpenCode (V2 plugin spec) — prompt context enrichment via daemon MCP",
   "type": "module",
   "main": "dist/index.js",

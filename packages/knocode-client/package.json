@@ -1,6 +1,6 @@
 {
   "name": "knocode-client",
-  "version": "0.9.11",
+  "version": "0.9.12",
   "description": "Single source of truth for the Knocode daemon client: MCP over POST /mcp (knocode_context), /health readiness gate, request_id correlation, and tagged context outcomes (enriched | passthrough + reason). Source-vendored into agent plugins at build time (scripts/vendor-client.mjs) — no runtime dependency, no registry publishing.",
   "type": "module",
   "files": [

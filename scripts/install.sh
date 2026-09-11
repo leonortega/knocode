@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Knocode installer v0.9.11 minimal (Unix: Linux/macOS, bash)
+# Knocode installer minimal (Unix: Linux/macOS, bash)
 # Minimal v1: Git + SQLite(bundled)/tree-sitter/tantivy/tiktoken embedded + RTK optional (no Rust - prebuilt binaries; compile via scripts/compile.sh)
 # Agent integrations are selectable: --agents opencode,copilot,claude,cursor,gemini,codex,cline | --all-agents | --no-agents
 # Log verbosity: --log-verbosity 0|1|2 (0 quiet / 1 normal / 2 verbose: log every daemon call); asked interactively otherwise

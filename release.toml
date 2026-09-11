@@ -34,6 +34,6 @@ changelog-path = "CHANGELOG.md"
 # Workspace settings
 [workspace]
 # Version to release (must match workspace.package.version in Cargo.toml)
-version = "0.9.11"
+version = "0.9.12"
 # Release profile
 profile = "release"

@@ -7,8 +7,7 @@
 > workflow — see `01-architecture/REMOVED_TOOLS.md`); the V1 spec wins where they
 > conflict.
 
-## Current Version: v0.9.11
-
+## Current Version: v0.9.12
 **Released:** September 6, 2026
 **Status:** Active
 **Crates:** 10 workspace members (+ `knocode-workflow` excluded, in `future/workflow/`)

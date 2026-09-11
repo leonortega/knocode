@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-  Knocode installer v0.9.11 minimal (Windows PowerShell 5.1)
+  Knocode installer minimal (Windows PowerShell 5.1)
   Installs minimal v1 stack + uses prebuilt knocode (no compile/test). Idempotent - re-run to update.
 
 .DESCRIPTION
