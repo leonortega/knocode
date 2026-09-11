@@ -159,7 +159,7 @@ jobs:
           $ver = "${{ needs.verify.outputs.version }}"
           $asset = "knocode-${ver}-x86_64-pc-windows-msvc.zip"
           New-Item -ItemType Directory -Force -Path "skills" | Out-Null
-          Copy-Item -Path ".knocode/skills/knocode" -Destination "skills/knocode" -Recurse -Force
+          Copy-Item -Path ".knocode/skills-universal/knocode" -Destination "skills/knocode" -Recurse -Force
           Compress-Archive -Path "target/release/knocode.exe", "target/release/knocode-daemon.exe", "integrations", "skills", "LICENSE" -DestinationPath $asset -CompressionLevel Optimal
           $hash = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLower()
           "$hash  $asset" | Out-File -FilePath "$asset.sha256" -Encoding ascii
@@ -239,7 +239,7 @@ jobs:
           cp target/release/knocode-daemon staging/
           cp -r integrations staging/
           mkdir -p staging/skills
-          cp -r .knocode/skills/knocode staging/skills/
+          cp -r .knocode/skills-universal/knocode staging/skills/
           cp LICENSE staging/
           (cd staging && zip -r "../$asset" .)
           sha256sum "$asset" | awk '{print $1}' > "$asset.sha256"
@@ -319,7 +319,7 @@ jobs:
           cp target/release/knocode-daemon staging/
           cp -r integrations staging/
           mkdir -p staging/skills
-          cp -r .knocode/skills/knocode staging/skills/
+          cp -r .knocode/skills-universal/knocode staging/skills/
           cp LICENSE staging/
           (cd staging && zip -r "../$asset" .)
           shasum -a 256 "$asset" | awk '{print $1}' > "$asset.sha256"
