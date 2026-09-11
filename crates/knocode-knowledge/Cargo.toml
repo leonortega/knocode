@@ -1,0 +1,18 @@
+[package]
+name = "knocode-knowledge"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+knocode-core.workspace = true
+knocode-events.workspace = true
+knocode-storage.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+
+
+

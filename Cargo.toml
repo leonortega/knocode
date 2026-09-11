@@ -1,22 +1,24 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/coderun-core",
-    "crates/coderun-daemon",
-    "crates/coderun-cli",
-    "crates/coderun-repo-intel",
-    "crates/coderun-knowledge",
-    "crates/coderun-skills",
-    "crates/coderun-context",
-    "crates/coderun-router",
-    "crates/coderun-optimizer",
-    "crates/coderun-events",
-    "crates/coderun-storage",
-    "crates/coderun-workflow",
+    "crates/knocode-core",
+    "crates/knocode-daemon",
+    "crates/knocode-cli",
+    "crates/knocode-repo-intel",
+    "crates/knocode-knowledge",
+    "crates/knocode-context",
+    "crates/knocode-events",
+    "crates/knocode-storage",
+    "crates/knocode-bench",
 ]
 
 [workspace.package]
-version = "0.6.0"
+# ── VERSION SINGLE SOURCE OF TRUTH ─────────────────────────────────────
+# This is THE version of knocode. All crates inherit it (version.workspace = true);
+# /health + daemon banner derive it at compile time (CARGO_PKG_VERSION); the npm
+# plugin consumes it via packages/opencode-knocode/scripts/sync-version.mjs on build.
+# To release: change this line, run scripts/compile.ps1, then tag vX.Y.Z and push.
+version = "0.9.12"
 edition = "2021"
 license = "MIT"
 
@@ -34,16 +36,16 @@ sha2 = "0.10"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
 toml = "0.8"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt", "registry"] }
+tracing-appender = "0.2"
 
 # Errors
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 
 # Utilities
 uuid = { version = "1", features = ["v4"] }
@@ -52,31 +54,39 @@ regex = "1"
 glob = "0.3"
 
 # Database
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 # IPC
 rmp-serde = "1"
 
 # Token counting (spec §3 — tiktoken-rs, never via model API)
-tiktoken-rs = "0.7"
+tiktoken-rs = "0.12"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
 
 # External tools — first-class (v0.5.0): notify/git2 (ort is per-crate optional)
 notify = "6"
-git2 = "0.19"
+git2 = "0.21"
+
+# Structural search — ast-grep pattern matching (Level 3 retrieval)
+ast-grep-core = "0.45"
+ast-grep-language = "0.45"
 
 # Internal crates
-coderun-core = { path = "crates/coderun-core" }
-coderun-events = { path = "crates/coderun-events" }
-coderun-storage = { path = "crates/coderun-storage" }
-coderun-repo-intel = { path = "crates/coderun-repo-intel" }
-coderun-knowledge = { path = "crates/coderun-knowledge" }
-coderun-skills = { path = "crates/coderun-skills" }
-coderun-context = { path = "crates/coderun-context" }
-coderun-router = { path = "crates/coderun-router" }
-coderun-optimizer = { path = "crates/coderun-optimizer" }
-coderun-daemon = { path = "crates/coderun-daemon" }
-coderun-cli = { path = "crates/coderun-cli" }
-coderun-workflow = { path = "crates/coderun-workflow" }
+knocode-core = { path = "crates/knocode-core" }
+knocode-events = { path = "crates/knocode-events" }
+knocode-storage = { path = "crates/knocode-storage" }
+knocode-repo-intel = { path = "crates/knocode-repo-intel" }
+knocode-knowledge = { path = "crates/knocode-knowledge" }
+knocode-context = { path = "crates/knocode-context" }
+knocode-daemon = { path = "crates/knocode-daemon" }
+knocode-cli = { path = "crates/knocode-cli" }
+
+# ── Disk space optimization ────────────────────────────────────────────────
+[profile.dev]
+debug = false          # no DWARF debug info (saves ~30-50% of target/)
+incremental = false    # no incremental cache (saves ~2-4 GB, slightly slower rebuilds)
+
+[profile.dev.package."*"]
+debug = false          # no debug info for dependencies either

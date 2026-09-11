@@ -1,0 +1,46 @@
+[package]
+name = "knocode-repo-intel"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+knocode-core.workspace = true
+knocode-events.workspace = true
+knocode-storage.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+regex.workspace = true
+glob.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+tempfile = "3"
+# Windows verbatim-path (\\?\\) cleanup for stable repository identity + provenance (TASK-030/033)
+dunce = "1"
+
+# Ripgrep libraries for fast text search
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
+ignore = "0.4"
+
+# Tree-sitter for AST parsing — 371 languages via tree-sitter-language-pack
+tree-sitter-language-pack = "1"
+
+# Structural search — ast-grep pattern matching (Level 3 retrieval)
+# Only ast-grep-core is needed; ast-grep-language provides LanguageExt trait.
+# Grammar source: tree-sitter-language-pack (single source, no duplication).
+ast-grep-core = "0.45"
+ast-grep-language = "0.45"
+
+# Git is required for commit-based auto-reindex (default mode)
+git2 = "0.21"
+
+# File system watcher (optional — only needed for filesystem watch mode)
+notify = { version = "6", optional = true }
+
+[features]
+fs-watcher = ["dep:notify"]

@@ -1,0 +1,27 @@
+[package]
+name = "knocode-context"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+knocode-core.workspace = true
+knocode-events.workspace = true
+knocode-storage.workspace = true
+knocode-repo-intel.workspace = true
+knocode-knowledge.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+serde.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+tiktoken-rs.workspace = true
+uuid = { version = "1", features = ["v4"] }
+# Windows verbatim-path (\\?\\) cleanup for provenance paths + repo identity (TASK-033)
+dunce = "1"
+# Structural search adapter lives in knocode-repo-intel (ast-grep-core + tree-sitter)
+ignore = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+

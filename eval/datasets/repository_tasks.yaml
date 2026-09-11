@@ -1,0 +1,300 @@
+# Knocode Golden Dataset — 50 real coding tasks (TASK-005)
+# Each task identifies expected relevant files for retrieval evaluation (TASK-006)
+# Categories: bug fixing, feature addition, refactoring, testing, documentation, code search, architecture questions
+# Metrics: Recall@5, Recall@10, MRR, tokens, latency, duplicate ratio — see eval/metrics/retrieval.py
+# Refreshed 2026-09-07: expectations for removed capabilities (knocode-router, knocode-skills,
+# engram.rs, FlashRank rerank, eval/metrics/baseline.py) dropped and re-derived from current code.
+
+- task: "Fix authentication timeout in login flow"
+  category: "bug fixing"
+  expected_files:
+    - crates/knocode-core/src/config.rs
+    - crates/knocode-daemon/src/http_server.rs
+    - crates/knocode-daemon/src/lifecycle.rs
+  expected_symbols: ["Config::validate", "handle_hook"]
+
+- task: "Add pagination to users endpoint"
+  category: "feature addition"
+  expected_files:
+    - crates/knocode-storage/src/lib.rs
+    - crates/knocode-knowledge/src/lib.rs
+    - crates/knocode-context/src/lib.rs
+
+- task: "Refactor repository indexing to incremental via hash"
+  category: "refactoring"
+  expected_files:
+    - crates/knocode-repo-intel/src/lib.rs
+    - crates/knocode-storage/src/lib.rs
+    - crates/knocode-repo-intel/src/watcher.rs
+
+- task: "Add test for dedup skips duplicate content block"
+  category: "testing"
+  expected_files:
+    - crates/knocode-context/src/lib.rs
+    - crates/knocode-core/src/ipc.rs
+
+- task: "Document supported languages for v1"
+  category: "documentation"
+  expected_files:
+    - README.md
+    - crates/knocode-repo-intel/src/registry.rs
+    - crates/knocode-core/src/config.rs
+
+- task: "Find where BuildContext assembles token budget"
+  category: "code search"
+  expected_files:
+    - crates/knocode-context/src/lib.rs
+    - crates/knocode-core/src/ipc.rs
+
+- task: "Explain how the context engine enforces the token budget"
+  category: "architecture questions"
+  expected_files:
+    - crates/knocode-context/src/lib.rs
+    - crates/knocode-core/src/config.rs
+
+- task: "Fix race condition in EventBus broadcast"
+  category: "bug fixing"
+  expected_files:
+    - crates/knocode-events/src/lib.rs
+    - crates/knocode-daemon/src/lifecycle.rs
+
+- task: "Add priority ordering to knowledge retrieval results"
+  category: "feature addition"
+  expected_files:
+    - crates/knocode-knowledge/src/lib.rs
+    - crates/knocode-storage/src/tantivy_index.rs
+
+- task: "Refactor agent config normalization for Claude/Codex/Copilot"
+  category: "refactoring"
+  expected_files:
+    - crates/knocode-cli/src/main.rs
+
+- task: "Test knowledge retrieval fail-open when tantivy index unavailable"
+  category: "testing"
+  expected_files:
+    - crates/knocode-knowledge/src/lib.rs
+    - crates/knocode-storage/src/tantivy_index.rs
+
+- task: "Document context provenance fields"
+  category: "documentation"
+  expected_files:
+    - crates/knocode-core/src/ipc.rs
+    - crates/knocode-context/src/lib.rs
+
+- task: "Search for where HMAC is used for secrets"
+  category: "code search"
+  expected_files:
+    - crates/knocode-core/src/secrets.rs
+    - crates/knocode-daemon/src/ratelimit.rs
+
+- task: "How does Knowledge Hub fallback from tantivy to LIKE?"
+  category: "architecture questions"
+  expected_files:
+    - crates/knocode-knowledge/src/lib.rs
+    - crates/knocode-storage/src/lib.rs
+
+- task: "Fix token counting fallback when tiktoken fails"
+  category: "bug fixing"
+  expected_files:
+    - crates/knocode-context/src/lib.rs
+
+- task: "Add repository_id to request correlation"
+  category: "feature addition"
+  expected_files:
+    - crates/knocode-core/src/ipc.rs
+    - crates/knocode-daemon/src/http_server.rs
+    - crates/knocode-daemon/src/lifecycle.rs
+
+- task: "Refactor Prometheus metrics to in-memory histogram"
+  category: "refactoring"
+  expected_files:
+    - crates/knocode-daemon/src/metrics.rs
+
+- task: "Benchmark context BuildContext latency"
+  category: "testing"
+  expected_files:
+    - crates/knocode-context/src/lib.rs
+    - crates/knocode-bench/benches/context_bench.rs
+
+- task: "Document the HTTP hook API contract"
+  category: "documentation"
+  expected_files:
+    - docs/01-architecture/RUNTIME.md
+    - crates/knocode-daemon/src/http_server.rs
+
+- task: "Where is frozen prefix boundary added?"
+  category: "code search"
+  expected_files:
+    - crates/knocode-context/src/lib.rs
+
+- task: "How does dedup fingerprint work per session?"
+  category: "architecture questions"
+  expected_files:
+    - crates/knocode-context/src/lib.rs
+
+- task: "Fix incremental indexing stale symbols after delete"
+  category: "bug fixing"
+  expected_files:
+    - crates/knocode-repo-intel/src/lib.rs
+    - crates/knocode-storage/src/lib.rs
+
+- task: "Add OpenCode adapter E2E test"
+  category: "feature addition"
+  expected_files:
+    - packages/opencode-knocode/src/index.ts
+    - crates/knocode-daemon/src/http_server.rs
+
+- task: "Refactor tantivy BM25 ranking pipeline"
+  category: "refactoring"
+  expected_files:
+    - crates/knocode-knowledge/src/lib.rs
+    - crates/knocode-storage/src/tantivy_index.rs
+
+- task: "Validate dependency graph A->B->C traversal"
+  category: "testing"
+  expected_files:
+    - crates/knocode-repo-intel/src/graph.rs
+
+- task: "Document evaluation infrastructure"
+  category: "documentation"
+  expected_files:
+    - eval/datasets/repository_tasks.yaml
+    - eval/metrics/retrieval.py
+
+- task: "Search where rate limiting is enforced"
+  category: "code search"
+  expected_files:
+    - crates/knocode-daemon/src/ratelimit.rs
+    - crates/knocode-daemon/src/http_server.rs
+
+- task: "Explain fail-open design for knowledge retrieval"
+  category: "architecture questions"
+  expected_files:
+    - crates/knocode-knowledge/src/lib.rs
+    - crates/knocode-core/src/error.rs
+
+- task: "Fix config merge overriding defaults"
+  category: "bug fixing"
+  expected_files:
+    - crates/knocode-core/src/config.rs
+
+- task: "Add metrics for tokens saved and retrieval quality"
+  category: "feature addition"
+  expected_files:
+    - crates/knocode-daemon/src/metrics.rs
+    - crates/knocode-context/src/lib.rs
+
+- task: "Refactor daemon HTTP server shared state"
+  category: "refactoring"
+  expected_files:
+    - crates/knocode-daemon/src/lifecycle.rs
+    - crates/knocode-daemon/src/http_server.rs
+
+- task: "Test HTTP rate limiter burst rejection"
+  category: "testing"
+  expected_files:
+    - crates/knocode-daemon/src/ratelimit.rs
+    - crates/knocode-daemon/src/http_server.rs
+
+- task: "Document v1 architecture without workflow"
+  category: "documentation"
+  expected_files:
+    - docs/01-architecture/ARCHITECTURE.md
+    - docs/00-project/SCOPE.md
+    - README.md
+
+- task: "Find CLI preview implementation"
+  category: "code search"
+  expected_files:
+    - crates/knocode-cli/src/main.rs
+
+- task: "How does the knowledge hub store and retrieve entries?"
+  category: "architecture questions"
+  expected_files:
+    - crates/knocode-knowledge/src/lib.rs
+    - crates/knocode-storage/src/lib.rs
+
+- task: "Fix SQLite WAL mode enabling"
+  category: "bug fixing"
+  expected_files:
+    - crates/knocode-storage/src/lib.rs
+
+- task: "Add baseline vs Knocode benchmark harness"
+  category: "feature addition"
+  expected_files:
+    - eval/baseline/run.py
+    - eval/metrics/retrieval.py
+
+- task: "Refactor Context Pack to stable artifact with metadata"
+  category: "refactoring"
+  expected_files:
+    - crates/knocode-core/src/ipc.rs
+    - crates/knocode-context/src/lib.rs
+
+- task: "Measure context retrieval Recall@5"
+  category: "testing"
+  expected_files:
+    - eval/metrics/retrieval.py
+    - eval/datasets/repository_tasks.yaml
+
+- task: "Document supported languages explicitly"
+  category: "documentation"
+  expected_files:
+    - docs/01-architecture/RUNTIME.md
+    - README.md
+
+- task: "Search where tree-sitter languages are enabled"
+  category: "code search"
+  expected_files:
+    - crates/knocode-repo-intel/src/parser.rs
+    - crates/knocode-core/src/config.rs
+
+- task: "Explain repository intelligence pipeline"
+  category: "architecture questions"
+  expected_files:
+    - crates/knocode-repo-intel/src/lib.rs
+    - crates/knocode-repo-intel/src/parser.rs
+
+- task: "Fix skills directory creation on init"
+  category: "bug fixing"
+  expected_files:
+    - crates/knocode-cli/src/main.rs
+
+- task: "Add 4-language default with extended flag"
+  category: "feature addition"
+  expected_files:
+    - crates/knocode-repo-intel/Cargo.toml
+    - crates/knocode-core/src/config.rs
+
+- task: "Refactor optimistic context truncation with reversible cache"
+  category: "refactoring"
+  expected_files:
+    - crates/knocode-context/src/lib.rs
+
+- task: "Test readiness gate rejects requests while indexing"
+  category: "testing"
+  expected_files:
+    - crates/knocode-daemon/src/metrics.rs
+    - crates/knocode-daemon/src/lifecycle.rs
+
+- task: "Document observability correlation IDs"
+  category: "documentation"
+  expected_files:
+    - crates/knocode-daemon/src/metrics.rs
+    - crates/knocode-events/src/lib.rs
+
+- task: "Where is tantivy index stored?"
+  category: "code search"
+  expected_files:
+    - crates/knocode-storage/src/tantivy_index.rs
+    - crates/knocode-repo-intel/src/lib.rs
+
+- task: "How does the CLI doctor check system health?"
+  category: "architecture questions"
+  expected_files:
+    - crates/knocode-cli/src/main.rs
+
+- task: "Fix deadlock in KnowledgeHub retrieve"
+  category: "bug fixing"
+  expected_files:
+    - crates/knocode-knowledge/src/lib.rs

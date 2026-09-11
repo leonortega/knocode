@@ -8,19 +8,19 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Runtime
 
-**Definition:** The AI Runtime system itself — a local application that improves coding agents by providing repository intelligence, context optimization, model routing, and tool-output compression.
+**Definition:** The AI Runtime system itself — a local application that improves coding agents by providing repository intelligence and context optimization. Tool-output compression is delegated to RTK.
 
-**Scope:** Everything that runs as the daemon process. Excludes the coding agent, LiteLLM, and model providers.
+**Scope:** Everything that runs as the daemon process. Excludes the coding agent and model providers.
 
 ### Daemon
 
-**Definition:** The long-lived local process that hosts the Context Engine and all runtime modules. Communicates with the Adapter Layer over a Unix domain socket using MessagePack.
+**Definition:** The long-lived local process that hosts the Context Engine and all runtime modules. Exposes a single HTTP listener (default `127.0.0.1:9527`) with `POST /hook` for prompt enrichment, `POST /mcp` for MCP clients, plus `GET /health` and `GET /metrics`.
 
 **Scope:** The process lifecycle is: start → initialize → listen → serve requests → shutdown.
 
 ### Agent
 
-**Definition:** A coding agent that interacts with a developer to write, modify, and understand code. Examples: opencode, Claude Code, Cursor, Gemini CLI.
+**Definition:** A coding agent that interacts with a developer to write, modify, and understand code. Examples: OpenCode, Claude Code, GitHub Copilot.
 
 **Scope:** External to the runtime. The runtime improves the agent but does not become the agent.
 
@@ -38,7 +38,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Adapter Layer
 
-**Definition:** One thin adapter per agent CLI, implementing two operations: intercept-before-generation (rewrite the message) and intercept-before-tool-call (allow/deny/modify). Adapters translate between agent-specific hooks and the runtime's internal format.
+**Definition:** One thin adapter per agent CLI, implementing the intercept-before-generation operation (rewrite the message before the model sees it). Adapters translate between agent-specific hooks and the runtime's HTTP API (`POST /hook`).
 
 **Scope:** The entry point of the runtime. One adapter type per supported agent.
 
@@ -50,9 +50,9 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Pre-Tool Hook
 
-**Definition:** A hook that fires before a tool executes. The runtime can intercept the tool output and compress it before it re-enters the model's context.
+**Definition:** [REMOVED from the runtime] A hook that fires before a tool executes. The daemon no longer compresses tool outputs — compression is delegated to RTK (external binary), which installs its own hooks. See REMOVED_TOOLS.md.
 
-**Examples:** opencode `tool.execute.before`, Claude Code `PreToolUse`.
+**Examples:** opencode `tool.execute.before`, Claude Code `PreToolUse` (now owned by RTK, not the knocode daemon).
 
 ### Fail-Open
 
@@ -74,7 +74,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Context Pack
 
-**Definition:** The final, token-budgeted package of context assembled for a single LLM request. Emitted as YAML with three sections in fixed order: `behavioral_skills`, `docs_context`, `code_context`.
+**Definition:** The final, token-budgeted package of context assembled for a single LLM request. Emitted as YAML with two sections in fixed order: `docs_context`, `code_context`.
 
 **Scope:** Output of the Context Engine. Input to the model.
 
@@ -98,61 +98,35 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Knowledge Hub
 
-**Definition:** One organizational surface for project docs, skills, rules, ADRs, templates, and long-term memory. Composes three retrieval strategies: tag-based skill matching, BM25/tantivy lexical search with FlashRank reranking for docs/code, and engram for memory.
+**Definition:** One organizational surface for project docs, ADRs, templates, and long-term memory. BM25/tantivy lexical search over stored knowledge (FlashRank and engram removed — see REMOVED_TOOLS.md).
 
 **Scope:** Owns: storage and retrieval of all knowledge types.
 
 ### Skill
 
-**Definition:** A named, reusable instruction set that teaches the coding agent how to perform a specific type of task. Skills come from community formats: Claude, Cursor, Continue, agentskills.io. Matched by deterministic tag-based scoring.
+**Definition:** A named, reusable instruction set that teaches a coding agent how to perform a specific type of task. Skills live in community formats (Claude, Cursor, Continue, agentskills.io) and are discovered by the agent's own tooling — the runtime does not load or match them (removed — see `docs/01-architecture/REMOVED_TOOLS.md`).
 
-**Scope:** Part of the Knowledge Hub. Injected into the Context Pack as `behavioral_skills`.
+**Scope:** Owned by the coding agent's ecosystem, not the runtime.
 
 ### Skill Engine
 
-**Definition:** The component that performs task classification, skill activation, conflict detection, priority resolution, and instruction injection. Deterministic, tag-based, against a small registry.
-
-**Scope:** Part of the Knowledge Hub's skill subsystem.
-
-### Skill Registry
-
-**Definition:** The in-memory collection of loaded skill definitions. Small (dozens of entries, not thousands). Skills are loaded from community-format files at daemon startup.
-
-**Scope:** Managed by the Skill Engine.
+**Definition:** [REMOVED] Knocode's deterministic tag-based skill matching component was removed — agents own skill discovery natively (see `docs/01-architecture/REMOVED_TOOLS.md`).
 
 ### Context
 
-**Definition:** Information provided to the LLM to help it understand and complete a task. Includes: skill instructions, documentation, code snippets, repository metadata.
+**Definition:** Information provided to the LLM to help it understand and complete a task. Includes: documentation, code snippets, repository metadata.
 
 **Scope:** Built by the Context Engine. Managed within token budgets.
 
-### Model Router
+### Model Router / Tier / Gateway
 
-**Definition:** The component that selects which LLM model to use for a given task based on task complexity, available models, latency targets, budget, and required capabilities.
-
-**Scope:** Owns: heuristic complexity scoring, model tier selection, LiteLLM configuration.
-
-### Model Tier
-
-**Definition:** A classification of models by capability and cost. Three tiers in v1:
-
-| Tier | Description | Example Models |
-|------|-------------|----------------|
-| Fast | Low cost, high speed, suitable for simple tasks | gpt-4o-mini, claude-3-haiku |
-| Balanced | Moderate cost, moderate speed, suitable for most tasks | gpt-4o, claude-3-sonnet |
-| Capable | High cost, lower speed, suitable for complex reasoning | o1, claude-3-opus |
-
-### Model Gateway
-
-**Definition:** The infrastructure layer that unifies multiple LLM providers behind one API shape. In v1, LiteLLM serves as the model gateway with routing strategies, per-key budgets, cost tracking, and fallback chains.
-
-**Scope:** External to the runtime's core logic, but integrated via the Model Router.
+**Definition:** [REMOVED v0.8.6] Heuristic tier routing and the LiteLLM gateway were deleted — the runtime is model-agnostic and the agent / provider / user chooses the model (see REMOVED_TOOLS.md).
 
 ### Execution Optimizer
 
-**Definition:** The component that compresses and optimizes tool outputs before they re-enter the model's context. Uses RTK directly rather than building an equivalent.
+**Definition:** [REMOVED from the runtime] Formerly the component that compressed tool outputs. Tool-output compression is now delegated entirely to RTK (see REMOVED_TOOLS.md).
 
-**Scope:** Intercepts tool outputs via pre-tool-call hooks.
+**Scope:** None — removed from the daemon; RTK's own integrations handle compression.
 
 ### RTK
 
@@ -164,25 +138,25 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 **Definition:** The result of a tool execution by the coding agent. Includes: file contents read by the agent, search results, shell command output, and any other structured output returned to the model.
 
-**Scope:** Compressed by the Execution Optimizer via pre-tool hooks.
+**Scope:** Compressed by RTK (external binary) — the runtime no longer touches tool outputs.
 
 ### Event Bus
 
-**Definition:** An async-only system for observability events. Events: ContextBuilt, SkillActivated, RepositoryUpdated, ToolExecuted, ModelSelected, ResponseGenerated, MemorySaved. Never in the `BuildContext` call path.
+**Definition:** An async-only system for observability events. Events: ContextBuilt, RepositoryUpdated, ResponseGenerated, MemorySaved. Never in the `BuildContext` call path.
 
 **Scope:** Consumed by CLI inspection, metrics, and future orchestrators.
 
 ### Memory
 
-**Definition:** Long-term storage of information across sessions. Implemented via engram: a single Go binary, SQLite+FTS5, MCP-native, no LLM/embedding dependency for its core save/search path.
+**Definition:** Long-term storage of information across sessions. Historically via engram (single Go binary, SQLite+FTS5, MCP-native); removed — now SQLite+tantivy local (see REMOVED_TOOLS.md). No LLM/embedding dependency for its core save/search path.
 
 **Scope:** Used by the Knowledge Hub for cross-session knowledge persistence.
 
 ### engram
 
-**Definition:** A memory system (`Gentleman-Programming/engram`): single Go binary, SQLite+FTS5, MCP-native. Provides save and search capabilities without LLM or embedding dependencies.
+**Definition:** A memory system (`Gentleman-Programming/engram`): single Go binary, SQLite+FTS5, MCP-native. Provides save and search capabilities without LLM or embedding dependencies. **Removed** from Knocode v1 — see REMOVED_TOOLS.md (replaced by SQLite+tantivy local).
 
-**Scope:** Used for persistent memory in the Knowledge Hub.
+**Scope:** Removed from the runtime; the Knowledge Hub persists cross-session knowledge in SQLite+tantivy.
 
 ### BM25
 
@@ -216,7 +190,7 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### Configuration
 
-**Definition:** Runtime settings defined in TOML format. Includes: model settings, token budgets, skill paths, daemon settings, agent-specific options, logging levels, and database paths.
+**Definition:** Runtime settings defined in TOML format. Includes: token budgets, daemon settings, retrieval settings, logging levels, and database paths.
 
 **Scope:** Loaded at daemon startup.
 
@@ -234,15 +208,13 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 ### IModelGateway
 
-**Definition:** The interface contract for model routing and inference. Default implementation is LiteLLM. Supports swapping to other gateways.
-
-**Scope:** Defined as a contract for portability. Concrete implementation is LiteLLM.
+**Definition:** [REMOVED v0.8.6] The model gateway interface and its LiteLLM implementation were deleted with the Model Router — the runtime is model-agnostic (see REMOVED_TOOLS.md).
 
 ### IWorkflowEngine
 
-**Definition:** The interface contract for external workflow orchestration. Optional, external to the runtime. Implementations: Temporal, DBOS Transact.
+**Definition:** [REMOVED] The workflow-engine interface (and DBOS) were removed — the runtime is a single tokio daemon (see `docs/01-architecture/REMOVED_TOOLS.md`).
 
-**Scope:** Not implemented in v1. Defined for future extensibility.
+**Scope:** Removed with the workflow engine.
 
 ### Prompt Caching
 
@@ -250,8 +222,8 @@ Define all terms used across the AI Runtime for Coding Agents specification docu
 
 **Scope:** First-class concern in the Context Engine's pack ordering.
 
-### Inspection Command
+### Preview Command
 
-**Definition:** A CLI command that can preview or replay what a given prompt would build (or did build). Generalizes the session-trace-inspection pattern.
+**Definition:** A CLI command that previews what a given prompt would build via BuildContext (event replay was removed — see `docs/01-architecture/REMOVED_TOOLS.md`).
 
-**Scope:** Consumes event bus events. Part of the CLI.
+**Scope:** Runs BuildContext locally (or via the daemon when running). Part of the CLI.

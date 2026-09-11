@@ -1,0 +1,35 @@
+[package]
+name = "knocode-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "knocode"
+path = "src/main.rs"
+
+[dependencies]
+knocode-core.workspace = true
+knocode-storage.workspace = true
+knocode-events.workspace = true
+knocode-repo-intel = { workspace = true, features = ["fs-watcher"] }
+knocode-context.workspace = true
+knocode-knowledge.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+toml.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+tiktoken-rs.workspace = true
+tokio.workspace = true
+reqwest = { version = "0.13", features = ["json"] }
+uuid = { version = "1", features = ["v4"] }
+tree-sitter-language-pack = "1"
+
+# `config set-log-level` persists KNOCODE_LOG_LEVEL in the user environment (HKCU)
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
+[features]
+default = []

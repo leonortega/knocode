@@ -1,0 +1,9 @@
+src/**
+node_modules/**
+test/**
+vitest.config.ts
+tsconfig.json
+.gitignore
+**/*.map
+*.log
+package-lock.json

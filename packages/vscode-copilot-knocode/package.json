@@ -1,0 +1,58 @@
+{
+  "name": "knocode-copilot-extension",
+  "displayName": "Knocode for GitHub Copilot",
+  "description": "Repository context enrichment for GitHub Copilot Chat via the Knocode daemon (@knocode participant).",
+  "version": "0.9.12",
+  "publisher": "knocode",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.98.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onChatParticipant:chat.knocode"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "chat.knocode",
+        "name": "knocode",
+        "fullName": "Knocode",
+        "description": "Ask with repository context from the local Knocode daemon.",
+        "isSticky": true
+      }
+    ]
+  },
+  "scripts": {
+    "vendor": "node ../../scripts/vendor-client.mjs",
+    "build": "node ../../scripts/vendor-client.mjs && tsc -p tsconfig.json",
+    "typecheck": "node ../../scripts/vendor-client.mjs && tsc -p tsconfig.json --noEmit",
+    "package": "npm run build && vsce package",
+    "test": "node ../../scripts/vendor-client.mjs && vitest run"
+  },
+  "keywords": [
+    "copilot",
+    "vscode",
+    "knocode",
+    "context",
+    "daemon",
+    "ai",
+    "chat-participant"
+  ],
+  "author": "Knocode",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LeonOrtega/knocode"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "@types/vscode": "^1.98.0",
+    "@vscode/vsce": "^3.2.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

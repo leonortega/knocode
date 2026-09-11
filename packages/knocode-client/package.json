@@ -1,0 +1,33 @@
+{
+  "name": "knocode-client",
+  "version": "0.9.12",
+  "description": "Single source of truth for the Knocode daemon client: MCP over POST /mcp (knocode_context), /health readiness gate, request_id correlation, and tagged context outcomes (enriched | passthrough + reason). Source-vendored into agent plugins at build time (scripts/vendor-client.mjs) — no runtime dependency, no registry publishing.",
+  "type": "module",
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "knocode",
+    "daemon",
+    "mcp",
+    "context"
+  ],
+  "author": "Knocode",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LeonOrtega/knocode"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.1.0"
+  }
+}

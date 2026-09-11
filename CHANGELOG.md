@@ -5,19 +5,221 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.9.12] - 2026-09-11 — Release engineering + retrieval hardening
+
+### Added
+- **Small-repo auto-tune** (`crates/knocode-context/src/retrieval/policy.rs`) — repos ≤ 500 docs auto-raise `max_files` 20→50 with the candidate pool co-scaled ≥ 4×max_files, reaching **100% recall of grep hits** on small repos at default config. A new `max_files_explicit` flag is threaded through `ContextConfig` → `RetrievalPolicy` so explicit pins (`--max-files`, `KNOCODE_MAX_FILES`, `KNOCODE_BENCH_MAX_FILES`) are **never** auto-overridden (previously `KNOCODE_MAX_FILES=20` was silently raised to 50). Verified: default → 50; `=20` → 20; `=15` → 15; a bench pinned to 20 reproduces the historical 88% recall row exactly.
+- **Release flow: merging dev→main IS the release** (`.github/workflows/release.yml`) — pushing `main` now verifies dev is fully merged, runs the version-mirror drift gate, builds Windows/Linux/macOS + the workspace test suite, then auto-tags `v<Cargo.toml version>` on main's HEAD and publishes the GitHub Release (tag is created only after all builds pass). Manifest refresh (scoop/winget) runs on push events only; `workflow_dispatch` on `main` re-runs safely (same-commit tag reused). Tag pushes no longer trigger releases.
+- **Repo-wide version sync** `scripts/sync-version.mjs` — root `Cargo.toml` is the single source of truth; the script surgically updates all 5 package manifests, `knocode-copilot-plugin/plugin.json`, `release.toml`, and the ROADMAP "Current Version" heading (`--check` mode for CI). Text replacement (not JSON rewrite) preserves formatting/CRLF — each file's diff is the version line only. Wired into the release workflow as a drift gate; installer help text de-mirrored (`-Version <x.y.z>`).
+- **`knocode preview --json`** — stable machine-readable contract (paths, provenance, token usage, retrieval stats); both eval harnesses (`eval/metrics/retrieval.py`, `eval/baseline/run.py`) consume it, and the token harness now reads the honest `token_usage.total` instead of tokenizing the JSON envelope.
+- **Wire-contract delimiter drift check in `scripts/vendor-client.mjs`** — the daemon's `knocode_context` answer is a full replacement delimited by the `format!` template in `http_server.rs` (`"{}\n\n---\n\nContext:\n{}"`), and two consumers hardcode that delimiter where the vendored-client byte-copy check can't see them: `opencode-knocode`'s `CONTEXT_DELIMITER` (hook-replay idempotency guard) and `knocode-copilot-plugin`'s `CONTEXT_DELIMITER` (prompt-prefix stripping so `UserPromptSubmit` doesn't duplicate the user's prompt). The script now extracts the template from the Rust source, strips `format!` placeholders (`{}`/`{{`/`}}`), and verifies both declarations in BOTH modes (`--check` CI and write-mode builds) — a mismatch exits 1 with a DRIFT line naming the consumer and both values, since re-vendoring cannot fix it (the regex that locates the `format!` template is itself part of the contract and tells you to update it when the layout changes). Verified: green on a clean tree, exits 1 on a simulated drift in either mode.
+- **`knocode config set-log-level <level>`** — change log verbosity without re-running the installer: upserts `[logging] level` in the user config (`~/.config/knocode/config.toml`) and the project config (`.knocode/config.toml`, only when it already has a `[logging]` section), and persists the user `KNOCODE_LOG_LEVEL` env var the same way the installer does (HKCU `Environment` + `WM_SETTINGCHANGE` broadcast on Windows via a `winreg` dep that is already in the tree; installer-format `export` lines in `~/.profile`/`~/.bashrc` on Unix) so agent plugins pick the level up too. Setting the default (`info`) removes a previously persisted env var instead of writing one — env beats config files, so a stale `KNOCODE_LOG_LEVEL=debug` must not outlive the reset. Accepts `error|warn|info|debug|trace` plus the installer's aliases (`quiet|normal|verbose`), rejects anything else before touching files. Env persistence is best-effort: a failure warns but the config files stay updated.
+- **Log verbosity option (3 levels, shared knob)** — `KNOCODE_LOG_LEVEL` now tunes the whole runtime: the daemon maps it to its `tracing` filter as before (daemon logs every inbound MCP call at `debug` and every `/health` poll at `trace`, so verbosity 2 shows literally every call in `~/.knocode/logs/knocode.log`), while the shared daemon client (`knocode-client`, vendored into the agent plugins) maps it to 0 quiet / 1 normal / 2 verbose — at verbosity 2 every MCP call (`method → outcome latency`) and readiness poll is logged from the plugin side, gated lines replace the previous unconditional `console.log`s, and transport failures are always shown (errors only at verbosity 0). Both installers ask `Log verbosity? [0] quiet / [1] normal (default) / [2] verbose (every daemon call)` (or take `--log-verbosity` / `-LogVerbosity`), then persist the choice as the user env var AND `[logging] level` in `~/.config/knocode/config.toml` (env wins for the daemon; config keeps it discoverable via `knocode doctor`).
+
+### Changed
+- **Pack-size re-tune** (`scaled_snippet_window`, `crates/knocode-context/src/lib.rs`) — beyond 20 evidence entries the per-file snippet window scales down proportionally (3 fixed header lines per entry accounted, 6-line floor), holding the auto-tuned 50-file pack at **+5.8% tokens** vs the true 19-file old path (4,537 vs 4,287; unscaled would be ~10.7k). File membership — and therefore recall/MRR — untouched.
+- **README rewritten for end users** — the benchmark story now leads (grep-vs-knocode latency/novelty charts, token economics), a Mermaid pipeline diagram, and a tech-stack table with upstream URLs; developer internals (wire formats, crate tree, build steps) moved to `CONTRIBUTING.md` and `docs/`.
+- **Copilot integration registered via user-level hooks, not plugin discovery** — VS Code/Copilot never scans `~/.knocode/copilot-plugin` (only marketplaces, `Chat: Install Plugin From Source`, or `~/.copilot/installed-plugins/`), so the deployed bundle was invisible. All four installers now write `~/.copilot/hooks/knocode-context.json` (SessionStart + UserPromptSubmit, absolute script path, forward slashes) — the same registration mechanism RTK uses. The `~/.knocode/copilot-plugin` bundle remains the hook-script home; its bundled stdio MCP server is no longer auto-registered (context flows through the hooks).
+- **`knocode-copilot-plugin` hook surface moved to `UserPromptSubmit`** — the `PreToolUse` hook (context for read/search tools) is removed: RTK owns Copilot's `PreToolUse` layer for command rewriting, and a second PreToolUse duplicated daemon calls per tool. `UserPromptSubmit` now injects repository context retrieved from the **user's actual prompt** (the faithful analog of the OpenCode plugin's `session.prompt` admission hook); `SessionStart` keeps seeding a warm repository overview. Hook handler, `hooks.json`, smoke test, and README updated; smoke test passes (`session-start` + `user-prompt-submit`).
+
+### Fixed
+- **Tokenizer hot-path bug** (`crates/knocode-context/src/lib.rs`) — `count_tokens` rebuilt the ~100k-entry BPE tokenizer on **every call** (per *line* inside the truncation loop): a single over-budget `preview` cost **25.3 s**. The tokenizer is now built once (`OnceLock`), warmed at `ContextEngine::new` (~43 ms paid at startup, not mid-request), and guarded by a regression test (deterministic static check + timing ceiling). Same query: **25,305 → 80 ms**.
+- **Index heal loop re-healed forever** (`crates/knocode-repo-intel`) — a symbol-less DB re-triggered full re-extraction on every run (~14 s at 9.8k files). Heal now persists symbols only for changed files (one-shot); verified 36,861 symbols persisted → next run warm in 480 ms. `IndexStats` reports the run mode (WARM/INCREMENTAL/HEAL) + per-phase timings in every index log.
+- **Copilot plugins no longer send the user's prompt to the model twice** — the daemon's `knocode_context` answer is a **full replacement** whose prefix is the original prompt (`http_server.rs`: `format!("{}\n\n---\n\nContext:\n{}", message, yaml)`), but both Copilot integrations treated it as extra-to-append content. `vscode-copilot-knocode`'s `@knocode` participant pushed a `[Repository context from Knocode]` message containing the whole replacement AND then `request.prompt` again — the model read the ask twice per turn. It now sends `enrichedText` alone as the final user message (bare prompt on passthrough). `knocode-copilot-plugin`'s `UserPromptSubmit` hook returned the whole replacement as `additionalContext`, duplicating the prompt the same way (and `SessionStart` re-injected the synthetic probe text); the hook now splits on the daemon delimiter and injects the context block only. Smoke test mocks the real wire format and asserts the prompt sentinel never leaks into `additionalContext`.
+- **`opencode-knocode` idempotency guard matched a marker the daemon never emits** — `CONTEXT_MARKER = "<knocode_context>"` guarded hook replays, but production daemon output delimits context with `\n\n---\n\nContext:\n`, so the guard could never fire against a real enriched draft (unit tests masked it by mocking the marker). Guard now checks `CONTEXT_DELIMITER = "\n\n---\n\nContext:\n"` (the actual wire format) in both the V2 `session.prompt` and V1 `chat.message` hooks; test fixtures switched from the invented marker to the real format.
+- **Daemon MCP dedup bug: repeat prompts silently suppressed as `no_context_hits`** — every MCP `knocode_context` call passed the hardcoded `session_id="mcp"` to the context engine, whose per-session fingerprint dedup (spec §3) then put ALL MCP callers (every plugin window, every repo, every prompt) into ONE bucket: the second identical prompt from anyone returned an empty pack → `no_context_hits` passthrough even with a healthy index. MCP is stateless, so the daemon now scopes the dedup bucket per caller via `mcp_session_id()`: the client-supplied `request_id` (a fresh UUID per call from the plugins) prefixes a `mcp:` bucket, absent/blank ids get a fresh random UUID per call, and the prefix prevents collision with real `/hook` session ids. Live-verified: three identical calls with distinct request_ids all enrich (20 tokens each, previously call 2+ collapsed to `no_context_hits`); curl-style callers without a request_id also enrich repeatably. Regression tests: `mcp_session_id_scopes_per_request_id` (unit) and `test_context_repeat_call_not_deduped` (two identical MCP calls over the router → both enrich); daemon suite 28 lib + e2e green, workspace `cargo test` green, clippy clean for the crate.
+- **`opencode-knocode` restores OpenCode 1.x (V1) support — the plugin loaded but registered zero hooks** — the V2 port (0.9.11) made the default export a V2-only `Plugin.define({ id, setup })`; OpenCode 1.x expects a `server()` function returning hooks, so on 1.x the plugin loaded silently with NO hooks: prompts were never intercepted, the daemon never received any call (no `[knocode]` lines in the OpenCode log, no MCP `tools/call` in the daemon log). The default export now follows the documented "Support V1" pattern — `{ ...Plugin.define({ id, setup }), server }` — where V1 calls `server()` (restored `chat.message` enrichment: mutates `message.content` in place for string and part-array content, same vendored client, `<knocode_context>` idempotency guard, fail-open passthrough, metric lines, `worktree` as `repository_path`) and V2 reads `id`/`setup()` and ignores `server()`. V1-shape tests added (enrichment, passthrough, idempotency, role/empty skips, unreachable fail-open, repository_path) and a dual-entrypoint shape test; suite passes (24 tests).
+- **Installers now remove a non-RTK `rtk` name-collision binary instead of just warning** — when the identity probe (`rtk init --help`) fails (e.g. the unrelated crates.io "Rust Type Kit" `rtk` in `~/.cargo/bin`), all four installers (`installers/knocode-install.{ps1,sh}`, `scripts/install.{ps1,sh}`) now `cargo uninstall rtk`/delete the impostor before downloading the real [rtk-ai/rtk](https://github.com/rtk-ai/rtk) release, so the wrong binary can no longer shadow the real one on PATH. If removal fails, an explicit manual-removal warning is shown.
+
+### Added
+- **Lightweight integration-boundary metrics** — daemon `ContextPack` now carries `retrieval_stats` (code-search duration + candidate/result counts from the engine where the data lives), observed as `knocode_context_files`, `knocode_retrieval_candidates`, and `knocode_retrieval_duration_seconds` histograms/counters on `GET /metrics`; no I/O or serialization on the hot path. The plugin measures its integration boundary with a single `Date.now()` pair and logs one INFO line per prompt: `[knocode] context latency=<ms> tokens=<n> files=<n>` (plus a `context passthrough latency=<ms>ms` line on fail-open), reading `total_tokens`/`provenance` from the existing MCP `structuredContent` — no metrics pipeline, no network, no duplicate daemon metrics.
+
+### Changed
+- **`opencode-knocode` ported to the OpenCode V2 plugin spec** — `Plugin.define({ id, setup })` + `ctx.session.hook("prompt")` replaces the V1 `chat.message` hook: enrichment now runs during prompt admission, mutating the owned `event.prompt.text` draft (edits become the canonical persisted user input). Adds an idempotency guard against hook replays and clears stale attachment-mention offsets when a rewrite breaks the original-text prefix. Dependency moved to `@opencode-ai/plugin` `beta` (V2 API is beta). The plugin's legacy `POST /hook` client (`callKnocodeDaemon`, `KnocodeRequest`/`KnocodeResponse`, `hashRepositoryId`) was removed — MCP `knocode_context` is the only enrichment path.
+- **Legacy `/hook` ToolOutput contract and `ExecutionOptimizer` removed from the daemon** — `POST /hook` now serves the pre-generation hook only; `PreToolCall` payloads answer HTTP `400`. `RequestPayload::ToolOutput`, `ResponsePayload::CompressedOutput`, `HookType::PreToolCall`, the `tokens_saved` metric, and the orphaned `.claude/hooks/knocode-pretool.sh` were deleted. Tool-output compression lives exclusively in [RTK](https://github.com/rtk-ai/rtk).
+- **`knocode_compress` removed from the daemon MCP surface** — `POST /mcp` now exposes a single tool, `knocode_context`; tool-output compression lives exclusively in [RTK](https://github.com/rtk-ai/rtk) (installed/wired by the knocode installers on request). Calling `knocode_compress` answers the standard JSON-RPC `-32602` unknown-tool error.
+- **OpenCode plugin is context-only** — `tool.execute.after` (compression) removed from `opencode-knocode`; the Copilot agent plugin's `PostToolUse` compression hook removed likewise. RTK ships its own OpenCode/Copilot integrations and the knocode installers now offer RTK as an opt-in external resource (`--with-rtk`), wiring it via `rtk init -g` for each selected agent.
+- **Docs updated** — RUNTIME / ARCHITECTURE / COMPONENTS / DATA_FLOW / REQUEST_LIFECYCLE / V1_RUNTIME_SPEC / REMOVED_TOOLS / ROADMAP and `00-project` docs now reflect the daemon being context-only.
+
+### Performance
+
+Same configs and result-set sizes as v0.9.9 — every quality metric held or improved while the engine got 2–7.5× faster (full report: `docs/BENCHMARKS_V1.md`).
+
+| Metric | v0.9.9 | v0.9.12 |
+|---|---|---|
+| MRR (50-task golden eval) | 0.245 | **0.697** (right file typically rank #1) |
+| R@5 / R@10 | 0.573 / 0.697 | **0.613 / 0.727** |
+| DefinitelyTyped retrieval avg (53,828 files) | 128 ms | **17 ms** (7.5× faster, zero panic fallbacks) |
+| Speedup vs `grep -rE` (DT / Mattermost) | 36.5× / 67.2× | **218× / 133×** |
+| Small-repo recall of grep hits (k=50) | 88% | **100%**, grep-only 0 |
+| BuildContext (criterion, 100 samples) | 15.2 ms | **13.82 ms** |
+| Over-budget preview latency | 25.3 s | **80 ms** |
+
+## [0.9.11] - 2026-09-04 — Doctor index-path fix
+
+### Fixed
+- **`knocode doctor` reported `0 docs` / "no results — re-run init"** — the doctor probes opened the global `~/.knocode/index` container instead of the repo-scoped `~/.knocode/index/<repository_id>/` directory that `init` and the daemon write to. Doctor now resolves the index via `default_index_path(repository_id)` (honoring `KNOCODE_INDEX_DIR`), so `Tantivy:` and `Retrieval:` report the real in-repo counts.
+
+### Changed
+- **Version strings synced** across `knocode.json` (Scoop), `Formula/knocode.rb` (Homebrew), `packages/opencode-knocode/package.json`, `Cargo.lock` to match workspace `0.9.11`
+
+---
+
+## [0.9.10] - 2026-09-04 — Housekeeping + Cleanup
+
+### Fixed
+- **Undefined `$ocGlobalDir` in `scripts/uninstall.ps1`** — npm plugin cleanup silently did nothing on Windows; variable now defined before use
+
+### Changed
+- **Version strings synced** across `knocode.json` (Scoop), `Formula/knocode.rb` (Homebrew), `packages/opencode-knocode/package.json` to match workspace `0.9.10`
+- **Removed stale docs** — `ADAPTERS.md` (references deleted adapter files), `EVALUATION.md` (references removed Model Router/FlashRank), `docs/dashboards/knocode.json` (stale Grafana dashboard)
+- **Cleaned `.opencode/.gitignore`** — removed `engram/` entry (engram removed in v0.7.6)
+- **Cleaned `docs/INDEXING_PERF_PLAN.md`** — removed references to deleted `codebase-memory-mcp` and `engram`
+
+---
+
+## [0.9.5] - 2026-09-03 — GitHub Releases + Lean Installers
+
+### Added — Release Pipeline
+- **GitHub Actions release workflow** `.github/workflows/release.yml` — on `v*` tag push: verifies the tag matches `workspace.package.version` in `Cargo.toml` (aborts on mismatch so releases can't be mislabeled), builds `knocode` + `knocode-daemon` (Windows x64, `--release`), packages `knocode-<ver>-x86_64-pc-windows-msvc.zip`, and publishes it to the tag's GitHub Release (auto-created if missing, updated on re-tag) together with the end-user installer
+- **End-user installer** `installers/knocode-install.ps1` — ships in every Release: downloads the matching prebuilt archive (latest by default, or pinned via `-Version`), installs `knocode.exe` + `knocode-daemon.exe` to `~/.knocode/bin`, persists that dir on the USER PATH (idempotent), and verifies with `knocode --version`. One-liner: `powershell -ExecutionPolicy Bypass -c "irm https://github.com/leonortega/knocode/releases/latest/download/knocode-install.ps1 | iex"`
+
+### Changed — Installers (prebuilt-only, no Rust)
+- **Removed Rust/rustup + clippy from `scripts/install.ps1`/`install.sh`** — the installers no longer compile (they consume the `target/release/` prebuilt binaries; source builds use `scripts/compile.*` or CI), so the rustup install/update, rustc checks, and `rustup component add clippy` are gone
+- **Removed ast-grep CLI** (`npm @ast-grep/cli`) — structural search is the embedded `ast-grep-core` crate, no external binary required
+- **Removed eslint** global install — the `cargo clippy`/`eslint` analyzer gates have no runtime call sites (reserved for the excluded workflow crate)
+- **`-SkipExternal` now skips RTK + promptfoo too** in `install.ps1` (brace placement fixed) — matches `install.sh` and the documented semantics; promptfoo/Python remain developer-only eval tooling
+- **Coderun → Knocode rename** in uninstall messaging and related configuration
+
+### Changed — CI
+- **GitHub Actions on the Node 24 runtime** — `actions/checkout@v5` + `softprops/action-gh-release@v3` (v2.6.2 was the last Node 20 release), clearing the Node 20 deprecation warnings
+
+### Changed
+- Version `0.9.0 → 0.9.5` in `Cargo.toml` (`workspace.package`) and `release.toml`
+
+### Docs
+- AI Runtime V1 Specification added; roadmap updated
+
+---
+
+## [0.9.0] - 2026-09-03 — Retrieval Engine v1 + Benchmarks
+
+### Added — Retrieval Engine
+- **Intent detection** `crates/knocode-context/src/retrieval/intent.rs` classifies queries into categories (procedural, structural, debugging, informational, mixed) to route to the best search strategy
+- **Query expansion** `crates/knocode-context/src/retrieval/query.rs` expands queries with synonyms and related terms (e.g., "error handling" → [error, handling, try, catch, exception]) for higher recall
+- **BM25 full-text search** via tantivy `MmapDirectory` for fast lexical matching across indexed files
+- **Structural search** `crates/knocode-context/src/retrieval/structural.rs` in-process ast-grep backend for code-aware search (find function definitions, class hierarchies, import chains)
+- **Graph boost** `crates/knocode-context/src/retrieval/ranking.rs` boosts files related to top candidates via the code dependency graph
+- **Retrieval policy** `crates/knocode-context/src/retrieval/policy.rs` configurable tuning: `candidate_k` (50→500), `max_files`, `enable_graph`, `enable_expansion`
+- **Candidate pool sweep** — `candidate_k` increased from 50 to 500 with +249% recall improvement at only +3ms latency cost
+- **CombinedRetriever** `crates/knocode-context/src/retrieval/engine.rs` orchestrates the full pipeline: intent → expansion → BM25 + structural → graph → ranking
+
+### Added — Benchmark Suite
+- **bench_components** — Component evaluation on knocode repo (20 queries, measures impact of graph boost, candidate_k, query expansion)
+- **bench_mattermost_50** — 50 queries against Mattermost (9k Go + React files) vs `grep -rE`
+- **bench_dt_50** — 50 queries against DefinitelyTyped (53k TypeScript files) vs `grep -rE`
+- **bench_retrieval_50** — 50 queries on knocode repo with `index_repository()` cold/warm comparison
+- **benchmark.rs** — Unit tests for recall@k, MRR, keyword coverage, intent detection metrics
+- Full benchmark report: `docs/BENCHMARKS_V1.md`
+
+### Added — Repository Intelligence Improvements
+- **First-class docs indexing** — Markdown files indexed without tree-sitter via dedicated path
+- **Docs/code split** — Separated documentation and code retrieval paths for better precision
+- **PascalCase splitting** — Symbol extraction splits `MyFunctionName` → [My, Function, Name] for better BM25 matching
+- **Path tokenization** — File paths split into searchable tokens (e.g., `src/components/Header.tsx` → [src, components, Header, tsx])
+- **Incremental symbol extraction** — `mtime+size` shortcut skips unchanged files on warm re-index (cold: 1,455 symbols, warm: 0-298)
+
+### Added — Watch Mode Configuration
+- **Two auto-index modes** `crates/knocode-repo-intel/src/watcher.rs`:
+  - `commit` (default) — Polls the resolved HEAD commit (git2, handles branch refs/packed refs/detached HEAD) every 5s, re-indexes only on new commits
+  - `filesystem` — Real-time file change detection via `notify` crate
+- **Configurable** via `[index].watch_mode` in `.knocode/config.toml` or `KNOCODE_WATCH_MODE` env var
+- **git2 now non-optional** — Required for commit-based watching (always available)
+
+### Added — Daemon Readiness Endpoint
+- **`GET /health` + `GET /metrics` readiness** — `GET /health` now reports `state: "indexing" | "ready"` (plus `index_files`), `GET /metrics` exposes a `knocode_daemon_ready` gauge, and `POST /hook` returns HTTP `503` with `reason: "daemon_indexing"` until the initial index completes. The HTTP health/metrics listener binds *before* indexing (only request serving is readiness-gated), so clients can poll readiness and wait instead of queueing on the engine lock mid-index.
+- **UDS/MessagePack `Probe` payload** — new `RequestPayload::Probe` / `ResponsePayload::Probe` (plus `HookType::Probe`) over the primary transport: send `{"type":"Probe"}` and get `state`, `index_files`, and `version` back. Answered before rate-limiting/gating with no engine lock — the same readiness signal as `GET /health`, so UDS clients can wait before sending real requests.
+- **Client adapters poll readiness before their first request** — the OpenCode plugin, Claude Code hooks (`.claude/hooks/knocode-ready.sh`), Gemini CLI hooks, and Cursor extension now wait for `state: "ready"` (polling `GET /health`, bounded + fail-open) before their first real request, so a cold-starting daemon enriches the first prompt instead of 503-passthroughing it. Unreachable daemons bail immediately (hooks never stall on a missing daemon); successful checks are cached for 30s. `KNOCODE_READY_TIMEOUT_MS` controls the wait budget (default 10s).
+
+
+### Added— Daemon MCP Surface (`POST /mcp`)
+- **Daemon-hosted MCP**— JSON-RPC 2.0 at `POST /mcp` on the existing `127.0.0.1:9527` axum listener (identical on Windows and Unix; no extra socket or process). Stateless tools-only subset: `initialize`, `ping`, `tools/list`, `tools/call`, `notifications/initialized` (HTTP 202).
+- **Two tools**— `knocode_context(prompt, repository_path?)` (enriched context answer + provenance `structuredContent`) and `knocode_compress(content, tool_name, output_type?, context?)` (compressed output + token counts) - the same engine/optimizer paths `/hook` uses.
+- **No-conversion client path**— the opencode plugin now drives both hooks through the MCP tools (`chat.message` -> `knocode_context`, `tool.execute.before` -> `knocode_compress`); daemons that predate `/mcp` are served via the automatic `/hook` fallback (wire behavior unchanged).
+- **Readiness over MCP**— `tools/list`/`initialize` answer while indexing; `tools/call` returns JSON-RPC `-32001 daemon_indexing` (HTTP `200`) until the index is ready - parity with the `/hook` 503 gate.
+- **`knocode-mcp` rewritten as a pass-through proxy** — `packages/knocode-mcp` (stdio MCP for Codex, VS Code Copilot, Claude) no longer keeps its own half-implemented tool list: `knocode_search` was an alias of `knocode_preview`, `knocode_symbols` dumped the rewrite JSON, and `knocode_read` never read a file. It now relays stdio JSON-RPC verbatim to the daemon’s `POST /mcp`, so those agents see the identical canonical tools (`knocode_context`, `knocode_compress`) with no surface drift; MCP notifications are forwarded but never answered, and an unreachable daemon answers a JSON-RPC `-32000` so clients fail open.
+
+### Changed — Dependency Updates
+- **tantivy** updated to `0.26.1` (latest stable)
+- **git2** updated from `0.19` to `0.21` (fewer transitive deps: libssh2, openssl removed)
+- **tantivy-tokenizer-api** updated from `0.2` to `0.7`
+- **tree-sitter-language-pack** updated to `1.16.1`
+- **Version** bumped from `0.8.6` to `0.9.0`
+
+### Changed — Cleanup
+- **Removed engram** — Cross-session memory now handled by SQLite+tantivy local
+- **Removed FlashRank** — Reranker removed per benchmark evaluation (MRR degradation)
+- **Removed LLM Model Router / LiteLLM** — BuildContext now deterministic (MCP retained)
+- **Removed MkDocs integration** — Docs indexed via first-class path instead
+- **Removed DBOS workflow** — `knocode-workflow` crate, the daemon `workflow` feature and its routes, and the CLI `workflow` command deleted (see `docs/01-architecture/REMOVED_TOOLS.md`)
+- **Removed `knocode replay`** — Event replay removed from hot path, `tracing` + `metrics` retained
+- **Removed the Skill Engine** — `knocode-skills` crate, `ContextPack.behavioral_skills`, Knowledge Hub skill load/match, the CLI `skills` subcommand + `--community-skills`, `[skills]` config, and repo skill content deleted (see `docs/01-architecture/REMOVED_TOOLS.md`)
+- **Removed the model map** — `[model]` config + `KNOCODE_MODEL_DEFAULT`, metrics tier dimension, and `token_usage.model`/`tier` columns (migration 007)
+- **Bench files gated behind `#[cfg(test)]`** — Zero warnings in release builds
+
+### Changed — Installers
+- **RTK downloaded from GitHub releases** — both installers now fetch the matching prebuilt asset for the platform (`rtk-x86_64-pc-windows-msvc.zip`, `rtk-{aarch64,x86_64}-apple-darwin.tar.gz`, `rtk-{x86_64-musl,aarch64-gnu}-unknown-linux*.tar.gz`) from `rtk-ai/rtk/releases/latest/download/<asset>`, extract it to `~/.knocode/bin/rtk(.exe)`, and clean up the temp download. The repo-shipped `.knocode/rtk/` prebuilt and the cargo build fallback (git + crates.io) are removed — crates.io `rtk` is an unrelated crate, so no external binaries are kept in the repo. `uninstall.ps1` now also removes the current `~/.knocode/bin/rtk.exe` path.
+- **Knocode agent skill restored (per-agent, optional)** — `.knocode/skills/knocode/SKILL.md` — the skill that teaches an agent how to use the runtime (binary location, `init`/`doctor`, MCP tools) — is kept even though the runtime Skill Engine is removed. Installers now copy it to the agent’s global skills directory (`~/.config/opencode/skills/knocode/`), opencode being the only supported agent today, and uninstallers remove that copy. Agent-native discovery only: the runtime never matches or injects skills.
+### Fixed
+- **bench_retrieval_50 empty results** — Added missing `index_repository()` call before queries
+- **Unnecessary parentheses warnings** in `bench_components.rs` (3 instances)
+- **Dead code warnings** in `knocode-repo-intel` — Gated `DEBOUNCE_MS`, `LIBGIT2_CACHE_MAX_BYTES`, `repo_has_changes` behind `#[cfg(feature = "fs-watcher")]` and `#[cfg(test)]`
+- **Auto-reindex goes through the ContextEngine** — the daemon watcher reindexes via `ContextEngine::reindex_repository`, and indexing now evicts the repo's cached tantivy handle on completion so the next query serves the fresh commit immediately instead of from a stale pre-reindex reader
+
+### Performance
+
+| Metric | Mattermost (9k) | DefinitelyTyped (53k) |
+|--------|----------------|----------------------|
+| Retrieval P50 | 27ms | 47ms |
+| Grep P50 | 971ms | 4,819ms |
+| Speedup | **27×** | **106×** (P50) |
+| Novelty | 53.0% | 89.2% |
+| Recall | 13.1% | 14.2% |
+
+---
+
+## [0.7.0] - 2026-08-25 — Single-Command Bootstrap
+
+### Added — One-Command Repository Bootstrap
+- **`knocode init` full bootstrap** `crates/knocode-cli/src/main.rs:cmd_init` 6 phases in one command (was scaffold-only + manual `index`): `[1/6]` scaffold `.knocode/`, config, skills, database → `[2/6]` repository discovery → `[3/6]` indexing (tree-sitter symbols + tantivy BM25 + dependency graph) → `[4/6]` knowledge initialization → `[5/6]` engram memory initialization → `[6/6]` repository profile; incremental and safe to re-run
+- **Repository discovery** `discover_repository()`/`walk_ext_counts()`/`ext_language()` language census by extension (16 mappings, skip-list for `.git/node_modules/target/dist/build/vendor/...`), `detect_stack()` frameworks + build/test commands from manifests (`Cargo.toml` + workspace detection, `package.json` scripts + deps react/vue/svelte/next/express/nest, `go.mod`, `pyproject.toml` poetry/uv, `requirements.txt`, `pom.xml`, `build.gradle(.kts)`, `Makefile`), git branch from `.git/HEAD`
+- **Knowledge seeding at init** `ingest_seed_documents()` README (+`docs/adr|decisions/*.md`) → `store_knowledge(category="docs"/"adr")` so retrieval works before first task
+- **Engram bootstrap seed** `init_engram()` health-checks `knowledge.memory_endpoint`, seeds `repository-profile` + `readme` entries in project namespace via real `EngramClient` HTTP (fail-open with status message when endpoint unreachable/disabled)
+- **Repository Profile artifact** `build_profile_json()` → `.knocode/profile.json` (languages+counts, frameworks, commands, important dirs, git branch, index stats) + stored as knowledge entry `category="profile"`, committable per repo
+- **Doctor probe** `Repo profile:` check added to `cmd_doctor`
+
+### Changed — Installers
+- **ast-grep via npm** prebuilt `@ast-grep/cli` (was cargo compile), PATH fixup + graceful WARN fallback
+- **RTK prebuilt binary** installers copy `.knocode/rtk/rtk.exe` → `~/.knocode/bin/rtk.exe` (unified bin, legacy `~/bin/rtk.exe` migrated; no compile), live-streamed cargo build output as last resort (PS5.1 EAP fixes)
+
+### Changed
+- Version `0.6.0 → 0.7.0` `Cargo.toml` + `release.toml`
+
 ## [0.6.0] - 2026-08-24 — DBOS Required + Spec Compliance
 
 ### Changed — DBOS Promoted to Required (SQLite + Litestream native async)
-- **DBOS required** `crates/coderun-core/src/config.rs:WorkflowConfig` `enabled:true` `engine:dbos` default (was `false/noop`), single-node SQLite `sqlite://~/.coderun/dbos.db` + `sqlite://~/.coderun/dbos_system.db` + Litestream replica `DBOS_LITESTREAM_REPLICA_URL`
-- **Native async** `crates/coderun-core/src/traits.rs:IWorkflowEngine` → `#[async_trait]` `async fn start_workflow/get_status/is_available`, `crates/coderun-workflow/src/dbos.rs` deleted `block_on_in_thread` hack, direct `tokio::time::timeout(5s/3s/1s)` via shared `reqwest::Client`; `NoopWorkflowEngine` kept only `#[cfg(test)]`; CLI `crates/coderun-cli/src/main.rs:cmd_workflow` now `rt.block_on`; fail-closed when DBOS down (was fail-open)
-- **HMAC canonical** `crates/coderun-core/src/secrets.rs:verify_hmac/hmac_hex` single impl via `hmac = "0.12"` `Hmac<Sha256>` `LazyLock<Regex>` for `redact_secrets` (was `sha256(secret+body)` ×2 in `workflow/dbos.rs` + `daemon/ratelimit.rs`); `daemon/ratelimit.rs:verify_hmac` delegates to core
+- **DBOS required** `crates/knocode-core/src/config.rs:WorkflowConfig` `enabled:true` `engine:dbos` default (was `false/noop`), single-node SQLite `sqlite://~/.knocode/dbos.db` + `sqlite://~/.knocode/dbos_system.db` + Litestream replica `DBOS_LITESTREAM_REPLICA_URL`
+- **Native async** `crates/knocode-core/src/traits.rs:IWorkflowEngine` → `#[async_trait]` `async fn start_workflow/get_status/is_available`, `crates/knocode-workflow/src/dbos.rs` deleted `block_on_in_thread` hack, direct `tokio::time::timeout(5s/3s/1s)` via shared `reqwest::Client`; `NoopWorkflowEngine` kept only `#[cfg(test)]`; CLI `crates/knocode-cli/src/main.rs:cmd_workflow` now `rt.block_on`; fail-closed when DBOS down (was fail-open)
+- **HMAC canonical** `crates/knocode-core/src/secrets.rs:verify_hmac/hmac_hex` single impl via `hmac = "0.12"` `Hmac<Sha256>` `LazyLock<Regex>` for `redact_secrets` (was `sha256(secret+body)` ×2 in `workflow/dbos.rs` + `daemon/ratelimit.rs`); `daemon/ratelimit.rs:verify_hmac` delegates to core
 - **Sidecar native** `workflow/dbos/src/main.ts` + `workflow/dbos/src/workflows/governed.ts` now import `dbos-transact` `DBOS.workflow/communicator/transaction/sleep/signal`, `workflow/dbos/package.json` `0.4.0→0.6.0` + `dbos-transact = "^1.2.0"`
 
 ### Added — Duplicate Collapse + Extended Languages
-- **Skill scorer single** `crates/coderun-skills/src/lib.rs:SkillEngine::from_skills` + `crates/coderun-knowledge/src/lib.rs:match_skills` delegates to canonical `SkillEngine::match_skills` (deleted `simple_tag_match` divergent `0.3` scorer)
-- **Extended languages feature B** `crates/coderun-repo-intel/Cargo.toml` `extended-languages = [tree-sitter-go/java/c/cpp]` optional, `crates/coderun-repo-intel/src/parser.rs:get_language` `#[cfg(feature)]` arms for `go,java,c,cpp` (`cpp` also `c++` alias), `crates/coderun-core/src/config.rs:IndexConfig` default `4` langs (was `8`), `validate()` warns if `go/java/c/cpp` without feature
-- **Hook compat (OpenSpec)** `.opencode/plugins/coderun.ts` dual registration `chat.message` primary + `message.updated` compat shim `WARN` + metric placeholder (see `docs/V0_6_0_PLAN.md:2.1`)
-- **Workspace deps** `async-trait = "0.1"` `hmac = "0.12"` `sha2` deduplicated in `Cargo.toml:18`; `crates/coderun-core:Cargo.toml` + `coderun-workflow` add `hmac,async-trait`
+- **Skill scorer single** `crates/knocode-skills/src/lib.rs:SkillEngine::from_skills` + `crates/knocode-knowledge/src/lib.rs:match_skills` delegates to canonical `SkillEngine::match_skills` (deleted `simple_tag_match` divergent `0.3` scorer)
+- **Extended languages feature B** `crates/knocode-repo-intel/Cargo.toml` `extended-languages = [tree-sitter-go/java/c/cpp]` optional, `crates/knocode-repo-intel/src/parser.rs:get_language` `#[cfg(feature)]` arms for `go,java,c,cpp` (`cpp` also `c++` alias), `crates/knocode-core/src/config.rs:IndexConfig` default `4` langs (was `8`), `validate()` warns if `go/java/c/cpp` without feature
+- **Hook compat (OpenSpec)** `.opencode/plugins/knocode.ts` dual registration `chat.message` primary + `message.updated` compat shim `WARN` + metric placeholder (see `docs/V0_6_0_PLAN.md:2.1`)
+- **Workspace deps** `async-trait = "0.1"` `hmac = "0.12"` `sha2` deduplicated in `Cargo.toml:18`; `crates/knocode-core:Cargo.toml` + `knocode-workflow` add `hmac,async-trait`
 
 ### Changed
 - Version `0.5.0 → 0.6.0` `Cargo.toml:18` + `release.toml:39`, 193 tests (was 166; +27 via extended-languages + async DBOS + HMAC core)
@@ -27,13 +229,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added — First-Class Fixes (fallbacks kept only inside Err/warn)
 - **ast-grep** `search_structural()` first-class `sg-core` gated `repo-intel/src/lib.rs:348` (heuristic deleted as primary, kept only in `search_structural_fallback()`)
 - **engram** deterministic reads `knowledge/src/lib.rs:248` `EngramClient::search_memory()` `2s timeout` primary `block_on_in_thread`, `db.search_memory()` LIKE only on Err
-- **FlashRank via ort** `knowledge/src/rerank.rs:1` `ort=2.0.0-rc.13` optional feature int8 `~/.coderun/models/flashrank.onnx` primary, `rerank_tfidf()` fallback with WARN, `Default enabled:true`
+- **FlashRank via ort** `knowledge/src/rerank.rs:1` `ort=2.0.0-rc.13` optional feature int8 `~/.knocode/models/flashrank.onnx` primary, `rerank_tfidf()` fallback with WARN, `Default enabled:true`
 - **codebase-memory-mcp** `repo-intel/src/graph.rs:20` `try_codebase_memory_mcp()` via `npx` probe primary, regex `extract_imports()` fallback with WARN
 - **LiteLLM** `LiteLLMGateway` `router/src/lib.rs:222` `complete_with_fallback()` `capable→balanced→fast` cascade + `cost_usd` `003_graph.sql:15`
-- **RTK** vendored crate primary `optimizer/src/lib.rs:66` `RtkAdapter::compress()` first, built-ins `WARN` fallback, `tee` `~/.coderun/logs/tool-failures/`
+- **RTK** vendored crate primary `optimizer/src/lib.rs:66` `RtkAdapter::compress()` first, built-ins `WARN` fallback, `tee` `~/.knocode/logs/tool-failures/`
 - **Git** `notify+git2` `repo-intel/src/watcher.rs:7` `try_notify_git2_watcher()` primary `notify::RecommendedWatcher`+`git2::diff`, polling fallback
 - **MkDocs** ingestion `repo-intel/src/lib.rs:290` walk `docs/**/*.md` → `store_knowledge(category="docs")` + tantivy on `index_repository()`
-- **Promptfoo** UDS `eval/providers/context-quality.js:1` `net.createConnection("/tmp/coderun.sock")`+`msgpack-lite` length-prefix+`rmp-serde` primary, mock fallback
+- **Promptfoo** UDS `eval/providers/context-quality.js:1` `net.createConnection("/tmp/knocode.sock")`+`msgpack-lite` length-prefix+`rmp-serde` primary, mock fallback
 - **Native analyzers** `optimizer/src/analyzers.rs` `run_gate()` `cargo clippy -D warnings` post-DBOS gate
 - **Workspace** `notify="6"`, `git2="0.19"`, `ort` per-crate optional `knowledge/Cargo.toml:20` feature `ort`
 
@@ -43,11 +245,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0] - 2026-08-24 — Production Hardening + DBOS
 
 ### Added
-- **DBOS Transact** durable workflows: `crates/coderun-workflow` (`DBOSWorkflowEngine: IWorkflowEngine`), Node sidecar `workflow/dbos/` (SQLite WAL + Litestream, approval gates, audit), `005_audits.sql` (`audits` + `workflows`), CLI `coderun workflow start/status/approve/list`, `WorkflowConfig` (`CODERUN_WORKFLOW_ENABLED`, `CODERUN_DBOS_SECRET`)
-- **Observability:** `daemon/src/metrics.rs` Prometheus exposition (`GET /metrics` `coderun_requests_total`, `coderun_build_context_duration_seconds` histogram, `coderun_fail_open_total`), Grafana `docs/dashboards/coderun.json`, alerts `deploy/prometheus/alerts.yml`
-- **Security:** `daemon/src/ratelimit.rs` token-bucket (10/s burst 20 per `session_id`), HMAC-SHA256 `X-Coderun-Signature`, structured audit log off hot path
+- **DBOS Transact** durable workflows: `crates/knocode-workflow` (`DBOSWorkflowEngine: IWorkflowEngine`), Node sidecar `workflow/dbos/` (SQLite WAL + Litestream, approval gates, audit), `005_audits.sql` (`audits` + `workflows`), CLI `knocode workflow start/status/approve/list`, `WorkflowConfig` (`KNOCODE_WORKFLOW_ENABLED`, `KNOCODE_DBOS_SECRET`)
+- **Observability:** `daemon/src/metrics.rs` Prometheus exposition (`GET /metrics` `knocode_requests_total`, `knocode_build_context_duration_seconds` histogram, `knocode_fail_open_total`), Grafana `docs/dashboards/knocode.json`, alerts `deploy/prometheus/alerts.yml`
+- **Security:** `daemon/src/ratelimit.rs` token-bucket (10/s burst 20 per `session_id`), HMAC-SHA256 `X-Knocode-Signature`, structured audit log off hot path
 - **Concurrency:** `AdapterLayer` `Mutex→RwLock` (`daemon/src/adapter.rs:44`), session-isolated memory namespace, soak test 20×100
-- **Distribution:** `Dockerfile` (multi-stage distroless), `Formula/coderun.rb` (brew tap with service), `deploy/docker-compose.yml` wiring DBOS sidecar
+- **Distribution:** `Dockerfile` (multi-stage distroless), `Formula/knocode.rb` (brew tap with service), `deploy/docker-compose.yml` wiring DBOS sidecar
 - **Multi-agent:** Cursor + Gemini CLI promoted to Tier 1 `ADAPTERS.md:10` (RwLock session isolation proof), Continue promoted, Copilot/Factory Droid scaffolds
 - **Benchmarks:** `benches/context_bench.rs` (`criterion` p95 <50ms target)
 
@@ -68,11 +270,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **LiteLLM** client for multi-provider model routing
 
 #### New Modules
-- `coderun-repo-intel/src/parser.rs` — tree-sitter AST parsing
-- `coderun-storage/src/tantivy_index.rs` — tantivy BM25 index
-- `coderun-knowledge/src/engram.rs` — engram HTTP client
-- `coderun-knowledge/src/rerank.rs` — reranking module
-- `coderun-router/src/litellm.rs` — LiteLLM client
+- `knocode-repo-intel/src/parser.rs` — tree-sitter AST parsing
+- `knocode-storage/src/tantivy_index.rs` — tantivy BM25 index
+- `knocode-knowledge/src/engram.rs` — engram HTTP client
+- `knocode-knowledge/src/rerank.rs` — reranking module
+- `knocode-router/src/litellm.rs` — LiteLLM client
 
 ### Changed
 - Repository Intelligence now uses ripgrep for text search
@@ -92,24 +294,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### P0 — Non-Negotiable Spec Compliance
 
-- **UDS + MessagePack IPC + 30s fail-open** — dual transport: UDS/MessagePack primary, HTTP/JSON fallback (`crates/coderun-daemon/src/adapter.rs:70-193`, `crates/coderun-daemon/src/lifecycle.rs:158-280`, `crates/coderun-daemon/src/http_server.rs:129-145` secret redaction + input validation 100KB/1MB)
-- **`tiktoken-rs` token counting** — local `cl100k_base` in `crates/coderun-context/src/lib.rs:388-413` and `crates/coderun-optimizer/src/lib.rs:264-302`, fallback heuristic only on load failure
-- **Cache-aware pack hardening** — dedup via SHA-256 `session_fingerprints` `crates/coderun-context/src/lib.rs:70-118`, frozen-prefix `FROZEN PREFIX END` `lib.rs:153-170`, reversible truncation `~/.coderun/cache/originals/{hash}` `lib.rs:415-462`
-- **Repository Intelligence completion** — `search_structural` (tree-sitter+regex) `crates/coderun-repo-intel/src/lib.rs:328-410`, `search_fulltext` (tantivy BM25) `lib.rs:412-453`, tantivy upsert in `index_repository` `lib.rs:176-320`, `graph.rs` dependency graph + `lsp.rs` optional + `watcher.rs` git polling `crates/coderun-repo-intel/src/*.rs`, migrations `003_graph.sql`+`004_events.sql`
+- **UDS + MessagePack IPC + 30s fail-open** — dual transport: UDS/MessagePack primary, HTTP/JSON fallback (`crates/knocode-daemon/src/adapter.rs:70-193`, `crates/knocode-daemon/src/lifecycle.rs:158-280`, `crates/knocode-daemon/src/http_server.rs:129-145` secret redaction + input validation 100KB/1MB)
+- **`tiktoken-rs` token counting** — local `cl100k_base` in `crates/knocode-context/src/lib.rs:388-413` and `crates/knocode-optimizer/src/lib.rs:264-302`, fallback heuristic only on load failure
+- **Cache-aware pack hardening** — dedup via SHA-256 `session_fingerprints` `crates/knocode-context/src/lib.rs:70-118`, frozen-prefix `FROZEN PREFIX END` `lib.rs:153-170`, reversible truncation `~/.knocode/cache/originals/{hash}` `lib.rs:415-462`
+- **Repository Intelligence completion** — `search_structural` (tree-sitter+regex) `crates/knocode-repo-intel/src/lib.rs:328-410`, `search_fulltext` (tantivy BM25) `lib.rs:412-453`, tantivy upsert in `index_repository` `lib.rs:176-320`, `graph.rs` dependency graph + `lsp.rs` optional + `watcher.rs` git polling `crates/knocode-repo-intel/src/*.rs`, migrations `003_graph.sql`+`004_events.sql`
 
 #### P1 — Integrations
 
-- **Knowledge Hub unification** — BM25→FlashRank adaptive K `crates/coderun-knowledge/src/lib.rs:160-230`, deterministic engram hot reads `lib.rs:232-252` (2s timeout, fail-open local)
-- **LiteLLM gateway + fallback** — `IModelGateway` `crates/coderun-core/src/traits.rs:11-22` + `crates/coderun-router/src/lib.rs:329-365` `fallback_chain`, `cost_usd` in `003_graph.sql`
-- **RTK adoption** — `crates/coderun-optimizer/src/rtk.rs:1-120` adapter (binary detection, tee-on-failure `~/.coderun/logs/tool-failures/`) + in-process fallback
-- **Event bus + inspection** — real `coderun preview`/`replay` `crates/coderun-cli/src/main.rs:234-400`, SQLite spill `004_events.sql`, async-only invariant preserved
+- **Knowledge Hub unification** — BM25→FlashRank adaptive K `crates/knocode-knowledge/src/lib.rs:160-230`, deterministic engram hot reads `lib.rs:232-252` (2s timeout, fail-open local)
+- **LiteLLM gateway + fallback** — `IModelGateway` `crates/knocode-core/src/traits.rs:11-22` + `crates/knocode-router/src/lib.rs:329-365` `fallback_chain`, `cost_usd` in `003_graph.sql`
+- **RTK adoption** — `crates/knocode-optimizer/src/rtk.rs:1-120` adapter (binary detection, tee-on-failure `~/.knocode/logs/tool-failures/`) + in-process fallback
+- **Event bus + inspection** — real `knocode preview`/`replay` `crates/knocode-cli/src/main.rs:234-400`, SQLite spill `004_events.sql`, async-only invariant preserved
 
 #### P2 — Packaging / Docs / Security
 
-- **Interfaces as contracts** — `IContextBuilder`/`IModelGateway`/`IWorkflowEngine` `crates/coderun-core/src/traits.rs:1-51` + `secrets.rs` redaction before outbound calls
-- **Packaging & hardening** — `coderun init --wizard`, expanded `coderun doctor` (9 probes incl. tiktoken+tantivy+redaction) `crates/coderun-cli/src/main.rs:489-640`, `coderun migrate --from claude|continue|cursor`
+- **Interfaces as contracts** — `IContextBuilder`/`IModelGateway`/`IWorkflowEngine` `crates/knocode-core/src/traits.rs:1-51` + `secrets.rs` redaction before outbound calls
+- **Packaging & hardening** — `knocode init --wizard`, expanded `knocode doctor` (9 probes incl. tiktoken+tantivy+redaction) `crates/knocode-cli/src/main.rs:489-640`, `knocode migrate --from claude|continue|cursor`
 - **MkDocs → Knowledge Hub** — `mkdocs.yml` + ingest docs into Knowledge Hub (`category="docs"`)
-- **Security** — input validation `http_server.rs:validate_input_len`, secrets redaction `crates/coderun-core/src/secrets.rs:1-35`, token-bucket stub (rate limit)
+- **Security** — input validation `http_server.rs:validate_input_len`, secrets redaction `crates/knocode-core/src/secrets.rs:1-35`, token-bucket stub (rate limit)
 - **Benchmarks** — `benches/context_bench.rs` micro-benches (BuildContext p95, tiktoken 10KB, compression)
 - **Multi-agent** — Cursor (`adapters/cursor/extension.ts`) + Gemini (`adapters/gemini/hooks.sh`) Tier 1, Tier 2 best-effort `adapters/tier2/README.md`, `docs/ADAPTERS.md` updated
 
@@ -211,4 +413,4 @@ This approach minimizes external dependencies and ensures the project builds and
 - Input validation on all endpoints
 - Timeout protection on all operations
 
-[0.1.0]: https://github.com/leonortega/coderun/releases/tag/v0.1.0
+[0.1.0]: https://github.com/leonortega/knocode/releases/tag/v0.1.0

@@ -8,17 +8,15 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 
 | Area | What Is Included |
 |------|------------------|
-| **Agent Interception** | Pre-generation and pre-tool-call hooks for Tier 1 agents (opencode, Claude Code, Cursor, Gemini CLI, Copilot, OpenClaw, Pi, Factory Droid). Tier 2 agents supported as best-effort via convention-based integration. |
+| **Agent Interception** | Pre-generation hooks for Tier 1 agents (opencode, Claude Code, Cursor, Gemini CLI, Copilot, OpenClaw, Pi, Factory Droid). Tier 2 agents supported as best-effort via convention-based integration. |
 | **Repository Intelligence** | Incremental AST parsing (tree-sitter), structural search (ast-grep), text search (ripgrep), git-change-triggered incremental updates, metadata storage. Optional LSP enrichment via agent's own language server. |
-| **Knowledge Hub** | Unified organizational surface for docs, skills, rules, ADRs, templates, and memory. BM25/tantivy for lexical retrieval. FlashRank for reranking. engram (SQLite+FTS5) for persistent memory. |
-| **Skill Engine** | Deterministic tag-based skill matching from community formats (Claude, Cursor, Continue, agentskills.io). Task classification, skill activation, conflict detection, priority, instruction injection. |
-| **Context Engine** | `BuildContext(task)` — the one public API. Retrieve → rank → rerank → deduplicate → compress → cache-order → token-budget → emit YAML Context Pack. Runs as a long-lived local daemon with Unix socket IPC. Local token counting via `tiktoken-rs`. |
-| **Model Router** | Heuristic complexity/budget/capability scorer. Tier selection (fast/balanced/capable). LiteLLM as model gateway for multi-provider routing, fallback chains, per-key budgets, cost tracking. |
-| **Execution Optimizer** | RTK adopted directly for tool-output compression. Intercepts tool outputs via pre-tool-call hooks. |
-| **Event Bus** | Async-only observability events: ContextBuilt, SkillActivated, RepositoryUpdated, ToolExecuted, ModelSelected, ResponseGenerated, MemorySaved. Consumed by inspection CLI, metrics, and future orchestrators. |
-| **Local Persistence** | SQLite for repository index and metadata. engram for memory. Filesystem for skill definitions, configuration, and logs. |
-| **CLI** | Start daemon, initialize repository, inspect events, preview/replay prompts, health check. |
-| **Configuration** | TOML-based configuration for model settings, token budgets, skill paths, daemon settings, agent-specific options. |
+| **Knowledge Hub** | Unified organizational surface for docs, ADRs, templates, and memory. BM25/tantivy for lexical retrieval. FlashRank and engram removed (see REMOVED_TOOLS.md); memory is SQLite+tantivy local. The Skill Engine was removed — agents own skill discovery natively (see `docs/01-architecture/REMOVED_TOOLS.md`). |
+| **Context Engine** | `BuildContext(task)` — the one public API. Retrieve → rank → deduplicate → compress → cache-order → token-budget → emit YAML Context Pack. Runs as a long-lived local daemon exposing HTTP (`POST /hook`, `POST /mcp`). Local token counting via `tiktoken-rs`. |
+| **Execution Optimizer** | ❌ removed — tool-output compression delegated to RTK (external binary); installers wire RTK's own integrations. See REMOVED_TOOLS.md. |
+| **Event Bus** | Async-only observability events: ContextBuilt, RepositoryUpdated, ResponseGenerated, MemorySaved. Consumed by CLI inspection, metrics, and future orchestrators. |
+| **Local Persistence** | SQLite for repository index, metadata, and memory (engram removed). Filesystem for configuration and logs. |
+| **CLI** | Start daemon, initialize repository, preview BuildContext, health check. |
+| **Configuration** | TOML-based configuration for token budgets, retrieval settings, daemon settings, and logging. |
 | **Offline Evaluation** | Promptfoo configuration for CI regression and scheduled eval against real usage logs. |
 
 ## Out of Scope (v1)
@@ -34,12 +32,12 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 | **Conversational state** | The coding agent owns conversation history |
 | **User interaction** | The coding agent owns the user interface |
 | **Multi-tenancy** | Single user, single repository per daemon |
-| **Plugin marketplace** | Skills are community-format files, not a marketplace |
-| **Workflow orchestration** | DBOS Transact native async over SQLite+Litestream **required** since v0.6.0 (`docs/V0_6_0_PLAN.md:1`); No Temporal (deleted) |
-| **Distributed infrastructure** | Single local daemon process (+ DBOS sidecar `workflow/dbos` on same host) |
+| **Plugin marketplace** | Agents discover skills from their own ecosystem (`.claude/skills`, `.agents/skills`, ...); the runtime does not own a marketplace |
+| **Workflow orchestration** | Removed — single tokio daemon (see `docs/01-architecture/REMOVED_TOOLS.md`) |
+| **Distributed infrastructure** | Single local daemon process |
 | **Web dashboard** | CLI-only interface |
 | **Authentication** | Local daemon, no auth needed |
-| **Rate limiting** | LiteLLM handles provider rate limiting |
+| **Rate limiting** | Provider rate limiting is the provider's concern; the runtime token-buckets its own request intake |
 | **Model fine-tuning** | Routes to existing models only |
 | **Data labeling** | No human-in-the-loop labeling |
 | **Audit trail** | Logging and events only, no formal audit system |
@@ -56,15 +54,13 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 
 | Responsibility | Details |
 |----------------|---------|
-| Agent interception | Pre-generation and pre-tool-call hooks |
+| Agent interception | Pre-generation hooks |
 | Repository parsing | tree-sitter AST parsing, incremental updates on git change |
 | Code indexing | Structural search (ast-grep), text search (ripgrep), metadata storage |
-| Knowledge storage | Docs, skills, rules, ADRs, templates, memory (engram) |
-| Knowledge retrieval | BM25/tantivy lexical search + FlashRank reranking |
-| Skill matching | Deterministic tag-based activation from community formats |
+| Knowledge storage | Docs, ADRs, templates, memory (SQLite+tantivy local; engram removed) |
+| Knowledge retrieval | BM25/tantivy lexical search (FlashRank removed) |
 | Context assembly | Token-budgeted YAML Context Pack with cache-aware ordering |
-| Model selection | Heuristic complexity scoring, tier selection |
-| Tool-output compression | RTK-based compression via pre-tool-call hooks |
+| Tool-output compression | ❌ delegated to RTK (external binary) — not a daemon responsibility |
 | Token accounting | Local token counting via tiktoken-rs |
 | Observability | Event bus for async metrics and inspection |
 
@@ -81,7 +77,7 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 | Tool definitions | Defining available tools for the model |
 | Error presentation | Showing errors to the developer |
 | Retry logic | Deciding when and how to retry failed operations |
-| Model API calls | The runtime routes to the model; the agent may also call models directly |
+| Model API calls | The agent calls its model provider directly — the runtime is model-agnostic and never routes |
 
 ### External Tools Own
 
@@ -90,10 +86,9 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 | LLM inference | Model providers (OpenAI, Anthropic, Google, etc.) |
 | Provider authentication | API keys and credentials |
 | Provider rate limiting | Quota management |
-| LiteLLM gateway | Model routing, fallbacks, load balancing (if deployed externally) |
 | Language servers | Optional LSP enrichment (agent's own processes) |
 | Static analysis | Native per-language analyzers |
-| External orchestration | DBOS Transact native async over SQLite+Litestream (required since v0.6.0, `docs/V0_6_0_PLAN.md:1`); Temporal deleted |
+| External orchestration | Removed with the workflow engine (see `docs/01-architecture/REMOVED_TOOLS.md`) |
 
 ## v1 Boundaries
 
@@ -104,11 +99,11 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 │                     Developer Machine                     │
 │                                                          │
 │  ┌─────────────────────┐    ┌──────────────────────────┐ │
-│  │    Coding Agent     │    │   Coderun Daemon         │ │
+│  │    Coding Agent     │    │   Knocode Daemon         │ │
 │  │                     │    │                          │ │
 │  │  - UI               │    │  ┌────────────────────┐  │ │
 │  │  - Code editing     │◄──►│  │  Adapter Layer     │  │ │
-│  │  - Shell exec       │ UDS│  │  (Tier 1/Tier 2)   │  │ │
+│  │  - Shell exec       │HTTP│  │  (Tier 1/Tier 2)   │  │ │
 │  │  - Git ops          │    │  └────────┬───────────┘  │ │
 │  │  - Conversation     │    │           │              │ │
 │  │                     │    │  ┌────────▼───────────┐  │ │
@@ -116,39 +111,31 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 │                              │  │  (BuildContext)    │  │ │
 │                              │  └────────┬───────────┘  │ │
 │                              │           │              │ │
-│           ┌──────────────────┼───────────┼──────────┐   │
-│           │                  │           │          │   │
-│  ┌────────▼──────┐  ┌───────▼────┐ ┌────▼─────┐ ┌─▼──────────┐ │
-│  │ Repo Intel    │  │Knowledge Hub│ │Skill Eng │ │Model Router│ │
-│  │ (tree-sitter, │  │(engram,    │ │(tag-     │ │(heuristic, │ │
-│  │  ast-grep,    │  │ BM25,      │ │ based)   │ │ LiteLLM)   │ │
-│  │  ripgrep)     │  │ FlashRank) │ │          │ │            │ │
-│  └───────────────┘  └────────────┘ └──────────┘ └────────────┘ │
-│                              │                                   │
-│  ┌───────────────────────────▼──────────────────────────────┐   │
+│           ┌──────────────────┼───────────────┐             │ │
+│           │                  │               │             │ │
+│  ┌────────▼──────┐  ┌───────▼────┐           │             │ │
+│  │ Repo Intel    │  │Knowledge Hub│           │             │ │
+│  │ (tree-sitter, │  │(BM25,      │           │             │ │
+│  │  ast-grep,    │  │ local)     │           │             │ │
+│  │  ripgrep)     │  │            │           │             │ │
+│  └───────────────┘  └────────────┘           │             │ │
+│                              │                               │ │
+│  ┌───────────────────────────▼──────────────────────────────┐ │
 │  │                    Event Bus (async)                      │   │
-│  │  ContextBuilt, SkillActivated, RepositoryUpdated,        │   │
-│  │  ToolExecuted, ModelSelected, ResponseGenerated,         │   │
-│  │  MemorySaved                                              │   │
+│  │  ContextBuilt, RepositoryUpdated,                        │   │
+│  │  ResponseGenerated, MemorySaved                          │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │                 Local Storage                             │   │
-│  │  - SQLite (index, metadata)                               │   │
-│  │  - engram (memory, FTS5)                                  │   │
-│  │  - Filesystem (skills, config, logs)                      │   │
+│  │  - SQLite (index, metadata, memory)                       │   │
+│  │  - Tantivy BM25 (index)                                   │   │
+│  │  - Filesystem (config, logs)                              │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
 └──────────────────────────────────────────────────────────────────┘
            │
-           │  HTTP/HTTPS
-           ▼
-  ┌─────────────────┐
-  │     LiteLLM     │
-  │  (Local/Remote) │
-  └────────┬────────┘
-           │
-           │  HTTPS
+           │  Agent's own connection (runtime is model-agnostic)
            ▼
   ┌─────────────────┐
   │  Model Provider │
@@ -160,9 +147,8 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 
 | Path | Protocol | Direction | Purpose |
 |------|----------|-----------|---------|
-| Agent → Daemon | Unix Domain Socket (MessagePack) | Bidirectional | Pre-generation hooks, pre-tool hooks |
-| Daemon → LiteLLM | HTTP/HTTPS | Outbound | Model routing and inference |
-| Daemon → engram | HTTP API | Bidirectional | Memory read/write |
+| Agent → Daemon | HTTP JSON (`POST /hook`, `POST /mcp`) | Bidirectional | Pre-generation hooks, readiness probes |
+| Daemon → engram | *Removed* — memory is SQLite local (see REMOVED_TOOLS.md) | — |
 | Daemon → SQLite | In-process (rusqlite) | Bidirectional | Index and metadata |
 | Daemon → Event Bus | Internal async channel | Outbound only | Observability events |
 
@@ -173,13 +159,11 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 | Repository source code | Developer / Git | Filesystem (read-only by runtime) |
 | Repository index | Runtime | SQLite database |
 | Repository metadata | Runtime | SQLite database |
-| Memory entries | Runtime | engram (SQLite+FTS5) |
-| Skill definitions | Developer | TOML/community-format files on filesystem |
+| Memory entries | Runtime | SQLite (local; engram removed) |
 | Configuration | Developer | TOML files on filesystem |
 | Conversation history | Coding Agent | Not stored by runtime |
 | Token usage metrics | Runtime | SQLite database |
 | Logs | Runtime | Log files on filesystem |
-| API keys | Developer / LiteLLM | Environment variables or LiteLLM config |
 
 ## Future Features (Must NOT Affect v1)
 
@@ -187,15 +171,15 @@ Define what the AI Runtime for Coding Agents does, what it does not do, and who 
 |---------|-----------------|-----------|
 | Multi-repository support | v2 | None. v1 uses single-repo schema |
 | Conversation memory | v2 | None. v1 is stateless across requests |
-| Plugin system | v2 | None. v1 uses community-format skills |
+| Plugin system | v2 | None. v1 is hook-based (no plugin surface) |
 | Web dashboard | v2 | None. v1 is CLI-only |
 | Distributed deployment | v2 | None. v1 is single daemon |
 | Multi-agent coordination | v2 | None. v1 serves one agent |
 | Collaborative editing | v3 | None. v1 is single-developer |
-| Model fine-tuning | v3 | None. v1 routes to existing models |
+| Model fine-tuning | v3 | None. v1 is model-agnostic — the agent picks the model |
 | CI/CD integration | v2 | None. v1 is request-response |
-| Workflow engine | v0.6.0 required | v1 had Noop; v0.6.0 `async_trait IWorkflowEngine` over SQLite+Litestream (`DBOS_REQUIRED`) |
-| Enterprise governance | v3 | None. v1 has no auth or audit (HMAC required since v0.6.0 for DBOS→daemon) |
-| Vector/semantic recall | Deferred | None. v1 uses FTS5 lexical recall only |
+| Workflow engine | Removed | None. Single tokio daemon (see `docs/01-architecture/REMOVED_TOOLS.md`) |
+| Enterprise governance | v3 | None. v1 has no auth or audit |
+| Vector/semantic recall | Deferred | None. v1 uses tantivy BM25 lexical recall only |
 | Graph-based retrieval | Deferred | None. v1 uses BM25 + reranking only |
 | External orchestration | v0.6.0 required (SQLite) | v1 separate product; v0.6.0 promoted to required runtime (single-node SQLite+Litestream) |

@@ -1,9 +1,0 @@
-# Model Routing Evaluation Configuration
-description: "Model Routing Accuracy Tests"
-
-providers:
-  - ./providers/model-routing.js
-
-tests: ./datasets/model-routing.yaml
-
-outputPath: ./results/model-routing.json

@@ -1,138 +1,194 @@
-# Model Routing Evaluation Dataset
-# Tests that the Model Router correctly selects the appropriate tier
-
-# Simple tasks → should route to FAST tier
-- description: "Simple typo fix"
+- description: Simple typo fix
   vars:
-    task: "fix a typo in the README"
+    task: fix a typo in the README
     file_count: 1
     symbol_count: 2
     knowledge_entries: 0
     skills_matched: 0
     token_count: 100
+    cost: 0.001
+    latency: 400
+    actual_success: true
   assert:
-    - type: equals
-      value: "fast"
-
-- description: "Add a comment"
+  - type: equals
+    value: fast
+  cost: 0.001
+  latency: 400
+  actual_success: true
+- description: Add a comment
   vars:
-    task: "add a comment to the main function"
+    task: add a comment to the main function
     file_count: 1
     symbol_count: 3
     knowledge_entries: 0
     skills_matched: 0
     token_count: 150
+    cost: 0.001
+    latency: 400
+    actual_success: true
   assert:
-    - type: equals
-      value: "fast"
-
-- description: "Rename variable"
+  - type: equals
+    value: fast
+  cost: 0.001
+  latency: 400
+  actual_success: true
+- description: Rename variable
   vars:
-    task: "rename the variable 'x' to 'counter'"
+    task: rename the variable 'x' to 'counter'
     file_count: 1
     symbol_count: 1
     knowledge_entries: 0
     skills_matched: 0
     token_count: 80
+    cost: 0.001
+    latency: 400
+    actual_success: true
   assert:
-    - type: equals
-      value: "fast"
-
-# Moderate tasks → should route to BALANCED tier
-- description: "Add API endpoint"
+  - type: equals
+    value: fast
+  cost: 0.001
+  latency: 400
+  actual_success: true
+- description: Add API endpoint
   vars:
-    task: "add a new API endpoint for user management with authentication"
+    task: add a new API endpoint for user management with authentication
     file_count: 5
     symbol_count: 15
     knowledge_entries: 3
     skills_matched: 1
     token_count: 2000
+    cost: 0.008
+    latency: 1200
+    actual_success: true
   assert:
-    - type: equals
-      value: "balanced"
-
-- description: "Implement middleware"
+  - type: equals
+    value: balanced
+  cost: 0.008
+  latency: 1200
+  actual_success: true
+- description: Implement middleware
   vars:
-    task: "implement a rate limiting middleware for the API"
+    task: implement a rate limiting middleware for the API
     file_count: 4
     symbol_count: 10
     knowledge_entries: 2
     skills_matched: 1
     token_count: 1500
+    cost: 0.008
+    latency: 1200
+    actual_success: true
   assert:
-    - type: equals
-      value: "balanced"
-
-- description: "Add error handling"
+  - type: equals
+    value: balanced
+  cost: 0.008
+  latency: 1200
+  actual_success: true
+- description: Add error handling
   vars:
-    task: "add comprehensive error handling to the database module"
+    task: add comprehensive error handling to the database module
     file_count: 3
     symbol_count: 8
     knowledge_entries: 2
     skills_matched: 0
     token_count: 1200
+    cost: 0.008
+    latency: 1200
+    actual_success: true
   assert:
-    - type: equals
-      value: "balanced"
-
-# Complex tasks → should route to CAPABLE tier
-- description: "Refactor architecture"
+  - type: equals
+    value: balanced
+  cost: 0.008
+  latency: 1200
+  actual_success: true
+- description: Refactor architecture
   vars:
-    task: "refactor the database schema migration to implement distributed microservice architecture with authentication and concurrency handling"
+    task: refactor the database schema migration to implement distributed microservice
+      architecture with authentication and concurrency handling
     file_count: 15
     symbol_count: 80
     knowledge_entries: 8
     skills_matched: 3
     token_count: 10000
+    cost: 0.05
+    latency: 4000
+    actual_success: true
   assert:
-    - type: equals
-      value: "capable"
-
-- description: "Implement complex feature"
+  - type: equals
+    value: capable
+  cost: 0.05
+  latency: 4000
+  actual_success: true
+- description: Implement complex feature
   vars:
-    task: "implement a complete OAuth2 authentication system with JWT tokens, refresh tokens, role-based access control, and session management"
+    task: implement a complete OAuth2 authentication system with JWT tokens, refresh
+      tokens, role-based access control, and session management
     file_count: 12
     symbol_count: 60
     knowledge_entries: 6
     skills_matched: 2
     token_count: 8000
+    cost: 0.05
+    latency: 4000
+    actual_success: true
   assert:
-    - type: equals
-      value: "capable"
-
-- description: "Performance optimization"
+  - type: equals
+    value: capable
+  cost: 0.05
+  latency: 4000
+  actual_success: true
+- description: Performance optimization
   vars:
-    task: "optimize the query performance by implementing caching, connection pooling, read replicas, and database indexing strategy"
+    task: optimize the query performance by implementing caching, connection pooling,
+      read replicas, and database indexing strategy
     file_count: 10
     symbol_count: 40
     knowledge_entries: 5
     skills_matched: 2
     token_count: 6000
+    cost: 0.025
+    latency: 2500
+    actual_success: true
   assert:
-    - type: equals
-      value: "capable"
-
-# Edge cases
-- description: "Empty task"
+  - type: equals
+    value: capable
+  cost: 0.025
+  latency: 2500
+  actual_success: true
+- description: Empty task
   vars:
-    task: ""
+    task: ''
     file_count: 0
     symbol_count: 0
     knowledge_entries: 0
     skills_matched: 0
     token_count: 0
+    cost: 0.0005
+    latency: 200
+    actual_success: true
   assert:
-    - type: equals
-      value: "fast"
-
-- description: "Very long task"
+  - type: equals
+    value: fast
+  cost: 0.0005
+  latency: 200
+  actual_success: true
+- description: Very long task
   vars:
-    task: "implement a complete redesign of the entire system architecture including but not limited to database schema changes, API endpoint restructuring, authentication system overhaul, caching layer implementation, message queue integration, monitoring and alerting setup, CI/CD pipeline configuration, documentation updates, and comprehensive test coverage"
+    task: implement a complete redesign of the entire system architecture including
+      but not limited to database schema changes, API endpoint restructuring, authentication
+      system overhaul, caching layer implementation, message queue integration, monitoring
+      and alerting setup, CI/CD pipeline configuration, documentation updates, and
+      comprehensive test coverage
     file_count: 20
     symbol_count: 100
     knowledge_entries: 10
     skills_matched: 4
     token_count: 15000
+    cost: 0.08
+    latency: 6000
+    actual_success: true
   assert:
-    - type: equals
-      value: "capable"
+  - type: equals
+    value: capable
+  cost: 0.08
+  latency: 6000
+  actual_success: true

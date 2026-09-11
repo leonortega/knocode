@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "node \"${PLUGIN_ROOT}/scripts/knocode-hook.mjs\" user-prompt-submit",
+        "timeout": 5
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "node \"${PLUGIN_ROOT}/scripts/knocode-hook.mjs\" pre-tool-use",
+        "timeout": 15
+      }
+    ]
+  }
+}

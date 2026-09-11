@@ -1,5 +1,5 @@
 #!/bin/bash
-# Coderun Evaluation Runner
+# Knocode Evaluation Runner
 # Usage: ./run-evaluation.sh [model|context|all] [--view]
 
 set -e
@@ -22,7 +22,7 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${YELLOW}=== Coderun AI Runtime Evaluation ===${NC}"
+echo -e "${YELLOW}=== Knocode AI Runtime Evaluation ===${NC}"
 echo ""
 
 TOTAL_PASS=0
@@ -39,18 +39,11 @@ run_eval() {
 }
 
 case "$SUITE" in
-  model)
-    run_eval "Model Routing" "config-model-routing.yaml"
-    ;;
-  context)
-    run_eval "Context Quality" "config-context-quality.yaml"
-    ;;
-  all)
-    run_eval "Model Routing" "config-model-routing.yaml"
-    run_eval "Context Quality" "config-context-quality.yaml"
+  context|all)
+    run_eval "Context Quality" "promptfooconfig.yaml"
     ;;
   *)
-    echo "Usage: $0 [model|context|all] [--view]"
+    echo "Usage: $0 [context|all] [--view]  (model routing removed — see docs/01-architecture/REMOVED_TOOLS.md)"
     exit 1
     ;;
 esac

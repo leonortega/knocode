@@ -1,0 +1,23 @@
+# Created by the Knocode release pipeline. Submit to microsoft/winget-pkgs - see winget/README.md.
+PackageIdentifier: Knocode.knocode
+PackageVersion: 0.9.11
+PackageLocale: en-US
+Publisher: Knocode
+PublisherUrl: https://github.com/leonortega/knocode
+PackageName: Knocode
+PackageUrl: https://github.com/leonortega/knocode
+License: MIT
+LicenseUrl: https://github.com/leonortega/knocode/blob/dev/LICENSE
+ShortDescription: AI Runtime for coding agents - local daemon that enriches agent requests with repository context.
+Description: Knocode is a local AI runtime that makes coding agents faster at finding relevant code. It runs as a local daemon, intercepting agent requests and enriching them with repository context (semantic retrieval over the indexed codebase), and hosts an MCP surface (POST /mcp) plus /hook fallback on 127.0.0.1:9527. Ships knocode (CLI) and knocode-daemon.
+Moniker: knocode
+Tags:
+  - ai
+  - agent
+  - runtime
+  - daemon
+  - retrieval
+  - mcp
+  - context
+ManifestType: locale
+ManifestVersion: 1.6.0

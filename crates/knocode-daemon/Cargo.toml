@@ -1,0 +1,33 @@
+[package]
+name = "knocode-daemon"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "knocode-daemon"
+path = "src/main.rs"
+
+[dependencies]
+knocode-core.workspace = true
+knocode-events.workspace = true
+knocode-storage.workspace = true
+knocode-repo-intel = { workspace = true, features = ["fs-watcher"] }
+knocode-knowledge.workspace = true
+knocode-context.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+anyhow.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
+axum = "0.8"
+serde_json = "1"
+dunce = "1"
+uuid = { version = "1", features = ["v4"] }
+sha2.workspace = true
+chrono.workspace = true
+prometheus = { version = "0.14", optional = true }
+
+[features]
+default = []

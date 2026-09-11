@@ -1,0 +1,42 @@
+[context]
+cache_order = [
+    "docs_context",
+    "code_context",
+]
+max_files = 20
+max_lines_per_file = 500
+max_tokens = 12000
+
+[daemon]
+max_concurrent = 10
+request_timeout_ms = 30000
+socket_path = "/tmp/knocode.sock"
+
+[database]
+max_connections = 5
+path = "~/.knocode/data.db"
+
+[index]
+languages = [
+    "rust",
+    "markdown",
+    "json",
+    "typescript",
+    "toml",
+    "shell",
+    "sql",
+    "yaml",
+    "javascript",
+    "python",
+]
+path = "~/.knocode/index/"
+watch_mode = "commit"
+
+[knowledge]
+max_knowledge_entries = 10000
+
+[logging]
+file_path = "~/.knocode/logs/knocode.log"
+level = "info"
+max_size_mb = 100
+retention_days = 7

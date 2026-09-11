@@ -1,109 +1,73 @@
 /**
  * Context Quality Evaluation Provider for Promptfoo
  *
- * Exports a provider object with id() and callApi() methods.
- * Simulates the Coderun context engine behavior.
+ * Exports a provider class with id() and callApi() methods.
+ *
+ * Primary path: real BuildContext via the daemon's HTTP hook API —
+ * POST ${KNOCODE_DAEMON_URL:-http://127.0.0.1:9527}/hook with a
+ * PreGeneration/MessageRewrite request (the same endpoint production
+ * agents use). The daemon scopes retrieval to this repo via
+ * `repository_path` (TASK-036); vars.files_mentioned maps to
+ * context_hints.files_mentioned.
+ *
+ * Mock path: tests whose vars describe simulated inputs the real API
+ * does not accept (knowledge_entries, large_file_count) — and any
+ * request the daemon fails to answer — are served by mockContextEngine,
+ * which mirrors the real ContextPack shape (docs_context, code_context,
+ * token_usage, metadata). Output.source records which path produced it:
+ * "http" | "mock" (mock-contract test) | "mock-fallback" (daemon down).
  */
 
-/**
- * Mock context engine (simulates Coderun context building)
- */
-function mockContextEngine(vars) {
-  const task = vars.task || "";
-  const max_tokens = vars.max_tokens || 12000;
-
-  // Parse comma-separated strings
-  const filesStr = vars.files_mentioned || "";
-  const skillsStr = vars.skills_matched || "";
-  const knowledgeStr = vars.knowledge_entries || "";
-
-  const files = filesStr ? filesStr.split(",").map(s => s.trim()).filter(Boolean) : [];
-  const skills = skillsStr ? skillsStr.split(",").map(s => {
-    const [name, score] = s.split(":");
-    return { name: name?.trim(), score: parseFloat(score) || 0.5 };
-  }) : [];
-  const knowledge = knowledgeStr ? knowledgeStr.split(",").map(s => {
-    const [key, value] = s.split(":");
-    return { key: key?.trim(), value: value?.trim() };
-  }) : [];
-
-  // Build mock context based on inputs
-  const behavioral_skills = skills
-    .filter(s => s.name)
-    .map(s => `# ${s.name}\nScore: ${s.score}`)
-    .join("\n\n");
-
-  const docs_context = knowledge
-    .filter(k => k.key)
-    .map(k => `// ${k.key}: ${k.value}`)
-    .join("\n");
-
-  const code_context = files
-    .map(f => `// ${f}\n// [file content]`)
-    .join("\n\n");
-
-  // Estimate tokens (rough: 1 token ≈ 4 chars)
-  const total_content = behavioral_skills.length + docs_context.length + code_context.length;
-  const total_tokens = Math.floor(total_content / 4);
-
-  // Enforce budget
-  const budget_remaining = Math.max(0, max_tokens - total_tokens);
-
-  // Determine section ordering
-  const has_skills = behavioral_skills.length > 0;
-  const has_docs = docs_context.length > 0;
-  const has_code = code_context.length > 0;
-
-  return {
-    behavioral_skills: behavioral_skills || "",
-    docs_context: docs_context || "",
-    code_context: code_context || "",
-    token_usage: {
-      total_tokens: Math.min(total_tokens, max_tokens),
-      budget_remaining,
-      by_source: {
-        behavioral_skills: Math.floor(behavioral_skills.length / 4),
-        docs_context: Math.floor(docs_context.length / 4),
-        code_context: Math.floor(code_context.length / 4),
-      },
-    },
-    // Metadata for assertions
-    metadata: {
-      has_skills,
-      has_docs,
-      has_code,
-      task_length: task.length,
-    },
-  };
-}
-
-/**
- * Promptfoo provider — FIRST-CLASS v0.5.0: hits BuildContext via UDS MessagePack (length-prefix + rmp-serde)
- * Fallback: mockContextEngine only inside catch (fail-open).
- */
-const net = require("net");
-const fs = require("fs");
 const path = require("path");
 
-async function callBuildContextUDS(prompt, timeoutMs = 2000) {
-  const socketPath = process.env.CODERUN_SOCKET || "/tmp/coderun.sock";
-  if (!fs.existsSync(socketPath)) throw new Error("UDS not found");
-  return new Promise((resolve, reject) => {
-    const socket = net.createConnection(socketPath);
-    const timer = setTimeout(() => { socket.destroy(); reject(new Error("UDS timeout")); }, timeoutMs);
-    socket.on("connect", () => {
-      try {
-        const msgpack = require("msgpack-lite");
-        const req = { correlation_id: `req_eval_${Date.now()}`, hook_type: "PreGeneration", payload: { type: "MessageRewrite", session_id: "eval", message: prompt } };
-        const body = msgpack.encode(req);
-        const header = Buffer.alloc(4); header.writeUInt32BE(body.length, 0);
-        socket.write(Buffer.concat([header, body]));
-      } catch (e) { clearTimeout(timer); reject(e); }
-    });
-    let buf = Buffer.alloc(0);
-    socket.on("data", (chunk) => { buf = Buffer.concat([buf, chunk]); if (buf.length >= 4) { const len = buf.readUInt32BE(0); if (buf.length >= 4+len) { clearTimeout(timer); try { const msgpack = require("msgpack-lite"); const resp = msgpack.decode(buf.slice(4, 4+len)); socket.destroy(); resolve(resp); } catch (e) { socket.destroy(); reject(e); } } } });
-    socket.on("error", (e) => { clearTimeout(timer); reject(e); });
-  });
+const DAEMON_URL = process.env.KNOCODE_DAEMON_URL || "http://127.0.0.1:9527";
+// Daemon scopes retrieval to the agent's workspace root — default to this repo.
+const REPO_ROOT = process.env.KNOCODE_REPO_PATH || path.resolve(__dirname, "..", "..");
+const TIMEOUT_MS = parseInt(process.env.KNOCODE_EVAL_TIMEOUT_MS, 10) || 5000;
+
+function splitList(s) {
+  return s ? String(s).split(",").map((x) => x.trim()).filter(Boolean) : [];
+}
+
+/** Deterministic mock of the Knocode context engine (real ContextPack shape). */
+function mockContextEngine(vars) {
+  const task = vars.task || "";
+  const max_tokens = parseInt(vars.max_tokens, 10) || 12000;
+
+  const files = splitList(vars.files_mentioned);
+  const filler = Math.max(0, parseInt(vars.large_file_count, 10) || 0);
+  const knowledge = splitList(vars.knowledge_entries)
+    .map((entry) => {
+      const idx = entry.indexOf(":");
+      return idx === -1
+        ? { key: entry, value: "" }
+        : { key: entry.slice(0, idx).trim(), value: entry.slice(idx + 1).trim() };
+    })
+    .filter((k) => k.key);
+
+  const docs_context = knowledge.map((k) => `// ${k.key}: ${k.value}`).join("\n");
+  const allFiles = files.concat(Array.from({ length: filler }, (_, i) => `generated/file_${i}.rs`));
+  let code_context = allFiles.map((f) => `// ${f}\n// [file content]`).join("\n\n");
+
+  // Enforce the token budget (~4 chars/token); code_context is truncated first
+  const docs_tokens = Math.floor(docs_context.length / 4);
+  let code_tokens = Math.floor(code_context.length / 4);
+  if (docs_tokens + code_tokens > max_tokens) {
+    code_context = code_context.slice(0, Math.max(0, max_tokens - docs_tokens) * 4);
+    code_tokens = Math.floor(code_context.length / 4);
+  }
+  const total_tokens = docs_tokens + code_tokens;
+
+  return {
+    docs_context,
+    code_context,
+    token_usage: {
+      total_tokens,
+      budget_remaining: Math.max(0, max_tokens - total_tokens),
+      by_source: { docs_context: docs_tokens, code_context: code_tokens },
+    },
+    metadata: { task_length: task.length, files: allFiles.length },
+  };
 }
 
 module.exports = class ContextQualityProvider {
@@ -111,23 +75,84 @@ module.exports = class ContextQualityProvider {
     return "context-quality";
   }
 
-  label = "Context Quality (UDS first-class v0.5.0)";
+  label = "Context Quality (daemon HTTP /hook, mock fallback)";
 
   async callApi(prompt, context) {
-    // FIRST-CLASS: try UDS BuildContext
-    try {
-      const resp = await callBuildContextUDS(prompt);
-      if (resp && resp.payload && resp.payload.type === "RewrittenMessage") {
-        const pack = resp.payload.context_pack || {};
-        return { output: JSON.stringify({ behavioral_skills: pack.behavioral_skills || "", docs_context: pack.docs_context || "", code_context: pack.code_context || "", token_usage: pack.token_usage || {}, routing: resp.payload.routing_decision || {}, source: "uds" }, null, 2) };
-      }
-    } catch (e) {
-      console.warn(`[context-quality] UDS primary failed (${e.message}), fallback to mock`);
-    }
-    // FALLBACK only on Err
     const vars = context?.vars || {};
+    // Vars only the mock contract understands never go to the daemon.
+    const mockContract = vars.knowledge_entries || vars.large_file_count;
+    if (!mockContract) {
+      try {
+        return await this.callDaemon(prompt, vars);
+      } catch (e) {
+        console.warn(`[context-quality] daemon unavailable (${e.message}); mock fallback`);
+      }
+    }
     const result = mockContextEngine(vars);
-    result.source = "mock-fallback";
+    result.source = mockContract ? "mock" : "mock-fallback";
     return { output: JSON.stringify(result, null, 2) };
+  }
+
+  /** Real BuildContext over the daemon HTTP hook API. Throws on any failure. */
+  async callDaemon(prompt, vars) {
+    const payload = {
+      type: "MessageRewrite",
+      session_id: "eval",
+      message: prompt,
+      repository_path: REPO_ROOT,
+    };
+    const files = splitList(vars.files_mentioned);
+    if (files.length || vars.language) {
+      payload.context_hints = {};
+      if (files.length) payload.context_hints.files_mentioned = files;
+      if (vars.language) payload.context_hints.language = vars.language;
+    }
+
+    const res = await fetch(`${DAEMON_URL}/hook`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ hook_type: "PreGeneration", payload }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(`daemon ${res.status}: ${json.error || "request failed"}`);
+
+    const p = json.payload || {};
+    if (p.type === "RewrittenMessage") {
+      const pack = p.context_pack || {};
+      return {
+        output: JSON.stringify(
+          {
+            source: "http",
+            docs_context: pack.docs_context || "",
+            code_context: pack.code_context || "",
+            token_usage: pack.token_usage || { total_tokens: 0, budget_remaining: 0, by_source: {} },
+            provenance: (pack.provenance || []).map((e) => e.path).filter(Boolean),
+            repository_state: pack.repository_state || "",
+            metadata: pack.metadata || {},
+          },
+          null,
+          2
+        ),
+      };
+    }
+    if (p.type === "OriginalPassthrough") {
+      // Zero-value suppression (TASK-031): no context hits — report zeros honestly.
+      return {
+        output: JSON.stringify(
+          {
+            source: "http",
+            passthrough: true,
+            reason: p.reason || "",
+            docs_context: "",
+            code_context: "",
+            token_usage: { total_tokens: 0, budget_remaining: 0, by_source: {} },
+          },
+          null,
+          2
+        ),
+      };
+    }
+    throw new Error(`unexpected payload type: ${p.type}`);
   }
 };

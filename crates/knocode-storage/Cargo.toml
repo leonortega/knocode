@@ -1,0 +1,26 @@
+[package]
+name = "knocode-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+knocode-core.workspace = true
+knocode-events.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+serde.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+
+# Tantivy for BM25 full-text indexing
+tantivy = "0.26"
+tantivy-tokenizer-api = "0.7"
+
+[features]
+default = []
+workflow = []
+
+[dev-dependencies]
+uuid.workspace = true
+tempfile = "3"

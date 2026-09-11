@@ -1,6 +1,6 @@
-# Contributing to Coderun
+# Contributing to Knocode
 
-Thank you for your interest in contributing to Coderun! This document provides guidelines and instructions for contributing.
+Thank you for your interest in contributing to Knocode! This document provides guidelines and instructions for contributing.
 
 ## Development Setup
 
@@ -14,8 +14,8 @@ Thank you for your interest in contributing to Coderun! This document provides g
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/coderun.git
-cd coderun
+git clone https://github.com/your-org/knocode.git
+cd knocode
 
 # Build the project
 cargo build
@@ -33,22 +33,21 @@ cargo fmt
 ## Project Structure
 
 ```
-coderun/
+knocode/
 ├── crates/
-│   ├── coderun-core/        # Shared types, errors, config
-│   ├── coderun-daemon/      # Daemon binary
-│   ├── coderun-cli/         # CLI binary
-│   ├── coderun-repo-intel/  # Repository Intelligence
-│   ├── coderun-knowledge/   # Knowledge Hub
-│   ├── coderun-skills/      # Skill Engine
-│   ├── coderun-context/     # Context Engine
-│   ├── coderun-router/      # Model Router
-│   ├── coderun-optimizer/   # Execution Optimizer
-│   ├── coderun-events/      # Event Bus
-│   └── coderun-storage/     # Local Storage
+│   ├── knocode-core/        # Shared types, errors, config
+│   ├── knocode-daemon/      # Daemon — HTTP server (POST /hook, /mcp, /health, /metrics)
+│   ├── knocode-cli/         # CLI — init/index/serve/preview/status/config/doctor
+│   ├── knocode-repo-intel/  # Repository Intelligence — tree-sitter + tantivy + graph + watcher
+│   ├── knocode-context/     # Context Engine — retrieval engine + BuildContext
+│   ├── knocode-knowledge/   # Knowledge Hub — SQLite+tantivy local BM25
+│   ├── knocode-events/      # Event Bus — in-memory broadcast + tracing
+│   ├── knocode-storage/     # Local Storage — SQLite WAL + tantivy
+│   └── knocode-bench/       # Criterion benchmarks
+├── packages/                # TS client + agent integrations (opencode, mcp, copilot, vscode)
 ├── eval/                    # Evaluation framework
 ├── docs/                    # Documentation
-└── .coderun/                # Default configuration
+└── .knocode/                # Default configuration + agent skill
 ```
 
 ## Development Workflow
@@ -155,7 +154,7 @@ mod tests {
 
 ## Adding a New Crate
 
-1. Create `crates/coderun-<name>/Cargo.toml`
+1. Create `crates/knocode-<name>/Cargo.toml`
 2. Add to workspace `Cargo.toml` members
 3. Add shared dependencies to `[workspace.dependencies]`
 4. Create `src/lib.rs` with module code

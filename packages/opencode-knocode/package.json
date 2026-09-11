@@ -1,0 +1,53 @@
+{
+  "name": "opencode-knocode",
+  "version": "0.9.12",
+  "description": "Knocode AI Runtime plugin for OpenCode (V2 plugin spec) — prompt context enrichment via daemon MCP",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "sync-version": "node scripts/sync-version.mjs",
+    "prepack": "node scripts/sync-version.mjs",
+    "vendor": "node ../../scripts/vendor-client.mjs",
+    "build": "node scripts/sync-version.mjs && node ../../scripts/vendor-client.mjs && tsc -p tsconfig.json --emitDeclarationOnly && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --sourcemap --log-level=warning",
+    "dev": "npm run vendor && tsc -p tsconfig.json --watch",
+    "typecheck": "node ../../scripts/vendor-client.mjs && tsc -p tsconfig.json --noEmit",
+    "test": "node ../../scripts/vendor-client.mjs && vitest run",
+    "test:watch": "npm run vendor && vitest",
+    "test:coverage": "node ../../scripts/vendor-client.mjs && vitest run --coverage",
+    "lint": "node ../../scripts/vendor-client.mjs && tsc -p tsconfig.json --noEmit",
+    "clean": "rimraf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "knocode",
+    "ai",
+    "context",
+    "daemon"
+  ],
+  "author": "Knocode",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LeonOrtega/knocode"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "beta"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^0.0.0-beta-19157",
+    "@types/node": "^22.7.0",
+    "esbuild": "^0.28.2",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.1.0"
+  }
+}

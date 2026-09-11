@@ -1,5 +1,11 @@
 # Components
 
+> **V1 framing:** see [V1_RUNTIME_SPEC.md](V1_RUNTIME_SPEC.md) — product definition,
+> ownership boundaries, and the out-of-scope list. Removed capabilities (Model Router /
+> LiteLLM v0.8.6, workflow and the Skill Engine — see `REMOVED_TOOLS.md`) are deleted
+> from this file. Where this file conflicts with the V1 spec or the code, the V1
+> spec / code win.
+
 ## Purpose
 
 Define every v1 module in detail. Each module section specifies purpose, responsibilities, inputs, outputs, dependencies, persistent data, runtime behavior, errors, boundaries, and implementation requirements.
@@ -10,14 +16,14 @@ Define every v1 module in detail. Each module section specifies purpose, respons
 
 ### Purpose
 
-Bridge the coding agent and the daemon. One thin adapter per agent CLI, implementing two operations: intercept-before-generation (rewrite the message) and intercept-before-tool-call (allow/deny/modify).
+Bridge the coding agent and the daemon. One thin adapter per agent CLI: intercept-before-generation (rewrite the message before the model sees it) via the daemon's HTTP API.
 
-### v0.2.0 Implementation
+### Implementation
 
-- **HTTP server** (axum) on port 9527 with JSON IPC
+- **HTTP server** (axum) on port 9527 with JSON IPC (`POST /hook`, `POST /mcp`, `GET /health`, `GET /metrics`)
 - **Fail-open** on timeout or error: returns OriginalPassthrough
-- **OpenCode plugin** (TypeScript) for pre-generation and pre-tool hooks
-- **Claude Code hooks** (shell scripts) for UserPromptSubmit and PreToolUse
+- **OpenCode plugin** (TypeScript) for pre-generation hooks
+- **Claude Code hooks** (shell scripts) for UserPromptSubmit
 
 ### Responsibilities
 
@@ -25,7 +31,7 @@ Bridge the coding agent and the daemon. One thin adapter per agent CLI, implemen
 - Parse JSON-encoded requests
 - Validate request format and content
 - Generate correlation IDs
-- Route requests to the appropriate handler (Context Engine or Execution Optimizer)
+- Route requests to the appropriate handler (Context Engine)
 - Format responses in agent-consumable JSON
 - Implement fail-open on timeout or error
 - Handle agent-specific hook differences
@@ -35,22 +41,21 @@ Bridge the coding agent and the daemon. One thin adapter per agent CLI, implemen
 | Input | Type | Description |
 |-------|------|-------------|
 | PreGeneration | MessageRewrite | Session ID, message, optional context hints |
-| PreToolCall | ToolOutput | Tool name, output type, content, optional context |
+| Probe | Readiness | (no fields) — answered before rate-limiting, no engine lock |
 
 ### Outputs
 
 | Output | Type | Description |
 |--------|------|-------------|
-| RewrittenMessage | ContextPack + RoutingDecision | Rewritten message with injected context |
-| CompressedOutput | Compressed tool output | Token-reduced tool output |
+| RewrittenMessage | ContextPack | Rewritten message with injected context |
 | OriginalPassthrough | Original message + reason | Fail-open: unmodified message |
+| Probe | state, index_files, version | Readiness answer (while indexing: HTTP `503 daemon_indexing`) |
 
 ### Dependencies
 
 - Context Engine (for pre-generation)
-- Execution Optimizer (for pre-tool-call)
 - tokio (async I/O)
-- rmp-serde (MessagePack)
+- serde_json (HTTP JSON)
 
 ### Persistent Data
 
@@ -58,14 +63,13 @@ None. The Adapter Layer is stateless.
 
 ### Runtime Behavior
 
-1. Accept UDS connection from agent
-2. Read MessagePack-encoded request
+1. Accept HTTP request from agent
+2. Read JSON-encoded request
 3. Parse and validate request
 4. Generate correlation ID (`req_{uuid}`)
 5. Start tracing span with correlation ID
 6. Route to appropriate handler:
    - PreGeneration → Context Engine `BuildContext`
-   - PreToolCall → Execution Optimizer `compress_output`
 7. On success: return formatted response
 8. On timeout (> 30s) or error: return OriginalPassthrough
 9. Log request received and response sent
@@ -74,7 +78,7 @@ None. The Adapter Layer is stateless.
 
 | Error | Behavior |
 |-------|----------|
-| Invalid MessagePack | Return OriginalPassthrough with reason "invalid_request" |
+| Invalid JSON body | Return OriginalPassthrough with reason "invalid_request" |
 | Missing required field | Return OriginalPassthrough with reason "invalid_request" |
 | Timeout | Return OriginalPassthrough with reason "timeout" |
 | Internal error | Return OriginalPassthrough with reason "fail-open" |
@@ -94,19 +98,19 @@ None. The Adapter Layer is stateless.
 | Hook | Runtime Operation |
 |------|-------------------|
 | `chat.message` (pre-generation) | Call Context Engine, rewrite message |
-| `tool.execute.before` (pre-tool) | Call Execution Optimizer, compress output |
+| `tool.execute.after` | ❌ removed — output compression delegated to RTK |
 
 #### Claude Code Adapter
 
 | Hook | Runtime Operation |
 |------|-------------------|
 | `UserPromptSubmit` (pre-generation) | Call Context Engine, rewrite message. **Hard 30s timeout.** |
-| `PreToolUse` (pre-tool) | Call Execution Optimizer, compress output |
+| `PreToolUse` | ❌ removed — output compression delegated to RTK |
 
 ### Implementation Requirements
 
-- Use tokio for async UDS server
-- Use rmp-serde for MessagePack encoding/decoding
+- Use tokio for the async HTTP server (axum)
+- Use serde_json for request/response encoding
 - Use uuid crate for correlation ID generation
 - Validate all input before passing to modules
 - Log every request and response at INFO level
@@ -124,9 +128,9 @@ The central module and one public entry point: `BuildContext(task)`. Retrieves r
 
 ### Responsibilities
 
-- Coordinate Repository Intelligence, Knowledge Hub, and Model Router
+- Coordinate Repository Intelligence and Knowledge Hub
 - Assemble context from multiple sources
-- Order context for cache stability: skills → docs → code
+- Order context for cache stability: docs → code
 - Apply frozen-prefix boundary
 - Enforce token budgets
 - Manage session fingerprint to avoid duplicate content
@@ -144,14 +148,12 @@ The central module and one public entry point: `BuildContext(task)`. Retrieves r
 
 | Output | Type | Description |
 |--------|------|-------------|
-| ContextPack | YAML | Three sections: behavioral_skills, docs_context, code_context |
-| RoutingDecision | Model selection | Model name, tier, reasoning |
+| ContextPack | YAML | Two sections: docs_context, code_context |
 
 ### Dependencies
 
 - Repository Intelligence (code search and file content)
-- Knowledge Hub (knowledge retrieval and skill matching)
-- Model Router (model selection)
+- Knowledge Hub (knowledge retrieval)
 - tiktoken-rs (local token counting)
 - tokio (async runtime)
 
@@ -171,15 +173,13 @@ flowchart TD
     A[Receive TaskRequest] --> B[Parse task description]
     B --> C[Search Repository Intelligence]
     C --> D[Retrieve Knowledge]
-    D --> E[Match Skills]
-    E --> F[Score all candidates]
-    F --> G[Order for cache stability]
-    G --> H[Apply frozen-prefix boundary]
-    H --> I[Deduplicate against session fingerprint]
-    I --> J[Apply token budget]
-    J --> K[Emit Context Pack as YAML]
-    K --> L[Select model via Model Router]
-    L --> M[Return ContextPack + RoutingDecision]
+    D --> E[Score all candidates]
+    E --> F[Order for cache stability]
+    F --> G[Apply frozen-prefix boundary]
+    G --> H[Deduplicate against session fingerprint]
+    H --> I[Apply token budget]
+    I --> J[Emit Context Pack as YAML]
+    J --> K[Return ContextPack]
 ```
 
 #### Cache-Aware Ordering
@@ -187,24 +187,17 @@ flowchart TD
 The Context Pack is ordered in this fixed sequence for maximum prompt cache stability:
 
 ```yaml
-# Section 1: Most cache-stable (byte-identical across many tasks)
-behavioral_skills:
-  - name: "Add Rate Limiting"
-    instructions: "..."
-  - name: "Error Handling Pattern"
-    instructions: "..."
-
 # Frozen-prefix boundary: everything above is cache-stable
 # Everything below changes between tasks
 
-# Section 2: Moderately cache-stable (changes rarely)
+# Section 1: Moderately cache-stable (changes rarely)
 docs_context:
   - path: "docs/architecture.md"
     content: "..."
   - path: "docs/conventions.md"
     content: "..."
 
-# Section 3: Least cache-stable (changes frequently)
+# Section 2: Least cache-stable (changes frequently)
 code_context:
   - path: "src/router.ts"
     content: "..."
@@ -218,10 +211,9 @@ code_context:
 
 | Source | Budget Allocation | Priority | Cache Stability |
 |--------|-------------------|----------|-----------------|
-| behavioral_skills | 20% of budget | 1 (highest) | Highest |
-| docs_context | 15% of budget | 2 | Medium |
-| code_context | 55% of budget | 3 | Lowest |
-| metadata (implicit) | 10% of budget | 4 | N/A |
+| docs_context | 45% of budget | 1 (highest) | Highest |
+| code_context | 55% of budget | 2 | Lowest |
+| metadata (implicit) | remaining | 3 | N/A |
 
 #### Deduplication
 
@@ -242,17 +234,13 @@ code_context:
 |-------|----------|
 | Repository search failure | Continue with empty code_context |
 | Knowledge retrieval failure | Continue with empty docs_context |
-| Skill matching failure | Continue with empty behavioral_skills |
 | Token estimation failure | Use character-based estimation |
-| Model routing failure | Use default model tier |
 | Any unrecoverable error | Return OriginalPassthrough (fail-open) |
 
 ### Boundaries
 
 - Does not search the repository directly (delegates to Repository Intelligence)
 - Does not retrieve knowledge directly (delegates to Knowledge Hub)
-- Does not match skills directly (delegates to Skill Engine via Knowledge Hub)
-- Does not select models directly (delegates to Model Router)
 - Orchestrates and assembles the final output
 - Must complete within 30 seconds (fail-open on timeout)
 
@@ -261,9 +249,8 @@ code_context:
 - Build in Rust for predictable low memory, no GC-pause latency
 - Embed tree-sitter/ast-grep/ripgrep as native Rust crates (not shelled out)
 - Run as a long-lived daemon, not spawn-per-request
-- Communicate with Adapter Layer over Unix domain socket with MessagePack
+- Serve the HTTP API (axum) — the agent calls `POST /hook`
 - Memory-map retrieval indices rather than loading fully into RAM
-- Quantize reranker model (int8 ONNX) for RAM savings
 - Use tiktoken-rs for local token counting
 - Enforce 30s timeout, return OriginalPassthrough on exceed
 - Log token usage at every stage
@@ -394,7 +381,7 @@ Parse, index, and search the codebase incrementally. Uses tree-sitter for increm
 - Does not make AI-based relevance judgments
 - Does not modify source code
 - Does not manage version control
-- Only reads repository, never writes to it (except to .coderun/)
+- Only reads repository, never writes to it (except to .knocode/)
 - Optional LSP enrichment is never a hard dependency
 
 ### Implementation Requirements
@@ -416,22 +403,19 @@ Parse, index, and search the codebase incrementally. Uses tree-sitter for increm
 
 ### Purpose
 
-One organizational surface for project docs, skills, rules, ADRs, templates, and long-term memory. Composes three retrieval strategies: tag-based skill matching, lexical search with reranking for docs/code, and engram for memory.
+One organizational surface for project docs, ADRs, templates, and long-term memory. Lexical (BM25) search over stored knowledge and docs (engram and reranking removed — see REMOVED_TOOLS.md).
 
 ### v0.2.0 Implementation
 
 - **SQLite** for knowledge storage with LIKE-based search
-- **engram** HTTP client for cross-session memory
-- **FlashRank** reranker with TF-IDF fallback
+- **tantivy BM25** for lexical retrieval
 - **Pattern detection** for knowledge extraction (naming, architectural, domain)
 
 ### Responsibilities
 
 - Store and retrieve knowledge entries across all categories
-- Manage skill registry and tag-based matching
 - Perform lexical search for docs and code
-- Rerank results with FlashRank
-- Store and retrieve memory via engram
+- Store and retrieve memory via SQLite+tantivy local
 - Detect and extract knowledge from indexed code
 - Decay confidence of unused knowledge
 
@@ -441,25 +425,20 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 |-------|------|-------------|
 | store_knowledge | KnowledgeEntry | Knowledge to store |
 | retrieve_knowledge | KnowledgeQuery | Query to find relevant knowledge |
-| match_skills | SkillMatchQuery | Task description for skill matching |
 | extract_knowledge | ExtractRequest | Extract knowledge from code analysis |
-| memory_save | MemoryEntry | Save to engram memory |
-| memory_search | MemoryQuery | Search engram memory |
+| memory_save | MemoryEntry | Save to memory (SQLite local) |
+| memory_search | MemoryQuery | Search memory (SQLite local) |
 
 ### Outputs
 
 | Output | Type | Description |
 |--------|------|-------------|
 | Vec<KnowledgeEntry> | Knowledge entries | Retrieved knowledge ranked by relevance |
-| Vec<SkillMatch> | Matched skills | Skills with scores and full instructions |
-| MemorySearchResult | Memory entries | Relevant memory from engram |
 
 ### Dependencies
 
-- SQLite (knowledge storage)
+- SQLite (knowledge + memory storage)
 - BM25/tantivy (knowledge and docs search index)
-- FlashRank via `ort` (reranking, in-process)
-- engram (memory storage and retrieval)
 
 ### Persistent Data
 
@@ -467,7 +446,7 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 |------|---------|---------|
 | Knowledge entries | SQLite `knowledge` table | Store knowledge with metadata |
 | Knowledge index | BM25/tantivy | Enable full-text search of knowledge |
-| Memory entries | engram (SQLite+FTS5) | Persistent cross-session memory |
+| Memory entries | SQLite (local) | Persistent cross-session memory |
 
 ### Runtime Behavior
 
@@ -476,33 +455,8 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 1. Receive query string and optional category filter
 2. Search BM25/tantivy index for matching entries
 3. Retrieve top 20 candidates
-4. Rerank with FlashRank using query as input
-5. Filter by minimum confidence threshold (0.3)
+4. Filter by minimum confidence threshold (0.3)
 6. Return top 10 results
-
-#### Skill Matching
-
-1. Receive task description
-2. For each skill in registry:
-   a. Extract trigger tags
-   b. Compute tag overlap score with task description
-   c. Apply category bonus if task matches skill tags
-   d. Compute final match score
-3. Sort by score descending
-4. Return top N matches with score > 0.3
-5. Inject full skill instructions (not just descriptions)
-
-#### Memory Operations
-
-1. **Read (deterministic, in hot path):**
-   a. Receive query from Context Engine
-   b. Call engram HTTP API with query
-   c. Return relevant memory entries
-2. **Write (async, agent-invoked):**
-   a. Receive memory entry from agent
-   b. Call engram HTTP API to save
-   c. Optionally scan for semantic conflicts
-   d. Emit MemorySaved event
 
 #### Knowledge Extraction
 
@@ -518,8 +472,8 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 |-------|----------|
 | SQLite write failure | Log warning, continue without storing |
 | BM25/tantivy write failure | Log warning, continue without indexing |
-| FlashRank load failure | Fall back to BM25 ranking only |
-| engram unreachable | Continue without memory, log warning |
+| SQLite memory unreachable | Continue without memory, log warning |
+| SQLite memory unavailable | Continue without memory, log warning |
 | Duplicate key | Merge with existing entry |
 
 ### Boundaries
@@ -528,396 +482,49 @@ One organizational surface for project docs, skills, rules, ADRs, templates, and
 - Does not make AI-based knowledge judgments (uses pattern detection only)
 - Does not expose knowledge to the coding agent directly
 - Only provides knowledge through the Context Engine
-- Skills are matched by tag-based scoring, not by the same ranking pipeline as docs/code
-
 ### Implementation Requirements
 
 - Use SQLite for knowledge storage
 - Use BM25/tantivy for knowledge search
-- Use FlashRank via `ort` for reranking (load model once, cache in memory, int8 quantized ONNX)
-- Use engram HTTP API for memory operations
+- Use SQLite for memory operations (engram removed)
 - Knowledge categories: `convention`, `pattern`, `domain`, `decision`
 - Each knowledge entry has: id, category, key, value, confidence, source, created_at, updated_at
-- Skill registry loaded from community-format files at daemon startup
 - Implement confidence decay as a background task
 
 ---
 
-## 5. Skill Engine
+## 5. Model Router — [REMOVED v0.8.6]
 
-### Purpose
-
-Deterministic tag-based skill matching against a small registry. Task classification, skill activation, conflict detection, priority, and instruction injection. No LLM call, no agent browsing of skill descriptions at request time.
-
-### Responsibilities
-
-- Load skill definitions from community-format files (Claude, Cursor, Continue, agentskills.io)
-- Validate skill schema
-- Classify tasks using signals shared with Model Router
-- Match skills to tasks using tag-based scoring
-- Detect conflicts between matched skills
-- Resolve priority when multiple skills match
-- Return full skill instructions for injection
-
-### Inputs
-
-| Input | Type | Description |
-|-------|------|-------------|
-| match_skills | SkillMatchQuery | Task description and context for matching |
-| get_skill | String | Skill name for direct retrieval |
-| reload_skills | None | Reload all skill definitions from disk |
-| list_skills | None | List all loaded skills |
-
-### Outputs
-
-| Output | Type | Description |
-|--------|------|-------------|
-| Vec<SkillMatch> | Matched skills | Skills with match scores and full instructions |
-| Skill | Full skill definition | Complete skill with all fields |
-| Vec<String> | Skill names | List of available skill names |
-
-### Dependencies
-
-- Filesystem (skill definition files)
-- No external services
-
-### Persistent Data
-
-| Data | Storage | Purpose |
-|------|---------|---------|
-| Skill definitions | Community-format files | Developer-managed skill content |
-| Skill registry | In-memory | Loaded at daemon startup |
-
-### Runtime Behavior
-
-#### Skill Loading
-
-1. Scan skill directory for community-format files (.md, .toml, .yaml)
-2. Parse each file according to its format
-3. Validate required fields: `name`, `tags`/`trigger`, `instructions`
-4. Validate optional fields: `description`, `examples`, `constraints`
-5. Load valid skills into in-memory registry
-6. Log count of loaded skills
-7. Warn on invalid files, skip them
-
-#### Task Classification
-
-The Skill Engine reuses the same signals as the Model Router for task classification:
-- Structural complexity (files involved, symbols referenced)
-- Semantic complexity (task description, technical terms, action verbs)
-- Scope (context size, knowledge entries)
-
-#### Skill Matching
-
-1. Receive task description
-2. Classify task using shared signals
-3. For each skill in registry:
-   a. Extract tag keywords
-   b. Compute tag overlap score with task description
-   c. Apply category bonus if task matches skill tags
-   d. Compute final match score
-4. Sort by score descending
-5. Filter: score > 0.3
-6. Detect conflicts (contradictory instructions)
-7. Resolve priority (higher score wins)
-8. Take top N (configured, default 5)
-9. Return full instructions (not just descriptions)
-
-#### Conflict Detection
-
-1. Compare instructions of matched skills
-2. Flag pairs with contradictory constraints
-3. If conflicts found: keep higher-priority skill, log warning
-4. Do not inject conflicting instructions
-
-### Skill Format (Community)
-
-```markdown
-# Add Rate Limiting
-
-## Tags
-rate limit, throttle, request limit, API limit, middleware, security
-
-## Instructions
-1. Check existing middleware patterns in the project
-2. Create a rate limiter module following project conventions
-3. Apply to target routes
-4. Add configuration for rate limits
-5. Add tests for rate limiting behavior
-
-## Examples
-- Add global rate limiting: src/middleware/rate_limit.rs, src/config.rs
-
-## Constraints
-- Do not modify authentication logic
-- Use the project's existing error handling pattern
-- Make rate limits configurable via environment variables
-```
-
-### Errors
-
-| Error | Behavior |
-|-------|----------|
-| Invalid file format | Skip file, log warning |
-| Missing required fields | Skip file, log warning |
-| Skill directory not found | Log warning, operate with zero skills |
-| File read error | Skip file, log warning |
-
-### Boundaries
-
-- Does not execute skills
-- Does not modify code based on skills
-- Does not enforce skill constraints
-- Only provides skill instructions to the Context Engine
-- Skills are advisory, not mandatory
-- Registry is small (dozens, not thousands)
-
-### Implementation Requirements
-
-- Parse community-format files (Markdown, TOML, YAML)
-- Validate skill schema on load
-- Store skills in `Vec<Skill>` after loading
-- Skill matching uses deterministic tag scoring (no AI)
-- Tags are case-insensitive
-- Match score = (matched tags / total tags) * category_bonus
-- Category bonus: 1.2 if task matches skill tags, 1.0 otherwise
-- Full skill instructions injected directly (small, already determined relevant)
+> Model routing / LiteLLM were deleted from the v1 runtime in v0.8.6 (see
+> REMOVED_TOOLS.md). The runtime is model-agnostic — the agent / provider /
+> user chooses the model (V1_RUNTIME_SPEC.md §2.3). This section is retained as a
+> numbered stub so later section numbers stay stable.
 
 ---
 
-## 6. Model Router
+## 6. Execution Optimizer (removed)
 
-### Purpose
+> **Removed from the daemon.** Tool-output compression lives entirely in RTK
+> (github.com/rtk-ai/rtk), an external binary the installers download opt-in and
+> wire into the selected agents via `rtk init`. The daemon serves
+> `knocode_context` only — see `REMOVED_TOOLS.md`.
 
-Select the appropriate LLM model for a given task based on heuristic complexity scoring. No LLM call decides the tier.
+### What changed
 
-### v0.2.0 Implementation
+- The daemon's `PreToolCall`/`ToolOutput`/`CompressedOutput` IPC variants, the
+  `/hook` `ToolOutput` contract, and the `ExecutionOptimizer` state were deleted.
+- Agents that want output compression should run RTK's own plugin/hook for the
+  selected agent (`rtk init -g --auto-patch --opencode` / `--copilot`); the
+  installers also register RTK's global hook (`rtk init -g --auto-patch`).
 
-- **Heuristic scoring** with structural, semantic, and scope factors
-- **Tier selection** (fast, balanced, capable) based on score thresholds
-- **LiteLLM client** for multi-provider model routing
-- **Model override** support from request parameters
+### Pointer
 
-### Responsibilities
-
-- Score task complexity using heuristic
-- Select model tier (fast, balanced, capable)
-- Map tier to specific model name
-- Return routing decision with reasoning
-- Configure LiteLLM for the selected model
-
-### Inputs
-
-| Input | Type | Description |
-|-------|------|-------------|
-| select_model | RoutingRequest | Task description, complexity hints, context size, budget |
-
-### Outputs
-
-| Output | Type | Description |
-|--------|------|-------------|
-| RoutingDecision | Model selection | Model name, tier, reasoning, scores |
-
-### Dependencies
-
-- Configuration (model tier mappings)
-- LiteLLM (model gateway, via reqwest HTTP client)
-
-### Persistent Data
-
-None. Model routing is stateless.
-
-### Runtime Behavior
-
-#### Complexity Scoring
-
-1. Receive task description and context size
-2. Compute structural complexity:
-   - Number of files involved (from context)
-   - Number of symbols referenced
-   - Depth of code structure
-3. Compute semantic complexity:
-   - Task description length and specificity
-   - Presence of technical terms (middleware, refactor, migrate, etc.)
-   - Presence of action verbs (implement, fix, add, remove, etc.)
-4. Compute scope:
-   - Context size in tokens
-   - Number of knowledge entries
-   - Number of skills matched
-5. Apply weights from configuration
-6. Compute final score: `structural * 0.3 + semantic * 0.4 + scope * 0.3`
-7. Map score to tier:
-   - Score < 0.3: fast
-   - Score 0.3–0.7: balanced
-   - Score > 0.7: capable
-
-#### Tier-to-Model Mapping
-
-| Tier | Default Model | Configurable Via |
-|------|---------------|------------------|
-| fast | gpt-4o-mini | routing.fast_model |
-| balanced | gpt-4o | routing.balanced_model |
-| capable | o1 | routing.capable_model |
-
-#### Fallback Policy
-
-1. Try primary model from tier
-2. On failure: try next tier down (capable → balanced → fast)
-3. On all tiers exhausted: return error
-4. Log each fallback attempt
-
-### Errors
-
-| Error | Behavior |
-|-------|----------|
-| Scoring failure | Return default tier (balanced) |
-| Configuration missing | Use default tier-to-model mapping |
-| All models unavailable | Return error |
-
-### Boundaries
-
-- Does not call models directly (delegates to LiteLLM)
-- Does not manage model quotas
-- Does not handle model errors beyond fallback
-- Only selects which model to use
-
-### Implementation Requirements
-
-- Use deterministic scoring formula
-- Log scoring breakdown at DEBUG level
-- Log final routing decision at INFO level
-- Make tier-to-model mapping configurable
-- Support overriding routing via request parameter
-- Implement fallback chain via LiteLLM configuration
-- Emit ModelSelected event on completion
+See RTK's documentation for its compression behavior, compression levels, and
+fail-open semantics.
 
 ---
 
-## 7. Execution Optimizer
-
-### Purpose
-
-Compress and optimize tool outputs to reduce token consumption without losing information needed by the model. Uses RTK directly rather than building an equivalent.
-
-### Responsibilities
-
-- Compress file read outputs
-- Compress search results
-- Compress shell command outputs
-- Deduplicate repeated content
-- Truncate irrelevant sections
-- Apply RTK compression
-- Implement tee-on-failure pattern
-- Track compression statistics
-
-### Inputs
-
-| Input | Type | Description |
-|-------|------|-------------|
-| compress_output | ToolOutput | Raw tool output with type and content |
-
-### Outputs
-
-| Output | Type | Description |
-|--------|------|-------------|
-| CompressedOutput | Compressed content | Token-reduced output |
-| CompressionStats | Statistics | Original tokens, compressed tokens, ratio |
-
-### Dependencies
-
-- RTK (Rust binary, adopted directly)
-- tiktoken-rs (token counting)
-
-### Persistent Data
-
-None. Compression is per-request and stateless.
-
-### Runtime Behavior
-
-#### Compression Pipeline
-
-```mermaid
-flowchart TD
-    A[Receive ToolOutput] --> B{Output type?}
-    B -->|File Read| C[Compress file content]
-    B -->|Search Result| D[Compress search results]
-    B -->|Shell Output| E[Compress shell output]
-    B -->|Other| F[Truncate to max tokens]
-
-    C --> G[RTK compress]
-    D --> G
-    E --> G
-    F --> G
-
-    G --> H{Compression succeeded?}
-    H -->|Yes| I[Return CompressedOutput]
-    H -->|No| J[Tee-on-failure: save full output to log]
-    J --> K[Return OriginalPassthrough]
-```
-
-#### Tee-on-Failure Pattern
-
-On compression failure:
-1. Save the full uncompressed output to a local log file
-2. Point the compressed summary at the log file location
-3. Return the original output (fail-open)
-4. Log the failure for debugging
-
-#### File Read Compression
-
-1. Identify the query or task context
-2. Remove lines that are clearly irrelevant (boilerplate, imports only)
-3. Preserve function/class definitions and their bodies
-4. Preserve comments that explain intent
-5. Deduplicate repeated patterns
-6. Truncate to configured max lines
-
-#### Search Result Compression
-
-1. Group results by file
-2. Keep top N results per file (configurable)
-3. Remove duplicate matches across files
-4. Preserve context lines around matches
-5. Truncate to configured max results
-
-#### Shell Output Compression
-
-1. Remove ANSI escape codes
-2. Remove repetitive progress indicators
-3. Preserve error messages and warnings
-4. Preserve final output
-5. Truncate to configured max lines
-
-### Errors
-
-| Error | Behavior |
-|-------|----------|
-| RTK failure | Tee-on-failure: save full output, return original |
-| Token counting failure | Use character-based estimation |
-| Unknown output type | Return truncated content |
-
-### Boundaries
-
-- Does not modify the original tool output permanently
-- Does not understand code semantics
-- Only reduces token count through pattern-based compression
-- Does not interpret or summarize content
-- Fails open: agent always gets output
-
-### Implementation Requirements
-
-- Adopt RTK directly (github.com/rtk-ai/rtk)
-- Use tiktoken-rs for token counting
-- Support compression levels: light, balanced, aggressive
-- Log compression ratio at DEBUG level
-- Return both original and compressed token counts
-- Never lose error messages or critical information
-- Implement tee-on-failure pattern
-- Report savings honestly: separate "reduction in bash output" from "reduction in your bill"
-
----
-
-## 8. Event Bus
+## 7. Event Bus
 
 ### Purpose
 
@@ -935,10 +542,8 @@ Async-only observability system for metrics, debugging, inspection, and future o
 | Event | Emitter | Payload |
 |-------|---------|---------|
 | ContextBuilt | Context Engine | correlation_id, token_counts, file_count, latency_ms |
-| SkillActivated | Skill Engine | correlation_id, skill_name, match_score |
 | RepositoryUpdated | Repository Intelligence | files_indexed, symbols_extracted, duration_ms |
-| ToolExecuted | Execution Optimizer | tool_name, original_tokens, compressed_tokens, ratio |
-| ModelSelected | Model Router | correlation_id, model, tier, score, reasoning |
+| ToolExecuted | ❌ removed with Execution Optimizer | — |
 | ResponseGenerated | Adapter Layer | correlation_id, hook_type, latency_ms, error |
 | MemorySaved | Knowledge Hub | entry_id, namespace, key |
 
@@ -962,7 +567,7 @@ None. Events are ephemeral, consumed by subscribers.
 
 | Subscriber | Purpose |
 |------------|---------|
-| CLI Inspection | Preview/replay what a prompt would build/did build |
+| CLI Inspection | Preview what a prompt would build |
 | Metrics | Aggregate token usage, latency, error rates |
 | Future Orchestrator | Trigger workflows based on events (separate product) |
 
@@ -989,7 +594,7 @@ None. Events are ephemeral, consumed by subscribers.
 
 ---
 
-## 9. Local Storage
+## 8. Local Storage
 
 ### Purpose
 
@@ -1072,85 +677,66 @@ Provide command-line interface for daemon management, repository inspection, and
 - Initialize a repository for runtime use
 - Trigger repository re-indexing
 - Preview what a prompt would build
-- Replay what a prompt did build
 - Show daemon status and health
-- Manage skill definitions
 - Show configuration
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `coderun serve` | Start the daemon |
-| `coderun init` | Initialize runtime for current repository |
-| `coderun index` | Trigger repository re-indexing |
-| `coderun preview <prompt>` | Preview what BuildContext would produce for a prompt |
-| `coderun replay <correlation_id>` | Replay what BuildContext did produce for a past request |
-| `coderun status` | Show daemon status and metrics |
-| `coderun skills list` | List available skills |
-| `coderun skills validate` | Validate skill definitions |
-| `coderun config show` | Show effective configuration |
-| `coderun config validate` | Validate configuration file |
-| `coderun doctor` | Health check: verify all dependencies are available |
+| `knocode serve` | Start the daemon |
+| `knocode init` | Initialize runtime for current repository |
+| `knocode index` | Trigger repository re-indexing |
+| `knocode preview <prompt>` | Preview what BuildContext would produce for a prompt |
+| `knocode status` | Show daemon status and metrics |
+| `knocode config show` | Show effective configuration |
+| `knocode config validate` | Validate configuration file |
+| `knocode config set-log-level <level>` | Set `[logging] level` in user (+ project) config — `error|warn|info|debug|trace` or aliases `quiet|normal|verbose` |
+| `knocode doctor` | Health check: verify all dependencies are available |
 
 ### Dependencies
 
 - clap (argument parsing)
-- All daemon modules (for init, index, preview, replay, status)
+- All daemon modules (for init, index, preview, status)
 
 ### Runtime Behavior
 
-#### `coderun serve`
+#### `knocode serve`
 
 1. Load configuration
 2. Initialize logging
 3. Open database and index
-4. Start engram
-5. Load skills
-6. Index repository (background)
-7. Start Unix socket server
-8. Print startup banner with socket path
-9. Wait for shutdown signal
+4. Initialize knowledge store
+5. Index repository (readiness-gated: `/health` reports `state: indexing` until done)
+6. Start HTTP server on `127.0.0.1:9527`
+7. Print startup banner with listen address
+8. Wait for shutdown signal
 
-#### `coderun init`
+#### `knocode init`
 
-1. Create `.coderun/` directory in current repo
-2. Create default `.coderun/config.toml`
-3. Create `.coderun/skills/` directory
-4. Initialize SQLite database
-5. Create BM25/tantivy index
-6. Run initial indexing
-7. Print success message with statistics
+1. Create `.knocode/` directory in current repo
+2. Create default `.knocode/config.toml`
+3. Initialize SQLite database
+4. Create BM25/tantivy index
+5. Run initial indexing
+6. Print success message with statistics
 
-#### `coderun preview <prompt>`
+#### `knocode preview <prompt>`
 
-1. Connect to daemon via UDS
-2. Send PreGeneration request with prompt
-3. Receive ContextPack + RoutingDecision
+1. Connect to the daemon over HTTP (`KNOCODE_DAEMON_URL`, default `http://127.0.0.1:9527`); fall back to local in-process BuildContext when the daemon is not running
+2. Send a PreGeneration request with the prompt
+3. Receive the ContextPack
 4. Print formatted preview:
-   - Skills matched
    - Knowledge entries
    - Code files included
    - Token counts
-   - Model routing decision
-
-#### `coderun replay <correlation_id>`
-
-1. Connect to daemon via UDS
-2. Request event history for correlation_id
-3. Print formatted replay:
-   - What was retrieved
-   - What was matched
-   - What was included in the context pack
-   - What model was selected
-   - Token usage
 
 ### Errors
 
 | Error | Behavior |
 |-------|----------|
 | Configuration not found | Print helpful message with setup instructions |
-| Daemon not running | Print message to run `coderun serve` first |
+| Daemon not running | Print message to run `knocode serve` first |
 | Invalid arguments | Print clap-generated help |
 
 ### Boundaries

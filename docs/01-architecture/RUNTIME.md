@@ -1,5 +1,11 @@
 # Runtime
 
+> **V1 framing:** see [V1_RUNTIME_SPEC.md](V1_RUNTIME_SPEC.md) — product definition,
+> ownership boundaries, and the out-of-scope list. Removed capabilities (Model Router /
+> LiteLLM, v0.8.6; workflow and the Skill Engine — see `REMOVED_TOOLS.md`) are
+> deleted from this file. Where this file conflicts with the V1 spec or the code,
+> the V1 spec / code win.
+
 ## Purpose
 
 Define how the AI Runtime operates as a local daemon application. This document specifies the process lifecycle, configuration loading, repository initialization, IPC protocol, request handling, shutdown, persistence, logging, error handling, and fail-open behavior.
@@ -8,28 +14,34 @@ Define how the AI Runtime operates as a local daemon application. This document 
 
 ### Single Daemon Process
 
-The runtime runs as a single Rust daemon process. The daemon hosts a Unix domain socket server that accepts connections from coding agents. All module logic executes within this process using async tasks on the tokio runtime.
+The runtime runs as a single Rust daemon process. The daemon hosts an HTTP server (axum) that accepts requests from coding agents on `127.0.0.1:9527` (`POST /hook`, `POST /mcp`, `GET /health`, `GET /metrics`). All module logic executes within this process using async tasks on the tokio runtime.
 
 ### Process Lifecycle
 
 ```
-Start (coderun serve)
+Start (knocode serve)
   │
   ├── Load configuration
-  ├── Initialize logging
-  ├── Open/create SQLite database
-  ├── Open/create engram
-  ├── Open/create Tantivy index
-  ├── Load skill definitions
-  ├── Start Repository Intelligence (background index)
-  ├── Start Unix socket server
-  ├── Emit RepositoryUpdated event
+  ├── Initialize logging + metrics
+  ├── Open/create SQLite database (metadata only — see REMOVED_TOOLS.md)
+  ├── Open/create Tantivy index (sole retrieval; no MkDocs ingestion)
+  ├── Build ContextEngine (single index path: reindex_repository)
+  │
+  ├── Readiness = "indexing" (reported by /health + /metrics)
+  ├── Bind HTTP listener FIRST — reachable during indexing;
+  │     GET /health reports state "indexing"; POST /hook returns 503
+  │     (reason: "daemon_indexing") until ready
+  ├── Run initial repository index to completion (readiness gate)
+  │     — on failure/panic: log loudly, still flip to ready (degraded: ripgrep fallback)
+  ├── Readiness = "ready"
+  ├── Start auto-reindex watcher (commit | filesystem)
+  │     — each watcher reindex flips readiness: ready → indexing → ready
   │
   │   ┌─── Running ───────────────────────────────────────┐
   │   │                                                    │
-  │   │   Accept agent connections (UDS)                   │
+  │   │   Accept agent requests (HTTP /hook, /mcp)         │
+  │   │   Probe payload → state / index_files / version    │
   │   │   Handle pre-generation hooks (BuildContext)       │
-  │   │   Handle pre-tool hooks (compress output)          │
   │   │   Emit observability events                        │
   │   │   Background: incremental indexing on git change   │
   │   │                                                    │
@@ -39,6 +51,7 @@ Start (coderun serve)
   │
   ├── Stop accepting new connections
   ├── Drain in-flight requests (max 30s)
+  ├── Stop auto-reindex watcher (poll loops exit within one interval)
   ├── Flush Tantivy index
   ├── Close SQLite connection
   ├── Flush logs
@@ -59,9 +72,9 @@ Start (coderun serve)
 ### Step 1: Configuration Loading
 
 ```
-1. Check for project-local config: .coderun/config.toml
-2. Check for user config: ~/.config/coderun/config.toml
-3. Check for environment variables: CODERUN_*
+1. Check for project-local config: .knocode/config.toml
+2. Check for user config: ~/.config/knocode/config.toml
+3. Check for environment variables: KNOCODE_*
 4. Merge in order: user < project < environment
 5. Validate all required fields are present
 6. Fail with clear error message if required fields are missing
@@ -81,23 +94,14 @@ Start (coderun serve)
 ### Step 3: Database Initialization
 
 ```
-1. Open SQLite at configured path (default: ~/.coderun/data.db)
+1. Open SQLite at configured path (default: ~/.knocode/data.db)
 2. Create tables if they do not exist (migration 001)
 3. Set WAL mode for concurrent reads
 4. Initialize connection pool (max 5 connections)
 5. Verify database is readable and writable
 ```
 
-### Step 4: engram Initialization
-
-```
-1. Start engram process (Go binary) if not already running
-2. Verify engram HTTP API is reachable
-3. Initialize memory namespace for current repository
-4. Verify read/write capability
-```
-
-### Step 5: Index Initialization
+### Step 4: Index Initialization
 
 ```
 1. Check if Tantivy index exists at configured path
@@ -106,25 +110,18 @@ Start (coderun serve)
 4. Verify index is readable
 ```
 
-### Step 6: Skill Loading
+### Step 5: Initial Repository Indexing (readiness-gated)
 
-```
-1. Read skill directory path from configuration
-2. Scan for community-format skill files (.md, .toml, .yaml)
-3. Parse each skill definition
-4. Validate skill schema (name, trigger/tags, instructions required)
-5. Load valid skills into Skill Engine registry
-6. Log count of loaded skills
-7. Warn on invalid skill files, skip them
-```
-
-### Step 7: Repository Indexing (Background)
+> Runs to completion (success or failure) BEFORE `POST /hook` starts serving real
+> requests, so no request can wait on the engine lock mid-index or race a
+> half-built index. During this phase the HTTP listener is already up and reports
+> `state: "indexing"`.
 
 ```
 1. Check if repository is already indexed (SQLite metadata)
 2. If indexed: compare file hashes, identify changes
 3. If not indexed: schedule full index
-4. Index runs in background tokio task:
+4. Index runs on tokio's blocking pool via the ContextEngine (single index path):
    a. Walk repository directory tree
    b. Skip .git, node_modules, target, __pycache__, .venv
    c. Parse each source file with tree-sitter (incremental)
@@ -132,18 +129,25 @@ Start (coderun serve)
    e. Add to BM25/tantivy index
    f. Store metadata in SQLite
    g. Detect project type and conventions
-5. Emit RepositoryUpdated event when complete
+5. On completion (success or failure) flip readiness to "ready"
 6. Log indexing statistics
 ```
 
-### Step 8: Unix Socket Server Start
+### Step 6: Auto-Reindex Watcher
+
+> Starts after the initial index. Mode from `[index].watch_mode`: `commit` (default,
+> polls the resolved git HEAD) or `filesystem` (real-time via notify). Each reindex
+> flips readiness to `"indexing"` for its duration so clients back off instead of
+> queueing on the engine lock.
+
+### Step 7: Serving
 
 ```
-1. Create Unix socket at configured path (default: /tmp/coderun.sock)
-2. Set socket permissions (owner read/write only)
-3. Start accepting connections
-4. Log server startup with socket path
-5. Ready to serve requests
+1. The HTTP listener is already bound (Step: readiness gate)
+2. GET /health now reports state "ready"; POST /hook and POST /mcp
+   process requests normally
+3. Log server startup with the listen address (default 127.0.0.1:9527)
+4. Ready to serve requests
 ```
 
 ## Configuration
@@ -152,85 +156,43 @@ Start (coderun serve)
 
 | Priority | Path | Purpose |
 |----------|------|---------|
-| 1 (lowest) | `~/.config/coderun/config.toml` | User-wide defaults |
-| 2 | `.coderun/config.toml` | Project-specific overrides |
-| 3 (highest) | Environment variables `CODERUN_*` | Runtime overrides |
+| 1 (lowest) | `~/.config/knocode/config.toml` | User-wide defaults |
+| 2 | `.knocode/config.toml` | Project-specific overrides |
+| 3 (highest) | Environment variables `KNOCODE_*` | Runtime overrides |
 
 ### Configuration Schema
 
 ```toml
-# ~/.config/coderun/config.toml
-
-[daemon]
-socket_path = "/tmp/coderun.sock"    # Unix socket path
-max_concurrent = 10                   # Max concurrent requests
-request_timeout_ms = 30000            # Max time for BuildContext (fail-open)
+# ~/.config/knocode/config.toml
 
 [database]
-path = "~/.coderun/data.db"          # SQLite database path
+path = "~/.knocode/data.db"          # SQLite database path
 max_connections = 5                   # Connection pool size
 
 [index]
-path = "~/.coderun/index/"           # Tantivy index directory
-languages = ["rust", "typescript", "javascript", "python"]  # + ["go","java","c","cpp"] behind --features extended-languages (V0_6_0_PLAN.md:2.2)
+path = "~/.knocode/index/"           # Tantivy index directory
+languages = ["rust", "typescript", "javascript", "python"]  # 4 default; 371 grammars available via tree-sitter-language-pack
+watch_mode = "commit"                 # "commit" (default) or "filesystem"
 
 [knowledge]
-memory_enabled = true                 # Enable engram memory
-memory_endpoint = "http://localhost:9090"  # engram HTTP API endpoint
-max_knowledge_entries = 10000         # Max knowledge entries
-
-[skills]
-path = ".coderun/skills/"            # Skill definitions directory
-auto_discover = true                  # Auto-discover skill files
-max_skills_per_request = 5           # Max skills injected per request
+max_knowledge_entries = 10000         # Max knowledge entries (engram removed — see REMOVED_TOOLS.md)
 
 [context]
 max_tokens = 12000                    # Max tokens per Context Pack
 max_files = 20                        # Max files in Context Pack
 max_lines_per_file = 500             # Max lines per file in Context Pack
-cache_order = ["behavioral_skills", "docs_context", "code_context"]  # Fixed order
+cache_order = ["docs_context", "code_context"]  # Fixed order
+candidate_k = 100                     # Candidate pool size before ranking
 
-[model]
-default_tier = "balanced"            # Default model tier
-routing_enabled = true                # Enable model routing
-max_tokens_response = 4096            # Max tokens in model response
-
-[routing]
-# Task complexity scoring weights
-structural_weight = 0.3
-semantic_weight = 0.4
-scope_weight = 0.3
-
-# Model tier thresholds
-fast_threshold = 0.3                  # Score below this = fast tier
-capable_threshold = 0.7              # Score above this = capable tier
-
-# Model tier mappings
-fast_model = "gpt-4o-mini"
-balanced_model = "gpt-4o"
-capable_model = "o1"
-
-[litellm]
-endpoint = "http://localhost:4000"    # LiteLLM endpoint
-timeout_ms = 30000                    # Request timeout
-max_retries = 3                       # Max retries on failure
-
-[rtk]
-enabled = true                        # Enable RTK compression
-max_output_tokens = 8000              # Max tokens per compressed output
-compression_level = "balanced"        # light, balanced, aggressive
-
-[workflow]                            # DBOS required since v0.6.0 (V0_6_0_PLAN.md:1)
-enabled = true                        # true default (was false pre-v0.6.0)
-engine = "dbos"                       # dbos only; noop kept for #[cfg(test)]
-dbos_endpoint = "http://localhost:3001"
-dbos_shared_secret = ""               # HMAC via hmac crate (secrets::verify_hmac); local default 'your-secret' is fine — only set a real secret/token when connecting to DBOS Cloud/Conductor (see docs/02-workflows/DBOS.md)
-auto_governance = false
-require_approval_tiers = ["capable"]
+# [model] / [routing] / [litellm] removed in v0.8.6 — the runtime is
+# model-agnostic; the agent/provider/user selects the model (V1_RUNTIME_SPEC.md §2.3)
+# [skills] removed — the runtime no longer loads or matches skills (REMOVED_TOOLS.md)
+# [rtk] removed — tool-output compression is the external RTK binary's job
+# (opt-in via installers); no in-repo adapter, config, or fallback remains
 
 [logging]
-level = "info"                        # Log level: error, warn, info, debug, trace
-file_path = "~/.coderun/logs/coderun.log"  # Log file path
+level = "info"                        # Log level: error, warn, info, debug, trace. Verbose = debug/trace: every inbound MCP call (debug) + /health polls (trace) appear in the log
+file_path = "~/.knocode/logs/knocode.log"  # Log file path
 max_size_mb = 100                     # Max log file size
 retention_days = 7                    # Log retention
 ```
@@ -239,22 +201,21 @@ retention_days = 7                    # Log retention
 
 | Variable | Overrides | Default |
 |----------|-----------|---------|
-| `CODERUN_DAEMON_SOCKET` | daemon.socket_path | /tmp/coderun.sock |
-| `CODERUN_DATABASE_PATH` | database.path | ~/.coderun/data.db |
-| `CODERUN_LOG_LEVEL` | logging.level | info |
-| `CODERUN_MODEL_DEFAULT` | model.default_tier | balanced |
-| `CODERUN_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
-| `CODERUN_LITELLM_URL` | litellm.endpoint | http://localhost:4000 |
-| `CODERUN_ENGRAM_ENDPOINT` | knowledge.memory_endpoint | http://localhost:9090 |
-| `CODERUN_DBOS_ENDPOINT` | workflow.dbos_endpoint | http://localhost:3001 |
-| `CODERUN_DBOS_SECRET` | workflow.dbos_shared_secret | local HMAC (default `your-secret` is fine); only set a real secret when connecting to DBOS Cloud/Conductor |
-| `CODERUN_WORKFLOW_ENABLED` | workflow.enabled | true (since v0.6.0) |
+| `KNOCODE_DAEMON_URL` | Daemon URL used by `knocode status`/`preview` and the JS clients | http://127.0.0.1:9527 |
+| `KNOCODE_DATABASE_PATH` | database.path | ~/.knocode/data.db |
+| `KNOCODE_LOG_LEVEL` | logging.level — daemon filter AND agent-plugin verbosity (`error`/`warn` = quiet, `info` = normal, `debug`/`trace` = verbose: one log line per daemon call, incl. every inbound MCP request at debug and every `/health` poll at trace) | info |
+| `KNOCODE_CONTEXT_MAX_TOKENS` | context.max_tokens | 12000 |
+| `KNOCODE_CANDIDATE_K` | context.candidate_k | 100 |
+| `KNOCODE_MAX_FILES` | context.max_files | 20 |
+| `KNOCODE_WATCH_MODE` | index.watch_mode ("commit" or "filesystem") | commit |
+| `KNOCODE_READY_TIMEOUT_MS` | Client-adapter readiness wait budget | 10000 |
+| `KNOCODE_LITELLM_URL` | *removed v0.8.6* — LiteLLM deleted (accepted but ignored for compat) | — |
 
 ## IPC Protocol
 
-### Unix Domain Socket
+### HTTP JSON API
 
-The daemon communicates with coding agents over a Unix domain socket using MessagePack encoding.
+The daemon communicates with coding agents over HTTP JSON on a single listener (default `127.0.0.1:9527`). There is no socket/MessagePack transport; the structs below are the serde JSON shapes used by `POST /hook`.
 
 ### Message Format
 
@@ -262,22 +223,24 @@ The daemon communicates with coding agents over a Unix domain socket using Messa
 // Request from agent to daemon
 struct AgentRequest {
     correlation_id: String,           // req_{uuid}
-    hook_type: HookType,              // PreGeneration | PreToolCall
-    payload: RequestPayload,          // MessageRewrite | ToolOutput
+    hook_type: HookType,              // PreGeneration | Probe
+    payload: RequestPayload,          // MessageRewrite | Probe
+    repository_id: String,            // TASK-021: hash of repo path
+    timestamp: String,                // ISO8601 request creation time
 }
 
 // Response from daemon to agent
 struct AgentResponse {
     correlation_id: String,
     hook_type: HookType,
-    payload: ResponsePayload,         // RewrittenMessage | CompressedOutput | OriginalPassthrough
+    payload: ResponsePayload,         // RewrittenMessage | OriginalPassthrough | Probe
     latency_ms: u64,
     error: Option<String>,            // Non-fatal error message
 }
 
 enum HookType {
     PreGeneration,
-    PreToolCall,
+    Probe,                            // readiness probe (V1_RUNTIME_SPEC.md §5)
 }
 
 enum RequestPayload {
@@ -285,13 +248,9 @@ enum RequestPayload {
         session_id: String,
         message: String,
         context_hints: Option<ContextHints>,
+        repository_path: Option<String>, // agent workspace root (TASK-036)
     },
-    ToolOutput {
-        tool_name: String,
-        output_type: OutputType,      // FileRead | SearchResult | ShellOutput | Other
-        content: String,
-        context: Option<String>,      // What the agent was looking for
-    },
+    Probe,                            // readiness probe
 }
 
 enum ResponsePayload {
@@ -299,20 +258,60 @@ enum ResponsePayload {
         original: String,
         rewritten: String,
         context_pack: Option<ContextPack>,
-        routing_decision: Option<RoutingDecision>,
-    },
-    CompressedOutput {
-        original: String,
-        compressed: String,
-        original_tokens: usize,
-        compressed_tokens: usize,
     },
     OriginalPassthrough {
         original: String,
         reason: String,               // "timeout" | "error" | "fail-open"
     },
+    Probe {
+        state: String,                // "indexing" | "ready"
+        index_files: usize,
+        version: String,
+    },
 }
 ```
+
+### Readiness & Probe
+
+The daemon exposes a readiness state so clients can wait before sending requests
+instead of queueing on the engine lock mid-index. State machine:
+
+```
+indexing ──(initial index completes)──► ready ──(auto-reindex starts)──► indexing ──► ready
+```
+
+| Surface | When not ready | When ready |
+|---------|----------------|------------|
+| HTTP `GET /health` | `{"state": "indexing", "index_files": N}` | `{"status": "ok", "state": "ready", ...}` |
+| HTTP `GET /metrics` | `knocode_daemon_ready 0` | `knocode_daemon_ready 1` |
+| HTTP `POST /hook` | HTTP `503` `reason: "daemon_indexing"` | processes the request |
+| Daemon MCP `POST /mcp` | `tools/call` -> JSON-RPC error `-32001 daemon_indexing` (HTTP `200`) | `tools/call` processes `knocode_context` (compression = RTK, external) |
+| HTTP `Probe` payload (`POST /hook` with `{"type":"Probe"}`) | `Probe { state: "indexing", ... }` | `Probe { state: "ready", ... }` |
+
+Wire example (HTTP JSON):
+
+```json
+// Request
+{ "correlation_id": "req_abc", "hook_type": "Probe", "payload": { "type": "Probe" } }
+
+// Response
+{ "correlation_id": "req_abc", "hook_type": "Probe", "payload": {
+    "type": "Probe", "state": "ready", "index_files": 142, "version": "0.9.0" },
+  "latency_ms": 0, "error": null }
+```
+
+Client guidance:
+
+1. **Cold start:** poll HTTP `GET /health` until `state == "ready"` (the readiness
+   gate holds real requests off the engine lock during the initial index).
+2. **Post-startup:** the HTTP `Probe` payload (`POST /hook` with `{"type":"Probe"}`)
+   answers before rate-limiting — never gated, no engine lock. It reports `indexing`
+   during auto-reindexes; retry with backoff instead of sending real requests.
+3. HTTP `POST /hook` during indexing returns `503 daemon_indexing` — a retry
+   signal, **not** a fail-open passthrough (fail-open still guarantees the agent
+   always gets a `RewrittenMessage` once ready).
+
+4. **MCP clients** (`POST /mcp`) get the same signal as JSON-RPC: `initialize`/`ping`/`tools/list` answer while indexing, but `tools/call` returns error `-32001 daemon_indexing` (HTTP stays `200`) - a retry signal, never a transport failure.
 
 ### Fail-Open Behavior
 
@@ -324,7 +323,6 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 | BuildContext error | OriginalPassthrough | "error" |
 | Context Engine failure | OriginalPassthrough | "fail-open" |
 | Repository not indexed | OriginalPassthrough | "fail-open" |
-| LiteLLM unreachable | OriginalPassthrough | "fail-open" |
 | Any internal error | OriginalPassthrough | "fail-open" |
 
 ## Request Handling
@@ -338,8 +336,6 @@ sequenceDiagram
     participant CE as Context Engine
     participant RI as Repository Intelligence
     participant KH as Knowledge Hub
-    participant SE as Skill Engine
-    participant MR as Model Router
     participant EB as Event Bus
 
     Agent->>AD: PreGeneration(message, session_id)
@@ -352,48 +348,25 @@ sequenceDiagram
     RI-->>CE: SearchResults
 
     CE->>KH: retrieve_knowledge(query)
-    KH->>SE: match_skills(task)
-    SE-->>KH: Vec<SkillMatch>
     KH-->>CE: Vec<KnowledgeEntry>
 
     CE->>CE: Assemble Context Pack
-    CE->>CE: Order: skills → docs → code
+    CE->>CE: Order: docs → code
     CE->>CE: Apply frozen-prefix boundary
     CE->>CE: Enforce token budget
 
-    CE->>MR: select_model(routing_request)
-    MR-->>CE: RoutingDecision
-
     CE->>EB: emit(ContextBuilt)
-    MR->>EB: emit(ModelSelected)
 
-    CE-->>AD: ContextPack + RoutingDecision
+    CE-->>AD: ContextPack
     AD-->>Agent: RewrittenMessage(with context)
 ```
 
 ### Pre-Tool Request Flow
 
-```mermaid
-sequenceDiagram
-    participant Agent as Coding Agent
-    participant AD as Adapter Layer
-    participant EO as Execution Optimizer
-    participant RTK as RTK Library
-    participant EB as Event Bus
-
-    Agent->>AD: PreToolCall(tool_output)
-    AD->>AD: Validate request
-    AD->>AD: Generate correlation ID
-
-    AD->>EO: compress_output(tool_output)
-    EO->>RTK: compress(content)
-    RTK-->>EO: compressed_content
-
-    EO->>EB: emit(ToolExecuted)
-
-    EO-->>AD: CompressedOutput
-    AD-->>Agent: CompressedOutput
-```
+Tool outputs are **not** compressed by the daemon. Tool-output compression lives
+entirely in RTK (external binary, wired by the installers via `rtk init`). The
+`PreToolCall`/`ToolOutput`/`CompressedOutput` IPC variants were removed —
+see `REMOVED_TOOLS.md`.
 
 ## Shutdown
 
@@ -402,18 +375,17 @@ sequenceDiagram
 ```
 1. Receive SIGINT/SIGTERM
 2. Set shutdown flag (atomic bool)
-3. Stop accepting new UDS connections
+3. Stop accepting new HTTP connections
 4. Wait for in-flight requests to complete (max 30 seconds)
 5. If requests still in-flight after 30s:
    a. Log warning for each in-flight request
    b. Force completion
 6. Flush Tantivy index (merge pending segments)
 7. Close SQLite connection pool
-8. Stop engram process (if started by daemon)
+8. Close knowledge store
 9. Flush log buffers
-10. Remove Unix socket file
-11. Log shutdown complete
-12. Exit with code 0
+10. Log shutdown complete
+11. Exit with code 0
 ```
 
 ### Force Shutdown
@@ -450,15 +422,13 @@ CREATE TABLE symbols (
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Token usage tracking
+-- Token usage tracking (migration 007 dropped model/tier — the runtime is model-agnostic)
 CREATE TABLE token_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     correlation_id TEXT NOT NULL,
     request_type TEXT NOT NULL,
     input_tokens INTEGER NOT NULL,
     output_tokens INTEGER NOT NULL,
-    model TEXT NOT NULL,
-    tier TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -470,9 +440,9 @@ CREATE INDEX idx_symbols_name ON symbols(name);
 CREATE INDEX idx_token_usage_correlation ON token_usage(correlation_id);
 ```
 
-### engram Memory Schema
+### Memory Schema (SQLite+tantivy local — engram removed, see REMOVED_TOOLS.md)
 
-engram manages its own SQLite+FTS5 schema. The runtime stores:
+SQLite manages memory. The runtime stores:
 
 | Namespace | Content |
 |-----------|---------|
@@ -494,6 +464,40 @@ Schema::builder()
     .build()
 ```
 
+## Metrics
+
+`GET /metrics` exposes the Prometheus text exposition format (v0.9.0 — lightweight,
+in-memory, no `prometheus` crate; see `daemon/src/metrics.rs`). The full list:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `knocode_requests_total{key=...}` | counter | Total requests by hook type (distinguishes HTTP hook from MCP dispatch) |
+| `knocode_build_context_duration_seconds` | histogram | End-to-end daemon context-request latency (engine-lock wait + build + serialize; RAII timer spans the handler) |
+| `knocode_fail_open_total` | counter | Fail-open count (timeout/error → OriginalPassthrough) |
+| `knocode_context_empty_total` | counter | Requests that succeeded but produced zero context (`OriginalPassthrough`, `reason: "no_context_hits"`) — distinct from fail-open |
+| `knocode_context_tokens` | histogram | Context tokens per request |
+| `knocode_context_files` | histogram | Files included in the context pack per request |
+| `knocode_retrieval_duration_seconds` | histogram | Retrieval-stage latency (search only, excluding packing) |
+| `knocode_retrieval_candidates` | histogram | Candidate results returned by retrieval before packing |
+| `knocode_index_files` | gauge | Indexed files (real count from SQLite after initial index / auto-reindex) |
+| `knocode_index_age_seconds` | gauge | Seconds since the last completed index; sample omitted while no index has completed or during a reindex |
+| `knocode_daemon_ready` | gauge | `1` = ready, `0` = indexing (readiness state machine above) |
+
+Latency decomposition: `knocode_build_context_duration_seconds` is the total;
+`knocode_retrieval_duration_seconds` is the retrieval stage within it. There is
+deliberately no per-query-planning metric — the planner is deterministic and
+in-process (a tracing concern, not a production metric).
+
+Retrieval quality (recall@k, MRR) is **not** exposed here: the daemon has no
+ground truth at request time. It lives in the evaluation suite
+(`eval/metrics/retrieval.py`, `eval/run_comparison.sh`).
+
+Plugin-side integration latency (`session.prompt` → `/hook` → prompt mutation)
+is measured separately by the agent adapters via a single `Date.now()` pair and
+logged per prompt (`[knocode] context latency=<ms> tokens=<n> files=<n>`), so
+daemon overhead vs. integration overhead can be told apart without a metrics
+pipeline.
+
 ## Logging
 
 ### Log Format
@@ -510,7 +514,6 @@ Structured JSON format:
   "details": {
     "files_included": 5,
     "knowledge_entries": 3,
-    "skills_matched": 1,
     "total_tokens": 8500,
     "latency_ms": 12
   }
@@ -523,8 +526,8 @@ Structured JSON format:
 |-------|-------------|
 | ERROR | Component failure, request failure, database corruption |
 | WARN | Recoverable issue, degraded performance, retry needed |
-| INFO | Request lifecycle, indexing progress, model routing decision |
-| DEBUG | Module decisions, search results, skill matching scores |
+| INFO | Request lifecycle, indexing progress |
+| DEBUG | Module decisions, search results, retrieval scores |
 | TRACE | Full data flow, token counting, context assembly details |
 
 ## Error Handling
@@ -536,7 +539,7 @@ Structured JSON format:
 | **Timeout** | Return OriginalPassthrough (fail-open) | BuildContext exceeds 30s |
 | **Request Error** | Return OriginalPassthrough (fail-open) | Invalid request body |
 | **Degraded** | Continue with reduced functionality, return partial context | Knowledge retrieval failed |
-| **Transient** | Retry once, then fail-open | LiteLLM timeout |
+| **Transient** | Retry once, then fail-open | Provider timeout (agent-side) |
 | **Fatal** | Process exits with code 1 | SQLite corrupted, configuration invalid |
 
 ### Error Response Format
@@ -563,12 +566,8 @@ Structured JSON format:
 | INVALID_REQUEST | Request Error | Request body validation failed |
 | INDEX_NOT_READY | Degraded | Repository not yet indexed |
 | CONTEXT_BUILD_FAILED | Degraded | Context assembly partial failure |
-| MODEL_ROUTING_FAILED | Degraded | Could not select model, using default |
-| LLM_UNAVAILABLE | Transient | LiteLLM or model provider unreachable |
-| RTK_COMPRESSION_FAILED | Degraded | Tool output compression failed, return uncompressed |
 | KNOWLEDGE_RETRIEVAL_FAILED | Degraded | Knowledge search failed, continue without knowledge |
-| SKILL_MATCH_FAILED | Degraded | Skill matching failed, continue without skills |
 | DATABASE_ERROR | Fatal | SQLite operations failed |
 | INDEX_ERROR | Fatal | Tantivy operations failed |
-| ENGRAM_UNAVAILABLE | Degraded | Memory system unreachable, continue without memory |
+| MEMORY_UNAVAILABLE | Degraded | Memory store unreachable, continue without memory |
 | CONFIGURATION_ERROR | Fatal | Invalid or missing configuration |

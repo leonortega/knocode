@@ -1,4 +1,4 @@
-# Release Configuration for Coderun
+# Release Configuration for Knocode
 # 
 # Usage:
 #   cargo install cargo-release
@@ -18,12 +18,10 @@ tag-message = "Release {{version}}"
 publish = false
 # Push to remote
 push-remote = "origin"
-# Pre-release hook: run tests
-pre-release-hook = ["cargo", "test"]
-# Pre-release hook: run clippy
-pre-release-hook = ["cargo", "clippy", "--", "-D", "warnings"]
-# Pre-release hook: run cargo audit
-pre-release-hook = ["cargo", "audit"]
+# Pre-release hooks: run tests, clippy, then audit.
+# TOML keeps only the LAST value of a duplicate key, so the three checks were silently
+# reduced to `cargo audit` — chain them into a single hook instead.
+pre-release-hook = ["bash", "-c", "cargo test --workspace && cargo clippy --workspace -- -D warnings && cargo audit"]
 # Update changelog
 update-changelog = true
 # Changelog path
@@ -35,7 +33,7 @@ changelog-path = "CHANGELOG.md"
 
 # Workspace settings
 [workspace]
-# Version to release
-version = "0.6.0"
+# Version to release (must match workspace.package.version in Cargo.toml)
+version = "0.9.12"
 # Release profile
 profile = "release"

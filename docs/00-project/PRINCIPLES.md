@@ -8,23 +8,21 @@ Define the engineering principles that govern every implementation decision. Whe
 
 ### 1. Deterministic Before AI
 
-**Rule:** No LLM call decides whether to retrieve, compress, which skill applies, or which model tier to use. All such decisions use heuristics or deterministic algorithms. LLM calls are reserved for doing the actual work the user asked for.
+**Rule:** No LLM call decides whether to retrieve or compress. All such decisions use heuristics or deterministic algorithms. LLM calls are reserved for doing the actual work the user asked for.
 
 **Implications:**
 - Repository structure analysis is deterministic (tree-sitter parsing)
-- Skill matching uses tag-based scoring, not semantic similarity
 - Context selection uses structural relevance (file relationships, imports, BM25 scores)
-- Model routing uses a heuristic complexity scorer, not an AI classifier
 - Tool-output compression uses RTK's deterministic rules
 - The only non-deterministic element is the LLM response itself
 
 ### 2. Interception Before the Model
 
-**Rule:** Context injection and tool-output optimization happen before the model sees anything, via each agent's own native hooks — not a reverse proxy, not an MCP tool the agent can choose to skip.
+**Rule:** Context injection happens before the model sees anything, via each agent's own native hooks — not a reverse proxy, not an MCP tool the agent can choose to skip. Tool-output optimization is delegated to RTK (external binary), not the runtime.
 
 **Implications:**
-- Use opencode's `chat.message` and `tool.execute.before` hooks
-- Use Claude Code's `UserPromptSubmit` and `PreToolUse` hooks
+- Use opencode's `chat.message` hook; output compression via RTK's own plugin
+- Use Claude Code's `UserPromptSubmit` hook; output compression via RTK's own hooks
 - Hooks fire unconditionally on every message/tool call
 - The agent cannot bypass the runtime's context injection
 - Fail-open on timeout or error: pass the raw message through unmodified
@@ -42,42 +40,40 @@ Define the engineering principles that govern every implementation decision. Whe
 
 ### 4. Cache-Awareness is First-Class
 
-**Rule:** Prompt caching is the single biggest available cost lever. The Context Pack is ordered for maximum cache stability: skills → docs → code (most to least cache-stable). An explicit frozen-prefix boundary ensures only content after that boundary changes between calls.
+**Rule:** Prompt caching is the single biggest available cost lever. The Context Pack is ordered for maximum cache stability: docs → code (most to least cache-stable). An explicit frozen-prefix boundary ensures only content after that boundary changes between calls.
 
 **Implications:**
-- Context Pack YAML has three sections in fixed order: `behavioral_skills`, `docs_context`, `code_context`
-- Skills are byte-identical across many tasks (most cache-stable)
-- Docs change rarely (second most stable)
+- Context Pack YAML has two sections in fixed order: `docs_context`, `code_context`
+- Docs are byte-identical across many tasks (most cache-stable)
 - Code changes frequently (least stable)
 - Frozen-prefix boundary marks where stable content ends
 - Compression should be reversible by default — the model can request originals
 
 ### 5. Local-First
 
-**Rule:** All core processing runs on the developer's machine. No external service is required for the runtime to function, except the LLM provider accessed through LiteLLM.
+**Rule:** All core processing runs on the developer's machine. No external service is required for the runtime to function, except the LLM provider the agent talks to directly.
 
 **Implications:**
 - SQLite is the primary database, not a remote database
-- engram runs locally (SQLite+FTS5)
+- SQLite+tantivy runs in-process (engram removed — see REMOVED_TOOLS.md)
 - BM25/tantivy runs in-process
-- FlashRank runs in-process via `ort` (Rust ONNX Runtime bindings)
+- FlashRank runs in-process via `ort` (Rust ONNX Runtime bindings) — removed, offline only
 - tree-sitter, ast-grep, ripgrep are embedded as native Rust crates, not shelled out
 - Repository data never leaves the machine unless sent to an LLM provider
 - Network failures (other than LLM provider) do not break the runtime
 
 ### 6. Reuse Existing Tools
 
-**Rule:** Use established, mature tools for every capability they provide. Do not reimplement functionality that exists in a well-maintained library. Custom code is reserved for the two things genuinely specific to this problem: the Context Pack's ranking/schema logic and the heuristic router.
+**Rule:** Use established, mature tools for every capability they provide. Do not reimplement functionality that exists in a well-maintained library. Custom code is reserved for the things genuinely specific to this problem: the Context Pack's ranking/schema logic and the retrieval/compression heuristics.
 
 **Implications:**
 - tree-sitter for all AST parsing — embedded as native Rust crate
 - ast-grep for structural code search — embedded as native Rust crate
 - ripgrep for text search — embedded as native Rust crate
 - BM25/tantivy for full-text indexing and search
-- FlashRank for reranking — via `ort` (ONNX Runtime)
-- engram for memory — SQLite+FTS5, MCP-native
-- LiteLLM for all LLM communication — model gateway
-- RTK for tool-output compression — adopted directly
+- FlashRank for reranking — via `ort` (ONNX Runtime) — removed (see REMOVED_TOOLS.md)
+- engram for memory — SQLite+FTS5, MCP-native — removed (see REMOVED_TOOLS.md; SQLite+tantivy local)
+- RTK for tool-output compression — delegated entirely (external binary, not embedded in the daemon)
 - tiktoken-rs for local token counting — never via model API round-trip
 
 ### 7. Minimal Runtime
@@ -102,11 +98,11 @@ Define the engineering principles that govern every implementation decision. Whe
 **Implications:**
 - One database schema, not a schema versioning system
 - One configuration format (TOML)
-- One IPC protocol (Unix domain socket with MessagePack)
+- One IPC protocol (HTTP JSON on a single local listener — see ARCHITECTURE.md)
 - One context format (YAML with fixed sections)
 - Direct struct usage, not trait objects for component interfaces
 - Concrete error types, not generic error enums
-- Interfaces (`IContextBuilder`, `IModelGateway`, `IWorkflowEngine`) are defined as contracts but implemented concretely for v1
+- The runtime is model-agnostic: no model gateway or router (removed — see `docs/01-architecture/REMOVED_TOOLS.md`)
 
 ### 9. Incremental Repository Intelligence
 
@@ -125,11 +121,10 @@ Define the engineering principles that govern every implementation decision. Whe
 
 **Implications:**
 - Context packs have hard token budgets enforced by the Context Engine
-- Tool outputs are compressed via RTK before inclusion in context
+- Tool outputs are compressed via RTK before reaching the model (RTK owns compression; knocode owns context)
 - Only relevant files are included, not entire directories
 - Duplicated content is deduplicated across context sources
 - Token counts are tracked locally via tiktoken-rs (never via model API)
-- Skill instructions are concise and task-specific
 
 ### 11. Observable Behavior
 
@@ -140,38 +135,34 @@ Define the engineering principles that govern every implementation decision. Whe
 - Log levels: ERROR for failures, WARN for recoverable issues, INFO for request lifecycle, DEBUG for component decisions
 - Each request gets a unique correlation ID propagated across all components
 - Token counts are logged at every stage
-- Model routing decisions are logged with reasoning
-- Event bus events: ContextBuilt, SkillActivated, RepositoryUpdated, ToolExecuted, ModelSelected, ResponseGenerated, MemorySaved
-- CLI inspection command can preview/replay what a prompt would build/did build
+- Event bus events: ContextBuilt, RepositoryUpdated, ResponseGenerated, MemorySaved
+- CLI inspection command can preview what a prompt would build
 
 ### 12. Portability via Interfaces
 
-**Rule:** Define `IContextBuilder` (in-process / daemon / remote), `IModelGateway` (default: LiteLLM), and `IWorkflowEngine` (external, optional) as explicit contracts. Reference implementations are chosen for concrete reasons and remain swappable behind these interfaces.
+**Rule:** Define `IContextBuilder` (in-process / daemon / remote) as an explicit contract; the reference implementation is the Rust Context Engine and stays swappable behind it.
 
 **Implications:**
 - The Context Engine implements `IContextBuilder`
-- The Model Router implements `IModelGateway`
-- External orchestration implements `IWorkflowEngine` (separate product)
-- Reference implementations are Rust (Context Engine), LiteLLM (Model Router), Temporal/DBOS (Workflow Engine)
+- The model gateway (`IModelGateway`) and workflow engine (`IWorkflowEngine`) interfaces were removed with the Model Router and workflow engine (see `docs/01-architecture/REMOVED_TOOLS.md`)
 - Swapping implementations requires only re-implementing the interface, not modifying the runtime
 
-### 13. Knowledge is Organizationally Unified
+### 13. Knowledge is Retrieval-Only (skills removed)
 
-**Rule:** Docs, skills, rules, ADRs, templates, and memory live behind one Knowledge Hub API — but skills are matched by a small, deterministic tag-based registry, while docs/code retrieval is large-corpus lexical search plus reranking. These are different problems; do not collapse them into one ranking pipeline.
+**Rule:** Docs, ADRs, and long-term memory live behind one Knowledge Hub API using BM25 lexical retrieval. The Skill Engine was removed — agents own skill discovery natively (see `docs/01-architecture/REMOVED_TOOLS.md`). Do not re-introduce a parallel skill-selection system without measured outcome gains.
 
 **Implications:**
 - Knowledge Hub has one API surface for storage and retrieval
-- Skill matching uses tag-based scoring (deterministic, small registry)
-- Doc/code retrieval uses BM25 + FlashRank reranking (lexical search, large corpus)
-- Memory uses engram (SQLite+FTS5, MCP-native)
-- These three subsystems are composed, not unified into one algorithm
+- Doc/code retrieval uses BM25 lexical search (FlashRank removed — see REMOVED_TOOLS.md, reranker is passthrough)
+- Memory uses SQLite+tantivy local (engram removed — see REMOVED_TOOLS.md)
+- Knowledge subsystems are composed, not unified into one algorithm
 
 ### 14. Report Savings Honestly
 
 **Rule:** Separate "reduction in the specific thing measured" (e.g., bash output size) from "reduction in your bill" (diluted by system prompt, history, and output tokens). Do not oversell.
 
 **Implications:**
-- Report tool-output compression ratio separately from total cost reduction
+- Report tool-output compression ratio separately from total cost reduction (RTK owns compression; knocode owns context)
 - Report token reduction per request separately from bill impact
 - Include caveats about system prompt, history, and output tokens in cost claims
 - Use Promptfoo for objective evaluation, not cherry-picked examples

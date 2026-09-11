@@ -1,0 +1,67 @@
+{
+  "commands": {
+    "build": "cargo build",
+    "test": "cargo test"
+  },
+  "frameworks": [
+    "cargo",
+    "rust-workspace"
+  ],
+  "generated_at_unix": 1789064391,
+  "git_branch": "dev",
+  "important_dirs": [
+    "crates",
+    "packages",
+    "docs",
+    "scripts"
+  ],
+  "index": {
+    "dependency_edges": 820,
+    "files_indexed": 167,
+    "symbols_extracted": 1543
+  },
+  "languages": [
+    {
+      "files": 57,
+      "name": "rust"
+    },
+    {
+      "files": 24,
+      "name": "markdown"
+    },
+    {
+      "files": 22,
+      "name": "json"
+    },
+    {
+      "files": 14,
+      "name": "typescript"
+    },
+    {
+      "files": 13,
+      "name": "toml"
+    },
+    {
+      "files": 11,
+      "name": "shell"
+    },
+    {
+      "files": 9,
+      "name": "sql"
+    },
+    {
+      "files": 9,
+      "name": "yaml"
+    },
+    {
+      "files": 6,
+      "name": "javascript"
+    },
+    {
+      "files": 4,
+      "name": "python"
+    }
+  ],
+  "project": "knocode",
+  "version": 1
+}

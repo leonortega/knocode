@@ -1,6 +1,6 @@
 # === Rust / Cargo ===
 /target
-Cargo.lock
+# Cargo.lock is tracked (binary workspace — reproducible release builds)
 **/*.rs.bk
 *.pdb
 
@@ -26,7 +26,7 @@ tags
 
 # Emacs
 *~
-\#*\#
+\#\*\#
 .#*
 *.elc
 
@@ -39,7 +39,7 @@ tags
 .DS_Store
 .AppleDouble
 .LSOverride
-._*
+._
 Thumbs.db
 
 # Windows
@@ -51,16 +51,27 @@ Desktop.ini
 *~
 
 # === Project-specific ===
-# Coderun runtime data
-.coderun/data.db
-.coderun/data.db-wal
-.coderun/data.db-shm
-.coderun/index/
-.coderun/logs/
-.coderun/cache/
+# Knocode runtime data (database, index, logs, cache)
+.knocode/data.db
+.knocode/data.db-wal
+.knocode/data.db-shm
+.knocode/index/
+.knocode/logs/
+.knocode/cache/
+.knocode/artifacts/
+
+# Knocode config is tracked, but runtime state is not
+# .knocode/config.toml  ← tracked (project config)
+# .knocode/profile.json ← tracked (project profile)
+# .knocode/skills/      ← tracked (skill library)
 
 # Evaluation results (generated)
 eval/results/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
 
 # Environment / secrets
 .env
@@ -81,6 +92,9 @@ yarn.lock
 *.rlib
 *.d
 *.dSYM/
+
+# === Experiments (contain their own target/ build artifacts) ===
+experiments/
 
 # === Misc ===
 *.log

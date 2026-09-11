@@ -1,0 +1,16 @@
+# Expected context for golden tasks — used for Recall evaluation (TASK-006)
+# Each entry maps task hash to expected files/symbols that BuildContext should retrieve
+# Generated from repository_tasks.yaml; kept in sync via eval/metrics/retrieval.py
+
+repository: "knocode"
+version: "v1"
+
+# Example — evaluated via Recall@5/10, MRR
+tasks:
+  - task_hash: "fix_auth_timeout"
+    expected_files: ["crates/knocode-core/src/config.rs", "crates/knocode-daemon/src/http_server.rs"]
+    min_recall_at_5: 0.8
+    min_mrr: 0.7
+
+# Full expected mapping is derived at runtime via eval/metrics/retrieval.py
+# which compares BuildContext code_context lines vs expected_files

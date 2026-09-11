@@ -1,9 +1,0 @@
-{
-  "title": "Coderun v0.4.0",
-  "panels": [
-    { "title": "Request rate", "expr": "rate(coderun_requests_total[5m])" },
-    { "title": "BuildContext p95", "expr": "histogram_quantile(0.95, rate(coderun_build_context_duration_seconds_bucket[5m]))" },
-    { "title": "Fail-open %", "expr": "rate(coderun_fail_open_total[5m]) / rate(coderun_requests_total[5m])" },
-    { "title": "Indexed files", "expr": "coderun_index_files" }
-  ]
-}

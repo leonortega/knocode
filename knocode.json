@@ -1,0 +1,32 @@
+{
+  "version": "0.9.11",
+  "description": "Knocode — AI Runtime for coding agents. Local daemon that enriches agent requests with repository context.",
+  "homepage": "https://github.com/leonortega/knocode",
+  "license": "MIT",
+  "depends": "git",
+  "notes": "Run 'knocode init' in a project and 'knocode serve' to start the daemon.",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/leonortega/knocode/releases/download/v0.9.11/knocode-0.9.11-x86_64-pc-windows-msvc.zip",
+      "hash": "ee3878c05d8f30adc6661b17df66a5a41c9a9dc6ecee1f5c04f29bfdd68c0816"
+    }
+  },
+  "bin": [
+    "knocode.exe",
+    "knocode-daemon.exe"
+  ],
+  "checkver": {
+    "github": "https://github.com/leonortega/knocode"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/leonortega/knocode/releases/download/v$version/knocode-$version-x86_64-pc-windows-msvc.zip",
+        "hash": {
+          "url": "https://github.com/leonortega/knocode/releases/download/v$version/knocode-$version-x86_64-pc-windows-msvc.zip.sha256",
+          "regex": "([a-f0-9]{64})"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "knocode-bench"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bench]]
+name = "context_bench"
+path = "benches/context_bench.rs"
+harness = false
+
+[[bench]]
+name = "tree_sitter"
+path = "benches/tree_sitter.rs"
+harness = false
+
+[dependencies]
+knocode-core.workspace = true
+knocode-events.workspace = true
+knocode-storage.workspace = true
+knocode-repo-intel.workspace = true
+knocode-knowledge.workspace = true
+knocode-context.workspace = true
+criterion = { version = "0.8", features = ["async_tokio"] }
+tokio.workspace = true
+tiktoken-rs.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+tree-sitter-language-pack = "1"

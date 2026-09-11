@@ -1,9 +1,0 @@
-# Context Quality Evaluation Configuration
-description: "Context Quality Tests"
-
-providers:
-  - ./providers/context-quality.js
-
-tests: ./datasets/context-quality.yaml
-
-outputPath: ./results/context-quality.json

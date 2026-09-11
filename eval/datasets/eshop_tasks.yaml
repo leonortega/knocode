@@ -1,0 +1,515 @@
+# eShopOnWeb Golden Dataset — 48 C# coding tasks for retrieval evaluation
+# Tests C# tree-sitter AST extraction quality on a real ASP.NET Core codebase
+# Categories: bug fixing, feature addition, refactoring, testing, documentation, code search, architecture questions
+
+- task: "Fix basket total not recalculating when quantity changes"
+  category: "bug fixing"
+  expected_files:
+    - src/ApplicationCore/Entities/BasketAggregate/Basket.cs
+    - src/ApplicationCore/Entities/BasketAggregate/BasketItem.cs
+    - src/ApplicationCore/Services/BasketService.cs
+    - src/Web/Pages/Basket/Index.cshtml.cs
+    - src/Web/Pages/Basket/BasketViewModel.cs
+    - src/Web/Pages/Basket/BasketItemViewModel.cs
+    - src/Web/Services/BasketViewModelService.cs
+    - src/Web/Interfaces/IBasketViewModelService.cs
+    - src/Web/Pages/Shared/Components/BasketComponent/Basket.cs
+
+- task: "Fix order creation failing when catalog item price changes"
+  category: "bug fixing"
+  expected_files:
+    - src/ApplicationCore/Services/OrderService.cs
+    - src/ApplicationCore/Entities/OrderAggregate/Order.cs
+    - src/ApplicationCore/Entities/OrderAggregate/OrderItem.cs
+    - src/ApplicationCore/Entities/OrderAggregate/CatalogItemOrdered.cs
+    - src/ApplicationCore/Entities/BuyerAggregate/Buyer.cs
+    - src/Web/Pages/Basket/Checkout.cshtml.cs
+    - src/ApplicationCore/Entities/OrderAggregate/Address.cs
+    - src/Infrastructure/Data/Config/OrderConfiguration.cs
+
+- task: "Fix authentication token not including user roles"
+  category: "bug fixing"
+  expected_files:
+    - src/Infrastructure/Identity/IdentityTokenClaimService.cs
+    - src/ApplicationCore/Interfaces/ITokenClaimsService.cs
+    - src/Infrastructure/Identity/ApplicationUser.cs
+    - src/ApplicationCore/Constants/AuthorizationConstants.cs
+    - src/PublicApi/AuthEndpoints/AuthenticateEndpoint.cs
+    - src/PublicApi/AuthEndpoints/AuthenticateEndpoint.ClaimValue.cs
+    - src/Web/Configuration/ConfigureWebServices.cs
+
+- task: "Fix cookie expiration not matching configured timeout"
+  category: "bug fixing"
+  expected_files:
+    - src/Web/Configuration/ConfigureCookieSettings.cs
+    - src/Web/Configuration/RevokeAuthenticationEvents.cs
+    - src/Web/Program.cs
+
+- task: "Fix catalog cache not invalidating after item update"
+  category: "bug fixing"
+  expected_files:
+    - src/Web/Services/CachedCatalogViewModelService.cs
+    - src/Web/Services/CatalogViewModelService.cs
+    - src/Web/Interfaces/ICatalogViewModelService.cs
+    - src/Web/Extensions/CacheHelpers.cs
+    - tests/UnitTests/Web/Extensions/CacheHelpersTests/GenerateCatalogItemCacheKey.cs
+    - tests/UnitTests/Web/Extensions/CacheHelpersTests/GenerateTypesCacheKey.cs
+
+- task: "Add product search by name to catalog"
+  category: "feature addition"
+  expected_files:
+    - src/ApplicationCore/Specifications/CatalogItemNameSpecification.cs
+    - src/ApplicationCore/Specifications/CatalogFilterSpecification.cs
+    - src/ApplicationCore/Interfaces/IReadRepository.cs
+    - src/ApplicationCore/Entities/CatalogItem.cs
+    - src/Web/Services/CatalogViewModelService.cs
+    - src/Web/Interfaces/ICatalogViewModelService.cs
+    - src/Web/ViewModels/CatalogIndexViewModel.cs
+    - src/Web/ViewModels/PaginationInfoViewModel.cs
+    - src/Web/Pages/Index.cshtml.cs
+
+- task: "Add wishlist functionality"
+  category: "feature addition"
+  expected_files:
+    - src/ApplicationCore/Entities/BasketAggregate/Basket.cs
+    - src/ApplicationCore/Entities/BasketAggregate/BasketItem.cs
+    - src/ApplicationCore/Entities/BuyerAggregate/Buyer.cs
+    - src/ApplicationCore/Interfaces/IBasketService.cs
+    - src/ApplicationCore/Services/BasketService.cs
+    - src/ApplicationCore/Specifications/BasketWithItemsSpecification.cs
+    - src/Web/Interfaces/IBasketViewModelService.cs
+    - src/Web/Services/BasketViewModelService.cs
+    - src/Web/Configuration/ConfigureCoreServices.cs
+
+- task: "Add product rating system with average score"
+  category: "feature addition"
+  expected_files:
+    - src/ApplicationCore/Entities/CatalogItem.cs
+    - src/ApplicationCore/Entities/BaseEntity.cs
+    - src/Infrastructure/Data/Config/CatalogItemConfiguration.cs
+    - src/Infrastructure/Data/CatalogContext.cs
+    - src/PublicApi/CatalogItemEndpoints/CatalogItemDto.cs
+    - src/PublicApi/MappingProfile.cs
+    - src/PublicApi/CatalogItemEndpoints/UpdateCatalogItemEndpoint.cs
+
+- task: "Add order status tracking with state machine"
+  category: "feature addition"
+  expected_files:
+    - src/ApplicationCore/Entities/OrderAggregate/Order.cs
+    - src/ApplicationCore/Entities/OrderAggregate/OrderItem.cs
+    - src/ApplicationCore/Interfaces/IOrderService.cs
+    - src/ApplicationCore/Services/OrderService.cs
+    - src/ApplicationCore/Specifications/OrderWithItemsByIdSpec.cs
+    - src/Web/Features/OrderDetails/GetOrderDetails.cs
+    - src/Web/Features/OrderDetails/GetOrderDetailsHandler.cs
+    - src/Web/ViewModels/OrderDetailViewModel.cs
+
+- task: "Add email notification on order confirmation"
+  category: "feature addition"
+  expected_files:
+    - src/ApplicationCore/Interfaces/IEmailSender.cs
+    - src/Infrastructure/Services/EmailSender.cs
+    - src/ApplicationCore/Services/OrderService.cs
+    - src/Web/Extensions/EmailSenderExtensions.cs
+    - src/Web/Pages/Basket/Checkout.cshtml.cs
+    - src/Web/Configuration/ConfigureCoreServices.cs
+    - src/Infrastructure/Dependencies.cs
+
+- task: "Add pagination to public API catalog endpoint"
+  category: "feature addition"
+  expected_files:
+    - src/PublicApi/CatalogItemEndpoints/CatalogItemListPagedEndpoint.cs
+    - src/PublicApi/CatalogItemEndpoints/CatalogItemListPagedEndpoint.ListPagedCatalogItemRequest.cs
+    - src/PublicApi/CatalogItemEndpoints/CatalogItemListPagedEndpoint.ListPagedCatalogItemResponse.cs
+    - src/PublicApi/CatalogItemEndpoints/CatalogItemDto.cs
+    - src/ApplicationCore/Specifications/CatalogFilterPaginatedSpecification.cs
+    - src/ApplicationCore/Interfaces/IReadRepository.cs
+    - src/BlazorShared/Models/PagedCatalogItemResponse.cs
+
+- task: "Refactor hardcoded authorization constants to environment variables"
+  category: "refactoring"
+  expected_files:
+    - src/ApplicationCore/Constants/AuthorizationConstants.cs
+    - src/Infrastructure/Identity/IdentityTokenClaimService.cs
+    - src/Web/Program.cs
+    - src/Web/Configuration/ConfigureWebServices.cs
+    - src/PublicApi/Program.cs
+
+- task: "Refactor basket service to use specification pattern consistently"
+  category: "refactoring"
+  expected_files:
+    - src/ApplicationCore/Services/BasketService.cs
+    - src/ApplicationCore/Specifications/BasketWithItemsSpecification.cs
+    - src/ApplicationCore/Interfaces/IBasketService.cs
+    - src/Infrastructure/Data/EfRepository.cs
+    - src/Web/Pages/Basket/Index.cshtml.cs
+    - tests/UnitTests/ApplicationCore/Services/BasketServiceTests/AddItemToBasket.cs
+
+- task: "Refactor catalog view model service to extract caching decorator"
+  category: "refactoring"
+  expected_files:
+    - src/Web/Services/CachedCatalogViewModelService.cs
+    - src/Web/Services/CatalogViewModelService.cs
+    - src/Web/Interfaces/ICatalogViewModelService.cs
+    - src/Web/Extensions/CacheHelpers.cs
+    - src/Web/Configuration/ConfigureWebServices.cs
+    - src/Web/Program.cs
+
+- task: "Replace in-memory session revocation with distributed cache"
+  category: "refactoring"
+  expected_files:
+    - src/Web/Configuration/RevokeAuthenticationEvents.cs
+    - src/Web/Configuration/ConfigureCookieSettings.cs
+    - src/Web/Configuration/ConfigureWebServices.cs
+    - src/Web/Program.cs
+    - src/Infrastructure/Identity/IdentityTokenClaimService.cs
+    - src/ApplicationCore/Interfaces/ITokenClaimsService.cs
+
+- task: "Extract address validation logic from checkout page"
+  category: "refactoring"
+  expected_files:
+    - src/ApplicationCore/Entities/OrderAggregate/Address.cs
+    - src/Web/Pages/Basket/Checkout.cshtml.cs
+    - src/Web/Pages/Basket/Success.cshtml.cs
+    - src/ApplicationCore/Services/OrderService.cs
+    - src/ApplicationCore/Exceptions/EmptyBasketOnCheckoutException.cs
+    - src/Infrastructure/Data/Config/OrderConfiguration.cs
+
+- task: "Add unit tests for basket add item edge cases"
+  category: "testing"
+  expected_files:
+    - tests/UnitTests/ApplicationCore/Entities/BasketTests/BasketAddItem.cs
+    - tests/UnitTests/ApplicationCore/Entities/BasketTests/BasketRemoveEmptyItems.cs
+    - tests/UnitTests/Builders/BasketBuilder.cs
+    - tests/UnitTests/ApplicationCore/Services/BasketServiceTests/AddItemToBasket.cs
+    - src/ApplicationCore/Entities/BasketAggregate/Basket.cs
+    - src/ApplicationCore/Entities/BasketAggregate/BasketItem.cs
+
+- task: "Add integration tests for order repository with includes"
+  category: "testing"
+  expected_files:
+    - tests/IntegrationTests/Repositories/OrderRepositoryTests/GetByIdWithItemsAsync.cs
+    - tests/IntegrationTests/Repositories/OrderRepositoryTests/GetById.cs
+    - tests/UnitTests/Builders/OrderBuilder.cs
+    - src/Infrastructure/Data/EfRepository.cs
+    - src/ApplicationCore/Interfaces/IRepository.cs
+    - src/ApplicationCore/Specifications/OrderWithItemsByIdSpec.cs
+
+- task: "Add functional tests for catalog API pagination"
+  category: "testing"
+  expected_files:
+    - tests/FunctionalTests/PublicApi/ApiTestFixture.cs
+    - tests/FunctionalTests/PublicApi/ApiTokenHelper.cs
+    - tests/PublicApiIntegrationTests/CatalogItemEndpoints/CatalogItemListPagedEndpoint.cs
+    - tests/PublicApiIntegrationTests/ApiTokenHelper.cs
+    - src/PublicApi/CatalogItemEndpoints/CatalogItemListPagedEndpoint.cs
+
+- task: "Add unit tests for order total calculation with discounts"
+  category: "testing"
+  expected_files:
+    - tests/UnitTests/ApplicationCore/Entities/OrderTests/OrderTotal.cs
+    - tests/UnitTests/Builders/OrderBuilder.cs
+    - src/ApplicationCore/Entities/OrderAggregate/Order.cs
+    - src/ApplicationCore/Entities/OrderAggregate/OrderItem.cs
+    - src/ApplicationCore/Entities/OrderAggregate/CatalogItemOrdered.cs
+
+- task: "Add tests for cached catalog service invalidation"
+  category: "testing"
+  expected_files:
+    - tests/UnitTests/Web/Extensions/CacheHelpersTests/GenerateTypesCacheKey.cs
+    - tests/UnitTests/Web/Extensions/CacheHelpersTests/GenerateCatalogItemCacheKey.cs
+    - tests/UnitTests/Web/Extensions/CacheHelpersTests/GenerateBrandsCacheKey.cs
+    - src/Web/Services/CachedCatalogViewModelService.cs
+    - src/Web/Extensions/CacheHelpers.cs
+
+- task: "Find where basket total is calculated"
+  category: "code search"
+  expected_files:
+    - src/ApplicationCore/Entities/BasketAggregate/Basket.cs
+    - src/ApplicationCore/Entities/BasketAggregate/BasketItem.cs
+    - src/ApplicationCore/Services/BasketService.cs
+    - src/Web/Services/BasketViewModelService.cs
+    - src/Web/Pages/Basket/BasketViewModel.cs
+    - src/Web/ViewModels/PaginationInfoViewModel.cs
+    - src/Web/Pages/Basket/Index.cshtml.cs
+    - src/ApplicationCore/Interfaces/IBasketService.cs
+
+- task: "Find how JWT token claims are constructed"
+  category: "code search"
+  expected_files:
+    - src/Infrastructure/Identity/IdentityTokenClaimService.cs
+    - src/ApplicationCore/Interfaces/ITokenClaimsService.cs
+    - src/PublicApi/AuthEndpoints/AuthenticateEndpoint.cs
+    - src/PublicApi/AuthEndpoints/AuthenticateEndpoint.ClaimValue.cs
+    - src/PublicApi/AuthEndpoints/AuthenticateEndpoint.UserInfo.cs
+    - src/Web/Configuration/ConfigureWebServices.cs
+
+- task: "Find where catalog items are seeded from CSV"
+  category: "code search"
+  expected_files:
+    - src/Infrastructure/Data/CatalogContextSeed.cs
+    - src/Infrastructure/Data/FileItem.cs
+    - src/Infrastructure/Data/CatalogContext.cs
+    - src/Web/Program.cs
+    - src/Infrastructure/Data/Config/CatalogItemConfiguration.cs
+
+- task: "Find how repository pattern is implemented"
+  category: "code search"
+  expected_files:
+    - src/Infrastructure/Data/EfRepository.cs
+    - src/ApplicationCore/Interfaces/IRepository.cs
+    - src/ApplicationCore/Interfaces/IReadRepository.cs
+    - src/ApplicationCore/Interfaces/IAggregateRoot.cs
+    - src/ApplicationCore/Entities/BaseEntity.cs
+    - src/Infrastructure/Data/CatalogContext.cs
+    - src/Infrastructure/Dependencies.cs
+
+- task: "Find where AutoMapper profiles are configured"
+  category: "code search"
+  expected_files:
+    - src/PublicApi/MappingProfile.cs
+    - src/PublicApi/Program.cs
+    - src/PublicApi/CatalogItemEndpoints/CatalogItemListPagedEndpoint.cs
+    - src/PublicApi/CatalogBrandEndpoints/CatalogBrandListEndpoint.cs
+    - src/PublicApi/CatalogTypeEndpoints/CatalogTypeListEndpoint.cs
+
+- task: "Explain how the basket checkout flow works end-to-end"
+  category: "architecture questions"
+  expected_files:
+    - src/Web/Pages/Basket/Checkout.cshtml.cs
+    - src/Web/Pages/Basket/Success.cshtml.cs
+    - src/Web/Pages/Basket/BasketViewModel.cs
+    - src/ApplicationCore/Services/OrderService.cs
+    - src/ApplicationCore/Interfaces/IOrderService.cs
+    - src/ApplicationCore/Entities/OrderAggregate/Order.cs
+    - src/ApplicationCore/Entities/BasketAggregate/Basket.cs
+    - src/ApplicationCore/Exceptions/EmptyBasketOnCheckoutException.cs
+
+- task: "Explain the specification pattern implementation"
+  category: "architecture questions"
+  expected_files:
+    - src/ApplicationCore/Specifications/BasketWithItemsSpecification.cs
+    - src/ApplicationCore/Specifications/CatalogFilterSpecification.cs
+    - src/ApplicationCore/Specifications/CatalogFilterPaginatedSpecification.cs
+    - src/ApplicationCore/Specifications/CatalogItemNameSpecification.cs
+    - src/ApplicationCore/Specifications/OrderWithItemsByIdSpec.cs
+    - src/ApplicationCore/Specifications/CustomerOrdersWithItemsSpecification.cs
+    - src/ApplicationCore/Specifications/CustomerOrdersSpecification.cs
+    - src/ApplicationCore/Interfaces/IReadRepository.cs
+
+- task: "Explain how dependency injection is wired across projects"
+  category: "architecture questions"
+  expected_files:
+    - src/Web/Configuration/ConfigureCoreServices.cs
+    - src/Web/Configuration/ConfigureWebServices.cs
+    - src/Infrastructure/Dependencies.cs
+    - src/Web/Program.cs
+    - src/PublicApi/Program.cs
+    - src/BlazorAdmin/ServicesConfiguration.cs
+    - src/Web/Configuration/ConfigureCookieSettings.cs
+
+- task: "Explain the decorator pattern for catalog caching"
+  category: "architecture questions"
+  expected_files:
+    - src/Web/Services/CachedCatalogViewModelService.cs
+    - src/Web/Services/CatalogViewModelService.cs
+    - src/Web/Interfaces/ICatalogViewModelService.cs
+    - src/Web/Extensions/CacheHelpers.cs
+    - src/BlazorAdmin/Services/CachedCatalogItemServiceDecorator.cs
+    - src/BlazorAdmin/Services/CachedCatalogLookupDataServiceDecorator .cs
+
+- task: "Explain how Blazor Admin communicates with PublicApi"
+  category: "architecture questions"
+  expected_files:
+    - src/BlazorAdmin/Services/HttpService.cs
+    - src/BlazorAdmin/Services/CatalogItemService.cs
+    - src/BlazorAdmin/Services/CatalogLookupDataService.cs
+    - src/BlazorAdmin/Services/CacheEntry.cs
+    - src/BlazorShared/Interfaces/ICatalogItemService.cs
+    - src/BlazorShared/BaseUrlConfiguration.cs
+    - src/PublicApi/CatalogItemEndpoints/CatalogItemGetByIdEndpoint.cs
+    - src/PublicApi/CatalogItemEndpoints/CatalogItemListPagedEndpoint.cs
+
+- task: "How does identity handle user roles and authorization"
+  category: "architecture questions"
+  expected_files:
+    - src/Infrastructure/Identity/AppIdentityDbContext.cs
+    - src/Infrastructure/Identity/AppIdentityDbContextSeed.cs
+    - src/Infrastructure/Identity/ApplicationUser.cs
+    - src/Infrastructure/Identity/IdentityTokenClaimService.cs
+    - src/ApplicationCore/Constants/AuthorizationConstants.cs
+    - src/Web/Areas/Identity/Pages/Account/Login.cshtml.cs
+    - src/Web/Areas/Identity/Pages/Account/Register.cshtml.cs
+    - src/Web/Configuration/RevokeAuthenticationEvents.cs
+
+- task: "Find where catalog page pagination is implemented"
+  category: "code search"
+  expected_files:
+    - src/ApplicationCore/Specifications/CatalogFilterPaginatedSpecification.cs
+    - src/ApplicationCore/Specifications/CatalogFilterSpecification.cs
+    - src/ApplicationCore/Specifications/CatalogItemsSpecification.cs
+    - src/Web/Services/CatalogViewModelService.cs
+    - src/Web/ViewModels/CatalogIndexViewModel.cs
+    - src/Web/ViewModels/PaginationInfoViewModel.cs
+    - src/Web/Pages/Index.cshtml.cs
+
+- task: "Find how the health checks are configured"
+  category: "code search"
+  expected_files:
+    - src/Web/HealthChecks/HomePageHealthCheck.cs
+    - src/Web/HealthChecks/ApiHealthCheck.cs
+    - src/Web/Program.cs
+    - src/PublicApi/Program.cs
+
+- task: "Add product image upload with validation"
+  category: "feature addition"
+  expected_files:
+    - src/ApplicationCore/Entities/CatalogItem.cs
+    - src/PublicApi/ImageValidators.cs
+    - src/PublicApi/CatalogItemEndpoints/CreateCatalogItemEndpoint.cs
+    - src/PublicApi/CatalogItemEndpoints/UpdateCatalogItemEndpoint.cs
+    - src/PublicApi/CatalogItemEndpoints/CatalogItemDto.cs
+    - src/PublicApi/MappingProfile.cs
+    - src/Web/ViewModels/CatalogItemViewModel.cs
+    - src/Web/Services/CatalogItemViewModelService.cs
+    - src/Web/Pages/Admin/EditCatalogItem.cshtml.cs
+
+- task: "Add product filtering by multiple brands"
+  category: "feature addition"
+  expected_files:
+    - src/ApplicationCore/Specifications/CatalogFilterSpecification.cs
+    - src/ApplicationCore/Entities/CatalogBrand.cs
+    - src/ApplicationCore/Entities/CatalogItem.cs
+    - src/Web/Services/CatalogViewModelService.cs
+    - src/Web/Interfaces/ICatalogViewModelService.cs
+    - src/Web/ViewModels/CatalogIndexViewModel.cs
+    - src/Web/ViewModels/PaginationInfoViewModel.cs
+    - src/Web/Pages/Index.cshtml.cs
+
+- task: "Add audit trail for catalog item changes"
+  category: "feature addition"
+  expected_files:
+    - src/ApplicationCore/Entities/CatalogItem.cs
+    - src/ApplicationCore/Entities/BaseEntity.cs
+    - src/Infrastructure/Data/Config/CatalogItemConfiguration.cs
+    - src/Infrastructure/Data/CatalogContext.cs
+    - src/Infrastructure/Data/EfRepository.cs
+    - src/PublicApi/CatalogItemEndpoints/UpdateCatalogItemEndpoint.cs
+
+- task: "Refactor Program.cs to use minimal hosting pattern"
+  category: "refactoring"
+  expected_files:
+    - src/Web/Program.cs
+    - src/Web/Configuration/ConfigureCoreServices.cs
+    - src/Web/Configuration/ConfigureWebServices.cs
+    - src/Web/Configuration/ConfigureCookieSettings.cs
+
+- task: "Extract database seeding into hosted service"
+  category: "refactoring"
+  expected_files:
+    - src/Infrastructure/Data/CatalogContextSeed.cs
+    - src/Infrastructure/Identity/AppIdentityDbContextSeed.cs
+    - src/Infrastructure/Data/CatalogContext.cs
+    - src/Infrastructure/Identity/AppIdentityDbContext.cs
+    - src/Web/Program.cs
+    - src/Web/Configuration/ConfigureCoreServices.cs
+
+- task: "Replace direct repository usage with mediator pipeline"
+  category: "refactoring"
+  expected_files:
+    - src/Web/Features/MyOrders/GetMyOrders.cs
+    - src/Web/Features/MyOrders/GetMyOrdersHandler.cs
+    - src/Web/Features/OrderDetails/GetOrderDetails.cs
+    - src/Web/Features/OrderDetails/GetOrderDetailsHandler.cs
+    - src/Web/Controllers/OrderController.cs
+    - src/Web/ViewModels/OrderViewModel.cs
+    - src/Web/ViewModels/OrderDetailViewModel.cs
+    - src/ApplicationCore/Services/OrderService.cs
+
+- task: "Add distributed caching for catalog items"
+  category: "feature addition"
+  expected_files:
+    - src/Web/Services/CachedCatalogViewModelService.cs
+    - src/Web/Services/CatalogViewModelService.cs
+    - src/Web/Extensions/CacheHelpers.cs
+    - src/Web/Program.cs
+    - src/Web/Configuration/ConfigureWebServices.cs
+    - src/ApplicationCore/CatalogSettings.cs
+
+- task: "Add request logging middleware for API"
+  category: "feature addition"
+  expected_files:
+    - src/PublicApi/Middleware/ExceptionMiddleware.cs
+    - src/PublicApi/Program.cs
+    - src/Infrastructure/Logging/LoggerAdapter.cs
+    - src/ApplicationCore/Interfaces/IAppLogger.cs
+
+- task: "Fix catalog item update not validating price range"
+  category: "bug fixing"
+  expected_files:
+    - src/ApplicationCore/Entities/CatalogItem.cs
+    - src/Web/Services/CatalogItemViewModelService.cs
+    - src/Web/Interfaces/ICatalogItemViewModelService.cs
+    - src/Web/Pages/Admin/EditCatalogItem.cshtml.cs
+    - src/PublicApi/CatalogItemEndpoints/UpdateCatalogItemEndpoint.cs
+    - src/PublicApi/CatalogItemEndpoints/UpdateCatalogItemEndpoint.UpdateCatalogItemRequest.cs
+
+- task: "Add product comparison feature"
+  category: "feature addition"
+  expected_files:
+    - src/ApplicationCore/Entities/CatalogItem.cs
+    - src/ApplicationCore/Entities/CatalogBrand.cs
+    - src/ApplicationCore/Entities/CatalogType.cs
+    - src/ApplicationCore/Interfaces/IReadRepository.cs
+    - src/ApplicationCore/Specifications/CatalogItemsSpecification.cs
+    - src/Web/Services/CatalogViewModelService.cs
+    - src/Web/ViewModels/CatalogItemViewModel.cs
+
+- task: "Add order export to CSV"
+  category: "feature addition"
+  expected_files:
+    - src/ApplicationCore/Entities/OrderAggregate/Order.cs
+    - src/ApplicationCore/Entities/OrderAggregate/OrderItem.cs
+    - src/ApplicationCore/Entities/OrderAggregate/CatalogItemOrdered.cs
+    - src/ApplicationCore/Specifications/CustomerOrdersWithItemsSpecification.cs
+    - src/ApplicationCore/Specifications/CustomerOrdersSpecification.cs
+    - src/ApplicationCore/Extensions/JsonExtensions.cs
+    - src/Web/Features/MyOrders/GetMyOrdersHandler.cs
+    - src/Web/ViewModels/OrderViewModel.cs
+    - src/Web/Controllers/OrderController.cs
+
+- task: "Explain how the public API handles authentication"
+  category: "architecture questions"
+  expected_files:
+    - src/PublicApi/Program.cs
+    - src/PublicApi/AuthEndpoints/AuthenticateEndpoint.cs
+    - src/PublicApi/AuthEndpoints/AuthenticateEndpoint.AuthenticateRequest.cs
+    - src/PublicApi/AuthEndpoints/AuthenticateEndpoint.AuthenticateResponse.cs
+    - src/PublicApi/AuthEndpoints/AuthenticateEndpoint.ClaimValue.cs
+    - src/PublicApi/AuthEndpoints/AuthenticateEndpoint.UserInfo.cs
+    - src/Infrastructure/Identity/IdentityTokenClaimService.cs
+    - src/ApplicationCore/Interfaces/ITokenClaimsService.cs
+
+- task: "Find where basket cookie is managed"
+  category: "code search"
+  expected_files:
+    - src/Web/Constants.cs
+    - src/Web/Pages/Basket/Index.cshtml.cs
+    - src/Web/Pages/Shared/Components/BasketComponent/Basket.cs
+    - src/Web/ViewModels/BasketComponentViewModel.cs
+    - src/Web/Services/BasketViewModelService.cs
+    - src/ApplicationCore/Interfaces/IBasketService.cs
+    - src/ApplicationCore/Services/BasketService.cs
+
+- task: "Add product category tree navigation"
+  category: "feature addition"
+  expected_files:
+    - src/ApplicationCore/Entities/CatalogType.cs
+    - src/ApplicationCore/Entities/CatalogBrand.cs
+    - src/ApplicationCore/Interfaces/IReadRepository.cs
+    - src/ApplicationCore/Specifications/CatalogFilterSpecification.cs
+    - src/ApplicationCore/Specifications/CatalogFilterPaginatedSpecification.cs
+    - src/Web/Services/CatalogViewModelService.cs
+    - src/Web/ViewModels/CatalogIndexViewModel.cs
+    - src/Web/ViewModels/PaginationInfoViewModel.cs
+    - src/Web/Pages/Index.cshtml.cs
