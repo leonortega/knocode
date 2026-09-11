@@ -8,7 +8,7 @@
   "architecture": {
     "64bit": {
       "url": "https://github.com/leonortega/knocode/releases/download/v0.9.12/knocode-0.9.12-x86_64-pc-windows-msvc.zip",
-      "hash": "24626cd375d399ed9f59ae0ebb89330a36490f78e158973ea483ced32c65a48b"
+      "hash": "445929fa26d0a275d81e755f2e2ac724982f9c57bee89611255b7a3fc4bcc9c2"
     }
   },
   "bin": [
