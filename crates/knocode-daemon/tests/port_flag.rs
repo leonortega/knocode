@@ -141,6 +141,12 @@ fn daemon_eager_repo_reaches_ready_and_indexes() {
     )
     .expect("write source file");
 
+    // The daemon hashes the CANONICAL repo path into repository ids
+    // (RepositoryIntelligence canonicalizes via dunce), so hand --repo an
+    // already-canonical path: raw temp paths differ there (macOS /var →
+    // /private/var, Windows 8.3 short names) and the eager count reads 0.
+    let repo = dunce::canonicalize(&repo).unwrap_or(repo);
+
     let port = free_port();
     let (mut cmd, home, db_path, index_dir) = spawn_daemon(port, Some(&repo), "eager");
     let mut child = cmd.spawn().expect("spawn knocode-daemon with --repo");

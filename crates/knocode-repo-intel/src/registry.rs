@@ -607,7 +607,20 @@ mod tests {
 
     #[test]
     fn test_has_parser() {
-        // Delegates to tree-sitter-language-pack — source languages have parsers
+        // Delegates to tree-sitter-language-pack — source languages have parsers.
+        // Prime each grammar once first: in default pack builds the static table is
+        // empty and grammars materialize on demand, so has_parser() ("loadable
+        // offline right now") is only deterministic after an explicit load. Without
+        // this the test races sibling tests' first-use downloads (seen: Ruby false
+        // on a fresh CI runner while Rust/Python had already been pulled in).
+        for id in [
+            LanguageId::Rust, LanguageId::CSharp, LanguageId::Python,
+            LanguageId::Ruby, LanguageId::Go, LanguageId::Kotlin,
+        ] {
+            let name = language_pack_name(id);
+            tree_sitter_language_pack::get_parser(name)
+                .unwrap_or_else(|e| panic!("grammar load failed for {name}: {e}"));
+        }
         assert!(LanguageId::Rust.has_parser());
         assert!(LanguageId::CSharp.has_parser());
         assert!(LanguageId::Python.has_parser());
