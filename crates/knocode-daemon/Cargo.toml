@@ -31,3 +31,9 @@ prometheus = { version = "0.14", optional = true }
 
 [features]
 default = []
+
+# Windows version resource (ProductName/CompanyName/FileVersion/...) so the exe
+# is not a metadata-less PE — a strong heuristic/AV-false-positive trigger.
+# Applied only when building FOR Windows (guarded in build.rs), regardless of host.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
