@@ -414,7 +414,7 @@ jobs:
   # ── Manifest refresh: scoop + winget (Windows only) ────────────────────
   refresh-manifests:
     name: Refresh package manifests
-    needs: publish
+    needs: [verify, publish]
     if: github.event_name == 'push'
     runs-on: windows-latest
     steps:
