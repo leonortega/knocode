@@ -1,0 +1,20 @@
+# Byte-compared vendor contract (scripts/vendor-client.mjs --check).
+# These files are byte-compared against each other, so they must materialize
+# with IDENTICAL bytes on every OS. Without this, a runner with
+# core.autocrlf=true checks out LF-committed files as CRLF while the stamp
+# literal in the LF-only script stays LF -> false "DRIFT" on Windows CI while
+# Linux passes (checkout normalization). eol=lf pins the worktree bytes
+# everywhere; the blobs are already LF, so this adds zero renormalization diff.
+packages/knocode-client/src/client.ts text eol=lf
+packages/opencode-knocode/src/vendor/** text eol=lf
+packages/vscode-copilot-knocode/src/vendor/** text eol=lf
+
+# The vendoring + version-sync scripts themselves carry template literals whose
+# bytes feed those comparisons.
+scripts/vendor-client.mjs text eol=lf
+scripts/sync-version.mjs text eol=lf
+
+# NOTE: PS1/other line endings are deliberately NOT managed here — the blobs are
+# a pre-existing CRLF/LF mix, and touching them means a whole-file renormalization
+# diff for zero behavioral gain. This file exists only to pin the byte-compared
+# vendor contract above.

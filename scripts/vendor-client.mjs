@@ -56,8 +56,18 @@ const stamp = `/**
 `;
 
 let failed = false;
+// EOL normalization is REQUIRED, not cosmetic: this script is committed LF-only,
+// while client.ts / vendored copies were committed CRLF. Byte comparison then
+// flips verdict per platform depending on the runner's git EOL filtering (Windows
+// raw blobs vs Linux checkout normalization) — drift reports on one OS, "up to
+// date" on another, for identical content. The contract is therefore defined in
+// LF: compare and write normalized.
+const toLF = (s) => s.replace(/\r\n/g, "\n");
+
 for (const target of targets) {
-  const rendered = stamp + source;
+  // stamp included: on autocrlf=true checkouts the script file itself materializes
+  // CRLF, which would inject \r into the stamp literal — normalize everything.
+  const rendered = toLF(stamp + source);
   if (check) {
     let existing = null;
     try {
@@ -65,7 +75,7 @@ for (const target of targets) {
     } catch {
       /* missing */
     }
-    if (existing !== rendered) {
+    if (existing === null || toLF(existing) !== rendered) {
       console.error(`[vendor-client] DRIFT: ${path.relative(repoRoot, target)} differs from packages/knocode-client/src/client.ts — run \`npm run vendor\``);
       failed = true;
     } else {
@@ -81,7 +91,7 @@ for (const target of targets) {
       return null;
     }
   })();
-  if (existing === rendered) {
+  if (existing !== null && toLF(existing) === rendered) {
     console.log(`[vendor-client] up to date: ${path.relative(repoRoot, target)}`);
     continue;
   }

@@ -200,6 +200,9 @@ jobs:
 
       - name: Build agent integration packages (bundled dist)
         run: |
+          # Parity with the Windows job: fail on committed vendor/contract drift
+          # instead of silently re-vendoring (write mode would mask it).
+          node scripts/vendor-client.mjs --check
           for pkg in opencode-knocode knocode-mcp; do
             cd "packages/$pkg"
             if [ -f package-lock.json ]; then npm ci --silent; else npm install --silent; fi
@@ -277,6 +280,9 @@ jobs:
 
       - name: Build agent integration packages (bundled dist)
         run: |
+          # Parity with the Windows job: fail on committed vendor/contract drift
+          # instead of silently re-vendoring (write mode would mask it).
+          node scripts/vendor-client.mjs --check
           for pkg in opencode-knocode knocode-mcp; do
             cd "packages/$pkg"
             if [ -f package-lock.json ]; then npm ci --silent; else npm install --silent; fi
