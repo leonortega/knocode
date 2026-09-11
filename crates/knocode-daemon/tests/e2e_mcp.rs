@@ -69,6 +69,7 @@ async fn e2e_mcp_contracts() {
     );
     let state = HttpServerState {
         context_engine: Arc::new(tokio::sync::Mutex::new(engine)),
+        readiness_override: None, // single-test binary: global flips below are safe
     };
 
     // ── Boot HTTP server on an ephemeral port ────────────────────────────

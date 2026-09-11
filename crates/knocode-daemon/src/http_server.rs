@@ -85,6 +85,24 @@ pub enum HttpResponsePayload {
 #[derive(Clone)]
 pub struct HttpServerState {
     pub context_engine: Arc<Mutex<ContextEngine>>,
+    /// Per-state readiness override. Production always leaves `None` — readiness
+    /// comes from the process-global metrics singleton (lifecycle flips it during
+    /// indexing). Tests set this on their OWN state instead of mutating the
+    /// global: parallel lib tests share the process, and one test's global flip
+    /// raced another test's in-flight requests (flaky `-32001 daemon_indexing`
+    /// in CI). With the override, gate tests are hermetic and deterministic.
+    pub readiness_override: Option<crate::metrics::Readiness>,
+}
+
+impl HttpServerState {
+    /// Effective readiness: the per-state override wins; otherwise defer to the
+    /// process-global metrics singleton (the production path).
+    pub fn is_ready(&self) -> bool {
+        match self.readiness_override {
+            Some(r) => r == crate::metrics::Readiness::Ready,
+            None => crate::metrics::global().is_ready(),
+        }
+    }
 }
 
 // ── Server Setup ─────────────────────────────────────────────────────────
@@ -213,7 +231,7 @@ async fn handle_hook(
     // engine lock is held — reject fast with 503 so clients can back off and retry
     // instead of queueing on the lock. Poll GET /health (`state: "ready"`) before
     // sending requests. Never counted as fail-open: this is a retry signal, not a fault.
-    if !crate::metrics::global().is_ready() {
+    if !state.is_ready() {
         tracing::warn!(correlation_id = %correlation_id, "HTTP /hook rejected — daemon indexing in progress (503)");
         let resp = HttpResponse {
             correlation_id: correlation_id.clone(),

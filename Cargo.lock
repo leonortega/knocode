@@ -1696,7 +1696,7 @@ dependencies = [
 
 [[package]]
 name = "knocode-bench"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "criterion",
  "knocode-context",
@@ -1715,7 +1715,7 @@ dependencies = [
 
 [[package]]
 name = "knocode-cli"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -1740,7 +1740,7 @@ dependencies = [
 
 [[package]]
 name = "knocode-context"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "knocode-core"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "async-trait",
  "hmac",
@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "knocode-daemon"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "axum",
@@ -1805,7 +1805,7 @@ dependencies = [
 
 [[package]]
 name = "knocode-events"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "chrono",
  "knocode-core",
@@ -1817,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "knocode-knowledge"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1832,7 +1832,7 @@ dependencies = [
 
 [[package]]
 name = "knocode-repo-intel"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -1862,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "knocode-storage"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "anyhow",
  "chrono",

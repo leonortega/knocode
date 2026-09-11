@@ -158,6 +158,7 @@ impl DaemonState {
         // until the index completes instead of queueing on the engine lock.
         let http_state = crate::http_server::HttpServerState {
             context_engine: self.context_engine.clone(),
+            readiness_override: None, // production: readiness lives in the global singleton
         };
         let http_handle = tokio::spawn(async move {
             if let Err(e) = crate::http_server::start_http_server(http_port, http_state).await {

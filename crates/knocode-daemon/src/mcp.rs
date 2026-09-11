@@ -250,7 +250,7 @@ async fn tool_context(
         .map(str::to_string);
     let logged_request_id = request_id.as_deref().unwrap_or("-");
 
-    if !crate::metrics::global().is_ready() {
+    if !state.is_ready() {
         tracing::warn!(request_id = %logged_request_id, "MCP tools/call knocode_context rejected — daemon indexing in progress (-32001)");
         return error_response(
             id,
@@ -404,6 +404,7 @@ mod tests {
         );
         HttpServerState {
             context_engine: Arc::new(tokio::sync::Mutex::new(engine)),
+            readiness_override: None, // default: defer to the global singleton
         }
     }
 
@@ -487,16 +488,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_context_tool_readiness_gate() {
-        // tools/call while indexing → -32001 application error (HTTP 200). This is the
-        // only lib test that flips the global readiness — restore the default after.
-        crate::metrics::global().set_readiness(crate::metrics::Readiness::Indexing);
-        let state = empty_state();
+        // tools/call while indexing → -32001 application error (HTTP 200).
+        // Hermetic: readiness is overridden on THIS test's state, never on the
+        // process-global singleton — a global flip here raced parallel lib tests
+        // (test_context_repeat_call_not_deduped) and flaked CI.
+        let mut state = empty_state();
+        state.readiness_override = Some(crate::metrics::Readiness::Indexing);
         let (status, resp) = handle_mcp(
             State(state),
             r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"knocode_context","arguments":{"prompt":"hi"}}}"#.to_string(),
         )
         .await;
-        crate::metrics::global().set_readiness(crate::metrics::Readiness::Indexing); // restore default
         assert_eq!(status, StatusCode::OK);
         assert_eq!(resp.0["error"]["code"], ERROR_DAEMON_INDEXING);
     }
@@ -600,9 +602,8 @@ mod tests {
         );
         let state = HttpServerState {
             context_engine: Arc::new(tokio::sync::Mutex::new(engine)),
+            readiness_override: Some(crate::metrics::Readiness::Ready), // hermetic: no global flips
         };
-        let previous = crate::metrics::global().readiness();
-        crate::metrics::global().set_readiness(crate::metrics::Readiness::Ready);
 
         let prompt = "dedup regression marker gamma unique_159753";
         let repo_path = repo.to_string_lossy().to_string();
@@ -634,7 +635,6 @@ mod tests {
 
         // Call 2 — IDENTICAL prompt, fresh request_id (what plugins send per call).
         let (status, resp) = handle_mcp(State(state), call(2, "dedup-req-2")).await;
-        crate::metrics::global().set_readiness(previous); // restore before asserts
         assert_eq!(status, StatusCode::OK);
         assert_eq!(resp.0["error"], serde_json::Value::Null, "call 2: {}", resp.0);
         assert_eq!(
