@@ -29,7 +29,7 @@
   Use -SkipPrereqs to disable auto-installs.
 
   Latest release (one-liner):
-    powershell -ExecutionPolicy Bypass -c "irm https://leonortega.github.io/knocode/install.ps1 | iex"
+    irm https://raw.githubusercontent.com/leonortega/knocode/main/install.ps1 | iex
 
   Pinned version (download the script and pass -Version):
     powershell -ExecutionPolicy Bypass -File knocode-install.ps1 -Version <x.y.z>
@@ -652,5 +652,5 @@ if ($daemonUp) {
 
 Write-Step "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | agents: $(if ($agentSel.Count -gt 0) { $agentSel -join ', ' } else { 'none' }) | rtk: $rtkStatus"
 Write-Step "Next steps: open a new terminal, run 'knocode init' inside a project."
-Write-Step "To uninstall later: powershell -ExecutionPolicy Bypass -c `"irm https://github.com/$Repo/releases/latest/download/uninstall.ps1 | iex`""
+Write-Step "To uninstall later: powershell -ExecutionPolicy Bypass -c 'irm https://github.com/$Repo/releases/latest/download/uninstall.ps1 -OutFile `"`$env:TEMP\knocode-uninstall.ps1`"; if (`$?) { & `"`$env:TEMP\knocode-uninstall.ps1`" }'"
 Write-Step "Docs: https://github.com/$Repo#readme"

@@ -20,10 +20,10 @@
 # release archive - no npm registry needed.
 #
 # One-liner:
-#   curl -fsSL https://leonortega.github.io/knocode/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/leonortega/knocode/main/install.sh | bash
 #
 # Pinned version:
-#   curl -fsSL https://leonortega.github.io/knocode/install.sh | bash -s -- --version <x.y.z>
+#   curl -fsSL https://raw.githubusercontent.com/leonortega/knocode/main/install.sh | bash -s -- --version <x.y.z>
 set -euo pipefail
 
 REPO="leonortega/knocode"

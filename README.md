@@ -94,13 +94,13 @@ flowchart LR
 **Windows** (PowerShell one-liner):
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://leonortega.github.io/knocode/install.ps1 | iex"
+irm https://raw.githubusercontent.com/leonortega/knocode/main/install.ps1 | iex
 ```
 
 **Linux / macOS:**
 
 ```bash
-curl -fsSL https://leonortega.github.io/knocode/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/leonortega/knocode/main/install.sh | bash
 ```
 
 **Scoop** (Windows, per-user, no admin):
@@ -117,7 +117,7 @@ The installer asks which agents to wire up (**OpenCode**, **Copilot for VS Code*
 **Uninstall:**
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/leonortega/knocode/releases/latest/download/uninstall.ps1 | iex"   # Windows
+powershell -ExecutionPolicy Bypass -c 'irm https://github.com/leonortega/knocode/releases/latest/download/uninstall.ps1 -OutFile "$env:TEMP\knocode-uninstall.ps1"; if ($?) { & "$env:TEMP\knocode-uninstall.ps1" }'   # Windows
 curl -fsSL https://github.com/leonortega/knocode/releases/latest/download/uninstall.sh | bash -s -- --force                       # Linux/macOS
 ```
 
