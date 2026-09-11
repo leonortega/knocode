@@ -468,12 +468,19 @@ impl Retriever for TantivyRetriever {
         let _cb_signals = ranking::add_code_behind(&mut merged, policy);
         merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Graph boost — auto-enabled by intent (debugging/implementation) on medium repos,
+        // Graph boost — auto-enabled by intent (debugging) on medium repos,
         // or forced via KNOCODE_BUILD_GRAPH=1. Skipped on large repos (>5k) and type-defs-heavy repos.
+        // KNOCODE_GRAPH_MAX_FILES raises the size gate for opt-in benchmarking
+        // (default 5000 — a cold graph build re-reads every file, so large repos
+        // pay a one-time multi-second cost on the first query).
         // Fast path: if global doc_count > 10k, skip expensive file_count walk (repo is definitely large)
         let force_graph = std::env::var("KNOCODE_BUILD_GRAPH").ok().as_deref() == Some("1");
+        let graph_max_files = std::env::var("KNOCODE_GRAPH_MAX_FILES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(5000);
         let graph_enabled = (plan.graph || policy.enable_graph || force_graph)
-            && (doc_count <= 5000 || repo_intel.file_count() <= 5000);
+            && (doc_count <= graph_max_files || repo_intel.file_count() <= graph_max_files);
         let mut graph_ms = 0u64;
         let mut graph_signals: HashMap<String, RetrievalSignal> = HashMap::new();
         if merged.len() >= 2 && graph_enabled {

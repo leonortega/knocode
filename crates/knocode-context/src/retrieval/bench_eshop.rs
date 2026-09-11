@@ -167,7 +167,7 @@ fn run_bench(repo_root: &std::path::Path) -> BenchResults {
         }
     }
 
-    let policy = RetrievalPolicy { candidate_k: 200, max_files: 50, ..Default::default() };
+    let policy = RetrievalPolicy { candidate_k: 200, max_files: 50, max_files_explicit: true, ..Default::default() };
     let retriever = CombinedRetriever::default();
     let total_start = Instant::now();
 

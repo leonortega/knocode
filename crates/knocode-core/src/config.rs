@@ -86,6 +86,10 @@ pub struct KnowledgeConfig {
 pub struct ContextConfig {
     pub max_tokens: usize,
     pub max_files: usize,
+    /// True when max_files was set explicitly (CLI flag / env). Config-file values
+    /// (usually `knocode init` scaffolding with defaults) count as default.
+    /// Gates the repo-size auto-tune in RetrievalPolicy::effective_max_files.
+    pub max_files_explicit: bool,
     pub max_lines_per_file: usize,
     pub cache_order: Vec<String>,
     /// Candidate pool size before deterministic ranking (P1 sweep 20/50/100/200, default 100 → Top 20)
@@ -145,6 +149,7 @@ impl Default for ContextConfig {
         Self {
             max_tokens: 12000,
             max_files: 20,
+            max_files_explicit: false,
             max_lines_per_file: 500,
             cache_order: vec![
                 "docs_context".to_string(),

@@ -67,19 +67,26 @@ def find_knocode_binary():
 
 
 def parse_json_output(out: str):
-    """Parse `knocode preview --json` stdout; return ordered unique file paths or None."""
+    """Parse `knocode preview --json` stdout; return (ordered unique paths, token_usage.total).
+
+    token_usage.total is the REAL context-pack accounting (docs + code sections).
+    The raw JSON envelope is NOT a valid token proxy: its per-file provenance
+    entries add ~65 tokens each, so envelope size scales with file count even
+    when the pack itself shrinks (BENCHMARKS_V1.md 2026-09-11 token-comparison note).
+    """
     try:
         data = json.loads(out)
     except Exception:
-        return None
+        return None, None
     if not isinstance(data, dict) or "files" not in data:
-        return None
+        return None, None
     paths = []
     for f in data["files"]:
         p = (f.get("path") or "").replace("\\", "/")
         if p and p not in paths:
             paths.append(p)
-    return paths
+    token_total = (data.get("token_usage") or {}).get("total")
+    return paths, token_total
 
 
 def parse_preview(task_str: str, timeout: int = 10):
@@ -100,8 +107,8 @@ def parse_preview(task_str: str, timeout: int = 10):
     )
     latency_ms = int((time.time() - t0) * 1000)
     out = proc.stdout + proc.stderr
-    # Preferred: structured --json contract; fallback: legacy '// path:line' scraping
-    retrieved = parse_json_output(proc.stdout or "") or []
+    retrieved, json_tokens = parse_json_output(proc.stdout or "")
+    retrieved = retrieved or []
     if not retrieved:
         for line in out.splitlines():
             s = line.strip()
@@ -109,9 +116,13 @@ def parse_preview(task_str: str, timeout: int = 10):
                 p = s[3:].split(":")[0].strip().replace("\\", "/")  # normalize Windows separators to match expected_files
                 if p and p not in retrieved:
                     retrieved.append(p)
-    # Try to parse token counts from preview output
-    m_total = re.search(r"total_tokens[:\s]+(\d+)", out, re.IGNORECASE)
-    total_tokens = int(m_total.group(1)) if m_total else count_tokens_tiktoken(out)
+    # Token accounting: preferred = token_usage.total from --json (the real pack);
+    # fallback = legacy regex on text output; last resort = heuristic on raw output.
+    if json_tokens is not None:
+        total_tokens = int(json_tokens)
+    else:
+        m_total = re.search(r"total_tokens[:\s]+(\d+)", out, re.IGNORECASE)
+        total_tokens = int(m_total.group(1)) if m_total else count_tokens_tiktoken(out)
     # Cost from LiteLLM not exposed in preview; fetch metrics if available
     cost_usd = 0.0
     metrics_body = get_metrics()

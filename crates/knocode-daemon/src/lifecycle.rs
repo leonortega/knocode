@@ -106,6 +106,9 @@ impl DaemonState {
         let context_config = knocode_context::ContextConfig {
             max_tokens: config.context.max_tokens,
             max_files: config.context.max_files,
+            // Daemon serves config-file values; those count as defaults for the
+            // repo-size auto-tune (only CLI flag / env are "explicit" pins).
+            max_files_explicit: false,
             max_lines_per_file: config.context.max_lines_per_file,
             cache_order: config.context.cache_order.clone(),
             candidate_k: config.context.candidate_k,

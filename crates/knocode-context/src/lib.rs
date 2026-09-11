@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use knocode_core::{ContextHints, ContextPack, TaskRequest, TokenUsage};
@@ -100,6 +100,10 @@ fn is_unsafe_repository_path(path: &std::path::Path) -> bool {
 pub struct ContextConfig {
     pub max_tokens: usize,
     pub max_files: usize,
+    /// True when max_files came from an explicit pin (CLI flag / env / bench pin),
+    /// not a default or config-file scaffold. Explicit pins are never overridden
+    /// by the repo-size auto-tune. See RetrievalPolicy::max_files_explicit.
+    pub max_files_explicit: bool,
     pub max_lines_per_file: usize,
     pub cache_order: Vec<String>,
     /// Candidate pool size before deterministic ranking (20/50/100/200, default 100 → Top 20)
@@ -111,6 +115,7 @@ impl Default for ContextConfig {
         Self {
             max_tokens: 12000,
             max_files: 20,
+            max_files_explicit: false,
             max_lines_per_file: 500,
             cache_order: vec![
                 "docs_context".to_string(),
@@ -153,6 +158,8 @@ impl ContextEngine {
         event_bus: EventBus,
         config: ContextConfig,
     ) -> Self {
+        // Startup guard: build the BPE tokenizer now, not lazily mid-request.
+        warm_tokenizer();
         Self {
             default_repo_intel: Arc::new(Mutex::new(repo_intel)),
             repo_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -309,6 +316,7 @@ impl ContextEngine {
         let policy = RetrievalPolicy {
             candidate_k: if config.candidate_k > 0 { config.candidate_k } else { config.max_files * 3 },
             max_files: config.max_files,
+            max_files_explicit: config.max_files_explicit,
             ..Default::default()
         };
         let mut q = RetrievalQuery::new(query, repository_id);
@@ -345,6 +353,11 @@ impl ContextEngine {
             );
         }
 
+        // Per-file snippet window: scaled down when the result set is auto-tuned
+        // larger (small-repo arm returns up to 50 files where it used to return 20)
+        // so the packed context stays near its historical footprint.
+        let (win_above, win_below) = scaled_snippet_window(retrieval.evidence.len(), max_lines);
+
         for ev in retrieval.evidence {
             let path_str = ev.path.to_string_lossy().to_string();
             // Legacy SearchResult for provenance (score already *1000 in Evidence)
@@ -355,9 +368,11 @@ impl ContextEngine {
                 score: ev.score as f64,
             });
 
-            // Lazy snippet extraction for Top-K only (preserves prior behavior)
-            let line_start = ev.line.saturating_sub(5);
-            let line_end = ev.line + max_lines.min(15);
+            // Lazy snippet extraction for Top-K only (preserves prior behavior).
+            // Window scales down when the result set is auto-tuned larger (see
+            // scaled_snippet_window) so pack size stays near the historical footprint.
+            let line_start = ev.line.saturating_sub(win_above);
+            let line_end = ev.line + win_below;
             match repo_intel.get_file_content(&path_str, Some((line_start, line_end))) {
                 Ok(content) => {
                     let entry = format!("// {}:{}\n{}", path_str, ev.line, content);
@@ -1055,20 +1070,80 @@ fn classify_single_miss(
     (MissType::Unclassified, "could not determine miss reason (insufficient diagnostic data)".to_string())
 }
 
+/// Per-file snippet window scaled by evidence count, so the packed context stays
+/// near its pre-auto-tune size when the result set grows (the small-repo auto-tune
+/// returns up to 50 files where it used to return 20).
+///
+/// For n ≤ 20 this is byte-identical to the historical path: 5 lines above +
+/// `min(max_lines, 15)` below. Beyond 20, the window shrinks proportionally
+/// (total snippet lines ≈ 20 × old_total, floor 6) — file MEMBERSHIP is untouched,
+/// only lines-per-file shrink, so recall/MRR are unaffected while pack size holds.
+fn scaled_snippet_window(evidence_count: usize, max_lines: usize) -> (usize, usize) {
+    /// Per-entry lines that are NOT snippet window: the `// path:line` header and
+    /// the blank separators around each entry. Must be subtracted from the
+    /// per-entry budget or large result sets overshoot the pack target.
+    const PER_ENTRY_FIXED_LINES: usize = 3;
+    const OLD_ABOVE: usize = 5;
+    let below_cap = max_lines.min(15);
+    let old_total = OLD_ABOVE + below_cap;
+    if evidence_count <= 20 {
+        return (OLD_ABOVE, below_cap);
+    }
+    // Budget: 20 entries × (old window + fixed) total lines, spread over n entries.
+    // Floor at 6 window lines so entries stay meaningful.
+    let per_entry = (20 * (old_total + PER_ENTRY_FIXED_LINES)) / evidence_count;
+    let total = per_entry
+        .saturating_sub(PER_ENTRY_FIXED_LINES)
+        .max(6)
+        .min(old_total);
+    let above = (total * OLD_ABOVE / old_total).max(2);
+    (above, total - above)
+}
+
 // ── Token Counting (tiktoken-rs, never via model API) ────────────────────
 
+/// The BPE tokenizer is EXPENSIVE to construct (~100k-entry rank table) and
+/// must be built exactly once per process. Rebuilding per call — worse, per
+/// LINE inside truncate_to_tokens' loop — once cost 24s on a single preview.
+static CL100K: OnceLock<Option<tiktoken_rs::CoreBPE>> = OnceLock::new();
+
+fn cl100k() -> Option<&'static tiktoken_rs::CoreBPE> {
+    CL100K
+        .get_or_init(|| match tiktoken_rs::cl100k_base() {
+            Ok(bpe) => Some(bpe),
+            Err(e) => {
+                warn!(error = %e, "tiktoken load failed, falling back to heuristic");
+                None
+            }
+        })
+        .as_ref()
+}
+
+/// Eagerly construct the BPE tokenizer so the one-time ~100k-entry table build
+/// is paid at startup (engine construction), never lazily inside a request.
+/// Every entry point (CLI preview/index, daemon, MCP) constructs a
+/// ContextEngine before serving, so this is the natural warm-up chokepoint.
+/// See BENCHMARKS_V1.md (2026-09-11): a cold init landing mid-packing used to
+/// read as a multi-second stall on over-budget contexts.
+pub fn warm_tokenizer() {
+    let start = std::time::Instant::now();
+    let loaded = cl100k().is_some();
+    debug!(
+        elapsed_ms = start.elapsed().as_millis() as u64,
+        loaded,
+        "tokenizer warmed"
+    );
+}
+
 /// Count tokens locally with tiktoken-rs `cl100k_base` (spec §3, §4)
-/// Fallback to char/4 heuristic only if tokenizer fails — logs WARN.
+/// Fallback to char/4 heuristic only if tokenizer fails to load — logs WARN once.
 pub fn count_tokens(text: &str) -> usize {
     if text.is_empty() {
         return 0;
     }
-    match tiktoken_rs::cl100k_base() {
-        Ok(bpe) => bpe.encode_ordinary(text).len(),
-        Err(e) => {
-            warn!(error = %e, "tiktoken load failed, falling back to heuristic");
-            estimate_tokens_heuristic(text)
-        }
+    match cl100k() {
+        Some(bpe) => bpe.encode_ordinary(text).len(),
+        None => estimate_tokens_heuristic(text),
     }
 }
 
@@ -1221,6 +1296,36 @@ mod tests {
     }
 
     #[test]
+    fn test_scaled_snippet_window_matches_old_path_up_to_20() {
+        // ≤20 evidence: byte-identical to the historical 5-above / min(max_lines,15)-below
+        assert_eq!(scaled_snippet_window(1, 500), (5, 15));
+        assert_eq!(scaled_snippet_window(20, 500), (5, 15));
+        assert_eq!(scaled_snippet_window(20, 3), (5, 3)); // max_lines caps the window
+    }
+
+    #[test]
+    fn test_scaled_snippet_window_shrinks_beyond_20() {
+        // 50 files (small-repo auto-tune): per-entry budget 20×23/50 = 9 lines
+        // (incl. 3 fixed header/separator lines) → 6-line window
+        let (above, below) = scaled_snippet_window(50, 500);
+        assert_eq!((above, below), (2, 4));
+        assert_eq!(above + below, 6);
+
+        // Extreme result sets clamp to the 6-line floor
+        let (above, below) = scaled_snippet_window(200, 500);
+        assert_eq!((above, below), (2, 4));
+        assert_eq!(above + below, 6);
+
+        // Just past 20: gentle continuous shrink (18 window lines, not a cliff)
+        let (above, below) = scaled_snippet_window(21, 500);
+        assert_eq!(above + below, 18);
+
+        // Never grows beyond the historical window
+        let (above, below) = scaled_snippet_window(50, 3);
+        assert!(above + below <= 8);
+    }
+
+    #[test]
     fn test_count_tokens_tiktoken_vs_heuristic() {
         // tiktoken count should be non-zero and within 5x heuristic for English
         let text = "hello world, this is a test of token counting";
@@ -1229,6 +1334,43 @@ mod tests {
         assert!(t > 0);
         assert!(t <= h * 5);
         assert!(count_tokens("") == 0);
+    }
+
+    #[test]
+    fn test_count_tokens_repeat_calls_are_cached() {
+        // Regression guard (BENCHMARKS_V1.md 2026-09-11): count_tokens once rebuilt
+        // the ~100k-entry BPE tokenizer on EVERY call — 24s on a single preview when
+        // truncate_to_tokens invoked it per line. The tokenizer must be constructed
+        // exactly once per process (OnceLock + warm_tokenizer at engine startup);
+        // repeat calls are static lookups.
+        let text = "fn warm_tokenizer() { let start = Instant::now(); } // sample code line\n";
+        let first = count_tokens(text);
+
+        // Deterministic check: count_tokens must route through the shared static —
+        // if it did, the OnceLock is initialized after the first call. A revert to
+        // per-call construction leaves the static untouched → this fails with zero
+        // timing flakiness.
+        assert!(
+            CL100K.get().is_some(),
+            "count_tokens does not use the cached CL100K static — per-call tokenizer construction likely reintroduced"
+        );
+
+        // Timing check (soft): cached encode is ~60µs/call in debug; construction is
+        // ~40ms/call → 1000 calls would take ~40s. The ceiling exists only to catch a
+        // gross regression when run in isolation — the deterministic CL100K check above
+        // is the primary guard — so it is set generously (2000ms) to never flake under
+        // parallel-test contention on loaded CI while still failing ~20x over budget.
+        let start = std::time::Instant::now();
+        for _ in 0..1000 {
+            let n = count_tokens(text);
+            assert_eq!(n, first, "token count must be deterministic across calls");
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 2000,
+            "count_tokens repeat calls must be cached: 1000 calls took {}ms — the tokenizer is being reconstructed per call",
+            elapsed.as_millis()
+        );
     }
 
     #[test]

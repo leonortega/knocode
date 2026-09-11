@@ -1222,11 +1222,14 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected
         if std::env::var("KNOCODE_PROFILE").is_ok() { eprintln!("[profile] cli.kh_new: {}ms", _t1.elapsed().as_millis()); }
         let core_config = knocode_core::Config::load(&project_root)
             .unwrap_or_default();
+        let max_files_env = std::env::var("KNOCODE_MAX_FILES").ok().and_then(|v| v.parse::<usize>().ok());
+        let max_files_explicit = max_files.is_some() || max_files_env.is_some();
         let ctx_config = knocode_context::ContextConfig {
             max_tokens: core_config.context.max_tokens,
             max_files: max_files
-                .or_else(|| std::env::var("KNOCODE_MAX_FILES").ok().and_then(|v| v.parse().ok()))
+                .or(max_files_env)
                 .unwrap_or(core_config.context.max_files),
+            max_files_explicit,
             max_lines_per_file: core_config.context.max_lines_per_file,
             cache_order: core_config.context.cache_order.clone(),
             candidate_k: candidate_k.unwrap_or(core_config.context.candidate_k),

@@ -241,6 +241,11 @@ pub struct RetrievalPolicy {
     pub candidate_k: usize,
     /// Final file limit (default 20, 50 for large repos)
     pub max_files: usize,
+    /// True when max_files was set explicitly (CLI flag / env / bench pin).
+    /// Explicit pins are NEVER overridden by the repo-size auto-tune; the gate
+    /// must not key on `max_files == 20` alone, which also matches users who
+    /// deliberately pinned 20 (and silently reverted their choice).
+    pub max_files_explicit: bool,
 
     pub field_weights: FieldWeights,
     pub file_class_weights: FileClassWeights,
@@ -376,6 +381,7 @@ impl Default for RetrievalPolicy {
         Self {
             candidate_k: 100,
             max_files: 20,
+            max_files_explicit: false,
             field_weights: FieldWeights::default(),
             file_class_weights: FileClassWeights::default(),
             directory_weights: DirectoryWeights::default(),
@@ -441,20 +447,47 @@ impl RetrievalPolicy {
         self.candidate_k
     }
 
-    /// Effective max_files with large-repo auto-tune (matches `lib.rs:209-214`)
+    /// Effective max_files with repo-size auto-tune.
+    ///
+    /// - Large repos (>5000 docs): 20 → 50 (pre-existing arm, `lib.rs:209-214`).
+    /// - Small repos (≤500 docs): 20 → 50 (added 2026-09-10). On a small repo the
+    ///   index is effectively exhaustive — bench_retrieval_50 at k=50 reached
+    ///   **100% grep recall on all 50 queries** (k=20 capped at 88%). An LLM
+    ///   consumer cares about not missing the file, not precision-vs-grep, and
+    ///   the token budget still caps the final context. Mid-size repos (500–5000)
+    ///   are unchanged: no measured benefit.
+    ///
+    /// The `max_files == 20` guard keeps explicit pins explicit: benches and
+    /// callers that set a specific max_files keep exactly that value, so the
+    /// `KNOCODE_BENCH_MAX_FILES` sweep still measures what it says.
     pub fn effective_max_files(&self, doc_count: usize) -> usize {
-        if doc_count > 5000 && self.max_files == 20 {
+        let auto_tunable = self.max_files == 20 && !self.max_files_explicit;
+        if doc_count > 5000 && auto_tunable {
+            50
+        } else if doc_count <= 500 && auto_tunable {
             50
         } else {
             self.max_files
         }
     }
 
-    /// Effective candidate_k with large-repo auto-tune
+    /// Effective candidate_k with repo-size auto-tune.
+    ///
+    /// Pool/result-set co-scaling: whenever `effective_max_files` auto-raises
+    /// the cut, ensure the candidate pool scales with it (≥ 4× max_files).
+    /// The k=100 component run (2026-09-10) showed pool size contributes
+    /// +44.4% recall once the cut passes the stabilized top region — raising
+    /// the cut without raising the pool leaves that recall on the table.
     pub fn effective_candidate_k_for(&self, doc_count: usize) -> usize {
         let mut k = self.effective_candidate_k();
         if k == 100 && doc_count > 5000 {
             k = 200;
+        }
+        // Co-scale pool with any auto-raised result set (default env unset → 100).
+        let max_files = self.effective_max_files(doc_count);
+        let min_pool = max_files.saturating_mul(4);
+        if k < min_pool {
+            k = min_pool;
         }
         k
     }
@@ -537,6 +570,59 @@ mod tests {
         assert!((p.test_multiplier("fix the test suite", "Test") - 1.4).abs() < 1e-6);
         assert!((p.test_multiplier("authentication middleware", "Test") - 0.6).abs() < 1e-6);
         assert!((p.test_multiplier("anything", "Source") - 1.0).abs() < 1e-6);
+    }
+
+    // ── Repo-size auto-tune (small-repo arm + pool co-scaling) ──
+
+    #[test]
+    fn small_repo_gets_exhaustive_result_set() {
+        let p = RetrievalPolicy::default();
+        // ≤500 docs and default max_files: auto-raise 20 → 50.
+        assert_eq!(p.effective_max_files(163), 50, "small repo should get the exhaustive arm");
+        assert_eq!(p.effective_max_files(1), 50);
+        assert_eq!(p.effective_max_files(500), 50);
+        // Mid-size: unchanged.
+        assert_eq!(p.effective_max_files(501), 20);
+        assert_eq!(p.effective_max_files(3000), 20);
+        // Large: existing arm.
+        assert_eq!(p.effective_max_files(5001), 50);
+    }
+
+    #[test]
+    fn explicit_max_files_pin_is_respected() {
+        // Benches and callers that pin max_files keep exactly that value
+        // (KNOCODE_BENCH_MAX_FILES sweep must keep measuring what it says).
+        let pinned = RetrievalPolicy { max_files: 100, max_files_explicit: true, ..Default::default() };
+        assert_eq!(pinned.effective_max_files(163), 100, "explicit pin must not be overridden");
+        let pinned10 = RetrievalPolicy { max_files: 10, max_files_explicit: true, ..Default::default() };
+        assert_eq!(pinned10.effective_max_files(163), 10);
+        // The critical case: a user who EXPLICITLY pins 20 gets 20 — the gate must
+        // not read "20" as "unset default" and silently auto-raise it to 50.
+        let pinned20 = RetrievalPolicy { max_files: 20, max_files_explicit: true, ..Default::default() };
+        assert_eq!(pinned20.effective_max_files(163), 20, "explicit 20 must not be auto-raised");
+        assert_eq!(pinned20.effective_candidate_k_for(163), 100, "co-scaling floor must not fire on explicit 20");
+        // Default (not explicit): auto-tune applies.
+        let default = RetrievalPolicy::default();
+        assert_eq!(default.effective_max_files(163), 50);
+        assert_eq!(default.effective_candidate_k_for(163), 200);
+    }
+
+    #[test]
+    fn candidate_pool_co_scales_with_result_set() {
+        let p = RetrievalPolicy::default();
+        // Small repo: max_files auto-raises to 50 → pool floor 200 (= 4×50).
+        assert_eq!(p.effective_candidate_k_for(163), 200);
+        // Mid-size: max_files stays 20 → pool floor 80 < default 100 → default wins.
+        assert_eq!(p.effective_candidate_k_for(3000), 100);
+        // Large: existing arm raises pool to 200; max_files 50 → floor 200 → 200.
+        assert_eq!(p.effective_candidate_k_for(5001), 200);
+    }
+
+    #[test]
+    fn pool_co_scale_never_shrinks_explicit_pool() {
+        // An explicit large pool via policy keeps winning over the floor.
+        let big = RetrievalPolicy { candidate_k: 500, ..Default::default() };
+        assert_eq!(big.effective_candidate_k_for(163), 500);
     }
 
     /// Parity: canonical STOP_WORDS must cover every word the old context-side

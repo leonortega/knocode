@@ -216,7 +216,19 @@ fn run_bench() -> BenchResults {
         }
     }
 
-    let policy = RetrievalPolicy { candidate_k: 100, max_files: 20, ..Default::default() };
+    // Result-set size knob for experiments (KNOCODE_BENCH_MAX_FILES, default 20 = historical baseline).
+    // A pinned value is an EXPLICIT pin (the repo-size auto-tune must not override it);
+    // unset → default 20, and the bench run honestly reflects production defaults.
+    let bench_max_files_env = std::env::var("KNOCODE_BENCH_MAX_FILES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let bench_max_files = bench_max_files_env.unwrap_or(20);
+    let policy = RetrievalPolicy {
+        candidate_k: 100,
+        max_files: bench_max_files,
+        max_files_explicit: bench_max_files_env.is_some(),
+        ..Default::default()
+    };
     let retriever = CombinedRetriever::default();
 
     let total_start = Instant::now();

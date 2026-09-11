@@ -20,6 +20,21 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// Result-set size knob for experiments (KNOCODE_BENCH_MAX_FILES, default 50 = historical baseline).
+fn bench_max_files_value() -> usize {
+    std::env::var("KNOCODE_BENCH_MAX_FILES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(50)
+}
+
+/// True when KNOCODE_BENCH_MAX_FILES is set — i.e. the bench run is an EXPLICIT
+/// pin that the repo-size auto-tune must not override. Unset → default run,
+/// which honestly reflects production defaults (auto-tune applies).
+fn bench_max_files_is_explicit() -> bool {
+    std::env::var("KNOCODE_BENCH_MAX_FILES").is_ok()
+}
+
 #[derive(Debug, Clone)]
 struct EvalQuery {
     text: &'static str,
@@ -95,10 +110,20 @@ fn eval_graph(
     let queries = eval_queries();
     let mut results = Vec::with_capacity(queries.len());
 
+    // Result-set size knob for experiments (KNOCODE_BENCH_MAX_FILES, default 50 = historical baseline).
+    // A pinned value is an EXPLICIT pin (the repo-size auto-tune must not override it);
+    // unset → default 50, and the bench run honestly reflects production defaults.
+    let bench_max_files_env = std::env::var("KNOCODE_BENCH_MAX_FILES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let bench_max_files = bench_max_files_env.unwrap_or(50);
+    let bench_max_files_explicit = bench_max_files_env.is_some();
+
     // Policy without graph
     let policy_no_graph = RetrievalPolicy {
         candidate_k: 200,
-        max_files: 50,
+        max_files: bench_max_files,
+        max_files_explicit: bench_max_files_explicit,
         enable_graph: false,
         ..Default::default()
     };
@@ -106,7 +131,8 @@ fn eval_graph(
     // Policy with graph (forced)
     let policy_with_graph = RetrievalPolicy {
         candidate_k: 200,
-        max_files: 50,
+        max_files: bench_max_files,
+        max_files_explicit: bench_max_files_explicit,
         enable_graph: true,
         ..Default::default()
     };
@@ -195,14 +221,16 @@ fn eval_candidate_k(
     // Policy with small candidate pool
     let policy_small = RetrievalPolicy {
         candidate_k: 50,
-        max_files: 50,
+        max_files: bench_max_files_value(),
+        max_files_explicit: bench_max_files_is_explicit(),
         ..Default::default()
     };
 
     // Policy with large candidate pool
     let policy_large = RetrievalPolicy {
         candidate_k: 500,
-        max_files: 50,
+        max_files: bench_max_files_value(),
+        max_files_explicit: bench_max_files_is_explicit(),
         ..Default::default()
     };
 
@@ -274,7 +302,8 @@ fn eval_expansion(
 
     let policy = RetrievalPolicy {
         candidate_k: 200,
-        max_files: 50,
+        max_files: bench_max_files_value(),
+        max_files_explicit: bench_max_files_is_explicit(),
         ..Default::default()
     };
 

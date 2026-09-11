@@ -113,6 +113,39 @@ pub struct IndexStats {
     pub files_skipped: usize,
     pub files_deleted: usize,
     pub duration_ms: u64,
+    /// Self-explanatory indexing: which path did this run take?
+    /// `walk+read+hash` phase duration (Phase 1, includes deferred DB batch).
+    pub walk_ms: u64,
+    /// Parallel symbol-extraction phase duration (Phase 2). 0 when all files
+    /// hit the mtime+size shortcut (warm no-op run).
+    pub extract_ms: u64,
+    /// DB + tantivy write phase duration (Phase 3).
+    pub write_ms: u64,
+    /// Files served by the mtime+size shortcut (counted, no I/O) — warm-run signal.
+    pub files_shortcut: usize,
+    /// Files fully processed (read + extracted) — cold-run signal.
+    pub files_extracted: usize,
+    /// True when the run forced full re-extraction to heal a symbol-less index
+    /// (previous run interrupted mid-write). One-shot after the heal-loop fix.
+    pub healed: bool,
+}
+
+impl Default for IndexStats {
+    fn default() -> Self {
+        Self {
+            files_indexed: 0,
+            symbols_extracted: 0,
+            files_skipped: 0,
+            files_deleted: 0,
+            duration_ms: 0,
+            walk_ms: 0,
+            extract_ms: 0,
+            write_ms: 0,
+            files_shortcut: 0,
+            files_extracted: 0,
+            healed: false,
+        }
+    }
 }
 
 // ── Repository Intelligence ─────────────────────────────────────────────
@@ -215,6 +248,8 @@ impl RepositoryIntelligence {
         let mut symbols_extracted = 0usize;
         let mut files_skipped = 0usize;
         let mut files_deleted = 0usize;
+        let mut files_shortcut = 0usize;
+        let mut files_extracted = 0usize;
 
         // Open tantivy index (MmapDirectory, memory-mapped per spec §3) — optional, never fails indexing
         let repo_id = self.repository_id.clone();
@@ -325,17 +360,17 @@ impl RepositoryIntelligence {
             if language.is_none() && !is_indexable_text_file(&path_str) {
                 files_skipped += 1;
                 continue;
-            }
-
-            // mtime+size shortcut — skip reading unchanged files on warm re-index
+            }            // mtime+size shortcut — skip reading unchanged files on warm re-index
             // (disabled when healing a symbol-less index from an interrupted run)
             if !heal_symbolless_index {
                 if let Some(rec) = existing_meta.get(&path_str) {
                     if is_file_unchanged_fast(&path, rec) {
                         files_indexed += 1; // counted but no I/O
+                        files_shortcut += 1;
                         continue;
                     }
                 }
+
             }
 
             // Check binary by extension only before read (cheap)
@@ -380,6 +415,7 @@ impl RepositoryIntelligence {
                 (true, true, None) // existing_file_id filled in after batch insert
             };
 
+            files_extracted += 1;
             file_jobs.push(FileJob {
                 path_str,
                 content,
@@ -543,7 +579,22 @@ impl RepositoryIntelligence {
                 }
                 symbols_extracted += extract_result.extracted_count;
             } else if file_id > 0 {
-                // File not changed but symbols may have been extracted for tantivy
+                // File not changed but symbols may have been extracted for tantivy.
+                // HEAL FIX: during a symbol-less-index heal (hash-match files re-extracted),
+                // the symbols MUST also land in SQLite — otherwise the DB stays at 0 symbols
+                // and every subsequent run heals again, re-extracting the whole repo each
+                // time (the observed "slow run, 0 symbols persisted" loop on large repos).
+                if heal_symbolless_index {
+                    let sym_pairs: Vec<(String, String)> = extract_result
+                        .sym_names
+                        .iter()
+                        .zip(extract_result.sym_kinds.iter())
+                        .map(|(n, k)| (n.clone(), k.clone()))
+                        .collect();
+                    if let Err(e) = self.db.insert_symbols_batch(file_id, &sym_pairs) {
+                        eprintln!("Warning: heal symbol insert failed for file {}: {}", file_id, e);
+                    }
+                }
                 symbols_extracted += extract_result.extracted_count;
             }
 
@@ -615,6 +666,12 @@ impl RepositoryIntelligence {
             files_skipped,
             files_deleted,
             duration_ms,
+            walk_ms: phase1_ms,
+            extract_ms,
+            write_ms,
+            files_shortcut,
+            files_extracted,
+            healed: heal_symbolless_index,
         };
 
         // Emit event

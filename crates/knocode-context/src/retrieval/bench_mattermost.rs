@@ -127,6 +127,8 @@ struct QueryResult {
     overlap: usize,
     retrieval_only: usize,
     grep_only: usize,
+    /// First reciprocal rank of a grep-matching (basename) file — 0.0 when none.
+    mrr: f64,
 }
 
 impl QueryResult {
@@ -163,15 +165,38 @@ fn run_bench(repo_root: &std::path::Path) -> BenchResults {
     // Build index — without this, every query returns empty results.
     match repo_intel.index_repository() {
         Ok(stats) => {
-            eprintln!("Index built: {} files indexed, {} symbols extracted, {}ms",
-                stats.files_indexed, stats.symbols_extracted, stats.duration_ms);
+            let mode = if stats.healed {
+                "HEAL (forced re-extraction)"
+            } else if stats.files_extracted > 0 {
+                "COLD/INCREMENTAL"
+            } else {
+                "WARM (mtime shortcut)"
+            };
+            eprintln!(
+                "Index built: {} files ({} shortcut, {} extracted, {} skipped), {} symbols, {}ms [{} mode] walk={}ms extract={}ms write={}ms",
+                stats.files_indexed, stats.files_shortcut, stats.files_extracted, stats.files_skipped,
+                stats.symbols_extracted, stats.duration_ms, mode,
+                stats.walk_ms, stats.extract_ms, stats.write_ms
+            );
         }
         Err(e) => {
             eprintln!("WARNING: index build failed: {} — queries may return empty results", e);
         }
     }
 
-    let policy = RetrievalPolicy { candidate_k: 200, max_files: 50, ..Default::default() };
+    // Result-set size knob for experiments (KNOCODE_BENCH_MAX_FILES, default 50).
+    // A pinned value is an EXPLICIT pin (the repo-size auto-tune must not override it);
+    // unset → default 50, and the bench run honestly reflects production defaults.
+    let bench_max_files_env = std::env::var("KNOCODE_BENCH_MAX_FILES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let bench_max_files = bench_max_files_env.unwrap_or(50);
+    let policy = RetrievalPolicy {
+        candidate_k: 200,
+        max_files: bench_max_files,
+        max_files_explicit: bench_max_files_env.is_some(),
+        ..Default::default()
+    };
     let retriever = CombinedRetriever::default();
     let total_start = Instant::now();
 
@@ -203,9 +228,17 @@ fn run_bench(repo_root: &std::path::Path) -> BenchResults {
         let retrieval_only = retrieval_basenames.iter().filter(|r| !grep_basenames.contains(*r)).count();
         let grep_only = grep_basenames.iter().filter(|g| !retrieval_basenames.contains(*g)).count();
 
+        // MRR against basename matches (first reciprocal rank of a grep-hit file)
+        let mrr = retrieval_files.iter()
+            .map(|f| std::path::Path::new(f).file_name().unwrap_or_default().to_string_lossy().to_string())
+            .enumerate()
+            .find(|(_, bn)| grep_basenames.contains(bn))
+            .map(|(rank, _)| 1.0 / (rank + 1) as f64)
+            .unwrap_or(0.0);
+
         results.push(QueryResult {
             query: q.text.to_string(), category: q.category.to_string(),
-            retrieval_ms, grep_ms, retrieval_files, grep_files, overlap, retrieval_only, grep_only,
+            retrieval_ms, grep_ms, retrieval_files, grep_files, overlap, retrieval_only, grep_only, mrr,
         });
     }
     BenchResults { results, total_duration_ms: total_start.elapsed().as_millis() as u64 }
@@ -235,15 +268,7 @@ fn bench_mattermost_50() {
     println!("├────┼─────────────────────────────────────────────────┼────────┼──────┼──────┼──────┼──────┼──────┼───────┤");
     for (i, q) in r.results.iter().enumerate() {
         let qtext = if q.query.len() > 47 { format!("{}...", &q.query[..44]) } else { format!("{:<47}", q.query) };
-        let mrr = {
-            let gb: HashSet<String> = q.grep_files.iter().map(|f| std::path::Path::new(f).file_name().unwrap_or_default().to_string_lossy().to_string()).collect();
-            let mut m = 0.0;
-            for (rank, rf) in q.retrieval_files.iter().enumerate() {
-                let bn = std::path::Path::new(rf).file_name().unwrap_or_default().to_string_lossy().to_string();
-                if gb.contains(&bn) { m = 1.0 / (rank + 1) as f64; break; }
-            }
-            m
-        };
+        let mrr = q.mrr;
         let slow = if q.retrieval_ms > 1000 { " ⚠" } else { "" };
         println!("│ {:2} │ {} │ {:6} │ {:4} │ {:4} │ {:4} │ {:4} │ {:4} │ {:.3} {}│",
             i + 1, qtext, q.category, q.retrieval_ms, q.grep_ms, q.overlap, q.retrieval_only, q.grep_only, mrr, slow);
@@ -273,6 +298,7 @@ fn bench_mattermost_50() {
     println!("│  Avg recall                 │  {:<37}│", format!("{:.1}%", r.avg(|q| q.recall()) * 100.0));
     println!("│  Avg precision              │  {:<37}│", format!("{:.1}%", r.avg(|q| q.precision()) * 100.0));
     println!("│  Avg novelty                │  {:<37}│", format!("{:.1}%", r.avg(|q| q.novelty()) * 100.0));
+    println!("│  Avg MRR (basename)         │  {:<37}│", format!("{:.4}", r.avg(|q| q.mrr)));
     println!("├─ Volume ────────────────────┼────────────────────────────────────────────┤");
     println!("│  Total overlap              │  {:<40}│", tot_ov);
     println!("│  Total retrieval-only       │  {:<40}│", tot_ret);
