@@ -1,51 +1,99 @@
 name: Release
 
-# Builds knocode + knocode-daemon for Windows x64, Linux x64, and macOS arm64
-# whenever a v* tag is pushed and publishes them to the GitHub Release for that
-# tag, together with the end-user installer scripts.
+# Releasing = merging dev into main and pushing main. There is no manual
+# tagging anymore: the workflow derives the version from Cargo.toml, verifies
+# dev is FULLY merged into main, builds knocode + knocode-daemon for Windows
+# x64, Linux x64, and macOS arm64, runs the workspace tests, THEN tags main's
+# HEAD as v<version> (the release tag) and publishes the GitHub Release with
+# the end-user installer scripts.
 #
-#   git tag v0.9.11 && git push origin v0.9.11
-#   (or: cargo install cargo-release && cargo release patch)
+#   git checkout main && git merge dev && git push origin main   # ← release
+#
+# Re-runs: trigger the workflow manually (workflow_dispatch) on 'main'; if the
+# tag already exists at the same commit it is reused instead of re-created.
 #
 # After publishing, the scoop bucket manifest (repo-root knocode.json) and the
 # winget manifests (winget/Knocode/knocode/<ver>/) are refreshed with the real
-# version/hash and committed back to dev. That step runs only on tag pushes
-# (no workflow loop) and assumes tags are cut from dev.
+# version/hash and committed back to dev (push events only — never on re-runs).
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
-  # ── Shared: verify tag matches Cargo.toml version ──────────────────────
+  # ── Shared: verify release preconditions on main ────────────────────────
+  # A push to main IS the release action. Preconditions:
+  #   1. (push) dev must be FULLY merged into main — no unmerged dev commits
+  #   2. version comes from Cargo.toml; tag v<ver> must be new, or exactly at
+  #      this commit (re-run) — otherwise a version bump is required
+  # The tag itself is created by the `tag` job AFTER builds pass.
   verify:
-    name: Verify tag
+    name: Verify dev→main merge + version
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
-      - name: Check out source
+      - name: Check out source (full history)
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      - name: Verify tag matches Cargo.toml version
+      - name: Manual runs must target main
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            echo "::error::workflow_dispatch re-runs must run on 'main' (selected: '${GITHUB_REF_NAME}')"
+            exit 1
+          fi
+
+      - name: Verify dev is fully merged into main
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          git fetch origin dev
+          if ! git merge-base --is-ancestor origin/dev HEAD; then
+            echo "::error::main is missing commits from dev — merge dev into main and push again to release"
+            git log --oneline HEAD..origin/dev | head -10
+            exit 1
+          fi
+          echo "dev is fully merged into main ✓"
+
+      - name: Read version from Cargo.toml
         id: ver
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
           ver="$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml | sed -n 's/^version = "\([^"]*\)"/\1/p' | head -n 1)"
           if [ -z "${ver}" ]; then
             echo "::error::could not read workspace.package.version from Cargo.toml"
             exit 1
           fi
-          if [ "${tag}" != "v${ver}" ]; then
-            echo "::error::tag '${tag}' does not match Cargo.toml version 'v${ver}' — bump the version and re-tag"
-            exit 1
-          fi
           echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${ver}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify version mirrors are in sync (Cargo.toml is the source of truth)
+        run: node scripts/sync-version.mjs --check
+
+      - name: Verify tag state (new, or exactly at this commit for re-runs)
+        run: |
+          set -euo pipefail
+          tag="v${{ steps.ver.outputs.version }}"
+          head_sha="$(git rev-parse HEAD)"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1; then
+            tagged="$(git rev-list -n 1 "${tag}")"
+            if [ "${tagged}" != "${head_sha}" ]; then
+              echo "::error::tag '${tag}' already exists at ${tagged} but this commit is ${head_sha} — bump Cargo.toml version before merging to main"
+              exit 1
+            fi
+            echo "tag '${tag}' already at this commit — re-run mode"
+          else
+            echo "tag '${tag}' is new — will be created on ${head_sha} after builds pass"
+          fi
 
   # ── Build: Windows x64 ─────────────────────────────────────────────────
   build-windows-x64:
@@ -63,7 +111,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-build-windows
-          save-if: ${{ github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/') }}
+          save-if: ${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' }}
 
       - name: Build release binaries
         run: cargo build --release -p knocode-cli -p knocode-daemon
@@ -142,7 +190,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-build-linux
-          save-if: ${{ github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/') }}
+          save-if: ${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' }}
 
       - name: Build release binaries
         run: cargo build --release -p knocode-cli -p knocode-daemon
@@ -219,7 +267,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: release-build-macos
-          save-if: ${{ github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/') }}
+          save-if: ${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/main' }}
 
       - name: Build release binaries
         run: cargo build --release -p knocode-cli -p knocode-daemon
@@ -280,10 +328,41 @@ jobs:
             knocode-*-aarch64-apple-darwin.zip.sha256
           retention-days: 1
 
+  # ── Tag: create the release tag on main (after builds pass) ────────────
+  tag:
+    name: Tag main (v<version>)
+    needs: [verify, build-windows-x64, build-linux-x64, build-macos-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Create and push the release tag
+        run: |
+          set -euo pipefail
+          tag="${{ needs.verify.outputs.tag }}"
+          head_sha="$(git rev-parse HEAD)"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1; then
+            tagged="$(git rev-list -n 1 "${tag}")"
+            if [ "${tagged}" = "${head_sha}" ]; then
+              echo "tag '${tag}' already on this commit — nothing to do (re-run)"
+              exit 0
+            fi
+            echo "::error::tag '${tag}' exists at ${tagged}, not at ${head_sha} — bump Cargo.toml version"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${tag}" -m "Knocode ${tag}"
+          git push origin "${tag}"
+          echo "tagged ${head_sha} as ${tag}"
+
   # ── Publish: collect all artifacts and create the GitHub Release ────────
   publish:
     name: Publish release
-    needs: [verify, build-windows-x64, build-linux-x64, build-macos-arm64]
+    needs: [verify, tag, build-windows-x64, build-linux-x64, build-macos-arm64]
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -314,8 +393,8 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Knocode ${{ github.ref_name }}
+          tag_name: ${{ needs.verify.outputs.tag }}
+          name: Knocode ${{ needs.verify.outputs.tag }}
           files: |
             artifacts/**/*
             installers/knocode-install.ps1
@@ -330,6 +409,7 @@ jobs:
   refresh-manifests:
     name: Refresh package manifests
     needs: publish
+    if: github.event_name == 'push'
     runs-on: windows-latest
     steps:
       - name: Check out source
@@ -341,14 +421,13 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # Derive version from the tag (this job only runs on tag pushes);
-          # needs.verify.outputs.version can be empty on job re-runs.
-          $tag = "${{ github.ref_name }}"
-          if ($tag -notmatch '^v[0-9]') {
-            Write-Error "FATAL: refresh-manifests must run on a v* tag push (got ref '$tag')"
+          # Derive version from the verified Cargo.toml version (push-to-main only).
+          $ver = "${{ needs.verify.outputs.version }}"
+          if ($ver -notmatch '^[0-9]+\.[0-9]+') {
+            Write-Error "FATAL: could not resolve release version (got '$ver')"
             exit 1
           }
-          $ver = $tag -replace '^v', ''
+          $tag = "v$ver"
           $asset = "knocode-$ver-x86_64-pc-windows-msvc.zip"
 
           # Download the sha256 from the release to get the hash (retry up to 3 times)
