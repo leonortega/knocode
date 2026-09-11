@@ -36,6 +36,10 @@ default = []
 
 # Windows version resource (ProductName/CompanyName/FileVersion/...) so the exe
 # is not a metadata-less PE — a strong heuristic/AV-false-positive trigger.
-# Applied only when building FOR Windows (guarded in build.rs), regardless of host.
-[target.'cfg(windows)'.build-dependencies]
+# Deliberately an UNCONDITIONAL build-dependency: cargo evaluates cfg() filters
+# in build-dependencies against the HOST, so `[target.'cfg(windows)'.build-dependencies]`
+# leaves the crate unbuilt on Linux/macOS runners and build.rs then fails to
+# compile (E0433). Whether the resource is actually EMBEDDED is decided at
+# runtime in build.rs via CARGO_CFG_TARGET_OS (the target, not the host).
+[build-dependencies]
 winresource = "0.1"
