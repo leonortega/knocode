@@ -1,6 +1,6 @@
 # Created by the Knocode release pipeline. Submit to microsoft/winget-pkgs - see winget/README.md.
 PackageIdentifier: Knocode.knocode
-PackageVersion: 0.9.11
+PackageVersion: 0.9.12
 InstallerType: portable
 InstallModes:
   - silent
@@ -11,7 +11,7 @@ Commands:
 Installers:
   - Architecture: x64
     InstallerLocale: en-US
-    InstallerUrl: https://github.com/leonortega/knocode/releases/download/v0.9.11/knocode-0.9.11-x86_64-pc-windows-msvc.zip
-    InstallerSha256: EE3878C05D8F30ADC6661B17DF66A5A41C9A9DC6ECEE1F5C04F29BFDD68C0816
+    InstallerUrl: https://github.com/leonortega/knocode/releases/download/v0.9.12/knocode-0.9.12-x86_64-pc-windows-msvc.zip
+    InstallerSha256: 24626CD375D399ED9F59AE0EBB89330A36490F78E158973EA483CED32C65A48B
 ManifestType: installer
 ManifestVersion: 1.6.0
