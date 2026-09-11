@@ -97,7 +97,6 @@
   category: "bug fixing"
   expected_files:
     - crates/knocode-context/src/lib.rs
-    - crates/knocode-optimizer/src/lib.rs
 
 - task: "Add repository_id to request correlation"
   category: "feature addition"
@@ -111,12 +110,11 @@
   expected_files:
     - crates/knocode-daemon/src/metrics.rs
 
-- task: "Benchmark RTK vs built-in compressor"
+- task: "Benchmark context BuildContext latency"
   category: "testing"
   expected_files:
-    - crates/knocode-optimizer/src/rtk.rs
-    - crates/knocode-optimizer/src/lib.rs
-    - crates/knocode-bench/benches/rtk_bench.rs
+    - crates/knocode-context/src/lib.rs
+    - crates/knocode-bench/benches/context_bench.rs
 
 - task: "Document the HTTP hook API contract"
   category: "documentation"
@@ -169,10 +167,10 @@
     - crates/knocode-daemon/src/ratelimit.rs
     - crates/knocode-daemon/src/http_server.rs
 
-- task: "Explain fail-open design for optimizer"
+- task: "Explain fail-open design for knowledge retrieval"
   category: "architecture questions"
   expected_files:
-    - crates/knocode-optimizer/src/lib.rs
+    - crates/knocode-knowledge/src/lib.rs
     - crates/knocode-core/src/error.rs
 
 - task: "Fix config merge overriding defaults"
@@ -291,10 +289,10 @@
     - crates/knocode-storage/src/tantivy_index.rs
     - crates/knocode-repo-intel/src/lib.rs
 
-- task: "How does optimizer compress shell output?"
+- task: "How does the CLI doctor check system health?"
   category: "architecture questions"
   expected_files:
-    - crates/knocode-optimizer/src/lib.rs
+    - crates/knocode-cli/src/main.rs
 
 - task: "Fix deadlock in KnowledgeHub retrieve"
   category: "bug fixing"

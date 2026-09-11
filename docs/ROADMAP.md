@@ -174,7 +174,6 @@ Tool-output compression: delegated to RTK (external binary, wired by installers)
 | `knocode-context` | BuildContext pipeline, token budgeting |
 | `knocode-repo-intel` | tree-sitter, ripgrep, tantivy, graph, watcher |
 | `knocode-knowledge` | Knowledge Hub, retrieval |
-| `knocode-optimizer` | RTK adapter helpers (doctor probe, compressor fallback, tee-on-failure) — compression itself is RTK's |
 | `knocode-events` | Event bus (in-memory ring buffer) |
 | `knocode-storage` | SQLite + tantivy persistence |
 | `knocode-bench` | Criterion benchmarks |

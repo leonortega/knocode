@@ -10,11 +10,6 @@ path = "benches/context_bench.rs"
 harness = false
 
 [[bench]]
-name = "rtk_bench"
-path = "benches/rtk_bench.rs"
-harness = false
-
-[[bench]]
 name = "tree_sitter"
 path = "benches/tree_sitter.rs"
 harness = false
@@ -26,7 +21,6 @@ knocode-storage.workspace = true
 knocode-repo-intel.workspace = true
 knocode-knowledge.workspace = true
 knocode-context.workspace = true
-knocode-optimizer.workspace = true
 criterion = { version = "0.8", features = ["async_tokio"] }
 tokio.workspace = true
 tiktoken-rs.workspace = true

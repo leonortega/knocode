@@ -1703,7 +1703,6 @@ dependencies = [
  "knocode-core",
  "knocode-events",
  "knocode-knowledge",
- "knocode-optimizer",
  "knocode-repo-intel",
  "knocode-storage",
  "serde_json",
@@ -1724,7 +1723,6 @@ dependencies = [
  "knocode-core",
  "knocode-events",
  "knocode-knowledge",
- "knocode-optimizer",
  "knocode-repo-intel",
  "knocode-storage",
  "reqwest",
@@ -1830,22 +1828,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "knocode-optimizer"
-version = "0.9.11"
-dependencies = [
- "anyhow",
- "chrono",
- "knocode-core",
- "knocode-events",
- "regex",
- "serde",
- "tiktoken-rs",
- "tokio",
- "tracing",
- "uuid",
 ]
 
 [[package]]

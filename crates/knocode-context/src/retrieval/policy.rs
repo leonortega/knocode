@@ -46,17 +46,19 @@ pub struct FileClassWeights {
 }
 
 impl Default for FileClassWeights {
+    /// Parity: values must equal `knocode_core::ranking::file_class_boost`
+    /// defaults (see `file_class_weights_parity_with_core` test below).
     fn default() -> Self {
         Self {
-            documentation: 1.4,
-            config: 1.2,
-            source: 1.0,
-            test: 0.7,
-            generated: 0.5,
-            stylesheet: 0.0,
-            binary: 0.0,
-            vendor: 0.0,
-            dependency: 0.0,
+            documentation: knocode_core::ranking::file_class_boost("Documentation"),
+            config: knocode_core::ranking::file_class_boost("Config"),
+            source: knocode_core::ranking::file_class_boost("Source"),
+            test: knocode_core::ranking::file_class_boost("Test"),
+            generated: knocode_core::ranking::file_class_boost("Generated"),
+            stylesheet: knocode_core::ranking::file_class_boost("Stylesheet"),
+            binary: knocode_core::ranking::file_class_boost("Binary"),
+            vendor: knocode_core::ranking::file_class_boost("Vendor"),
+            dependency: knocode_core::ranking::file_class_boost("Dependency"),
         }
     }
 }
@@ -124,44 +126,31 @@ pub struct DirectoryWeights {
 }
 
 impl Default for DirectoryWeights {
+    /// Parity: values must equal the canonical defaults in
+    /// `knocode_core::ranking` (see `directory_weights_parity_with_core`).
     fn default() -> Self {
         Self {
-            readme: 1.3,
-            docs: 1.2,
-            types: 1.15,
-            workspace: 1.1,
-            default: 1.0,
+            readme: knocode_core::ranking::DIRECTORY_README,
+            docs: knocode_core::ranking::DIRECTORY_DOCS,
+            types: knocode_core::ranking::DIRECTORY_TYPES,
+            workspace: knocode_core::ranking::DIRECTORY_WORKSPACE,
+            default: knocode_core::ranking::DIRECTORY_DEFAULT,
         }
     }
 }
 
 impl DirectoryWeights {
+    /// Delegate to the canonical logic in `knocode_core::ranking` with this
+    /// struct's values — one logic copy, configurable numbers.
     pub fn boost_for(&self, path: &str) -> f32 {
-        let lower = path.to_lowercase();
-        if lower.ends_with("readme.md")
-            || lower.ends_with("contributing.md")
-            || lower.ends_with("contributing")
-            || lower.ends_with("claude.md")
-            || lower.ends_with("agents.md")
-        {
-            return self.readme;
-        }
-        if lower.contains("/docs/")
-            || lower.contains("/.github/")
-            || lower.contains("/.knocode/")
-        {
-            return self.docs;
-        }
-        if lower.starts_with("types/") || lower.contains("/types/") {
-            return self.types;
-        }
-        if lower.contains("pnpm-workspace.yaml")
-            || lower.contains("lerna.json")
-            || lower.contains("nx.json")
-        {
-            return self.workspace;
-        }
-        self.default
+        knocode_core::ranking::directory_boost_with(
+            path,
+            self.readme,
+            self.docs,
+            self.types,
+            self.workspace,
+            self.default,
+        )
     }
 }
 
@@ -411,18 +400,10 @@ impl Default for RetrievalPolicy {
 }
 
 impl RetrievalPolicy {
-    /// Query-aware test multiplier — mirrors `CodeIndexSchema::query_aware_test_multiplier`.
+    /// Query-aware Test multiplier — delegates to the canonical logic in
+    /// `knocode_core::ranking` with this policy's values.
     pub fn test_multiplier(&self, query: &str, file_class: &str) -> f32 {
-        if file_class != "Test" {
-            return 1.0;
-        }
-        let q = query.to_lowercase();
-        let is_test_query = q.contains("test") || q.contains("spec") || q.contains("dtslint");
-        if is_test_query {
-            self.test_boost
-        } else {
-            self.test_penalty
-        }
+        knocode_core::ranking::query_aware_test_multiplier_with(query, file_class, self.test_penalty, self.test_boost)
     }
 
     /// Intent-aware file-class boost: relevance × intent authority.
@@ -512,6 +493,35 @@ mod tests {
         assert!((p.boost_for("Binary") - 0.0).abs() < 1e-6);
     }
 
+    /// Parity test: context weights must stay equal to the canonical
+    /// `knocode_core::ranking` table (the same table storage uses for BM25
+    /// hit scoring). Drift in either direction fails the build.
+    #[test]
+    fn file_class_weights_parity_with_core() {
+        let p = FileClassWeights::default();
+        for class in ["Documentation", "Config", "Source", "Test", "Generated", "Stylesheet", "Binary", "Vendor", "Dependency", "SomethingElse"] {
+            assert_eq!(
+                p.boost_for(class),
+                knocode_core::ranking::file_class_boost(class),
+                "FileClassWeights drifted from canonical table for class {class}"
+            );
+        }
+    }
+
+    /// Parity test: directory weights must stay equal to the canonical
+    /// `knocode_core::ranking` defaults used by storage-side BM25 scoring.
+    #[test]
+    fn directory_weights_parity_with_core() {
+        let d = DirectoryWeights::default();
+        for path in ["README.md", "CONTRIBUTING.md", "docs/guide.md", "types/foo/index.d.ts", "pnpm-workspace.yaml", "src/main.rs"] {
+            assert_eq!(
+                d.boost_for(path),
+                knocode_core::ranking::directory_boost(path),
+                "DirectoryWeights drifted from canonical table for path {path}"
+            );
+        }
+    }
+
     #[test]
     fn directory_boost_matches_legacy() {
         let d = DirectoryWeights::default();
@@ -527,6 +537,31 @@ mod tests {
         assert!((p.test_multiplier("fix the test suite", "Test") - 1.4).abs() < 1e-6);
         assert!((p.test_multiplier("authentication middleware", "Test") - 0.6).abs() < 1e-6);
         assert!((p.test_multiplier("anything", "Source") - 1.0).abs() < 1e-6);
+    }
+
+    /// Parity: canonical STOP_WORDS must cover every word the old context-side
+    /// lists filtered (a sample of former entries; the canonical list is their
+    /// documented union).
+    #[test]
+    fn stop_words_parity_with_former_context_list() {
+        let former = [
+            "a","an","the","is","are","was","were","be","been","being",
+            "have","has","had","do","does","did","will","would","could",
+            "should","may","might","shall","can","to","of","in","for",
+            "on","with","at","by","from","as","into","through","during",
+            "before","after","above","below","between","and","but","or",
+            "nor","not","so","yet","both","either","neither","each",
+            "every","all","any","few","more","most","other","some",
+            "such","no","only","own","same","than","too","very",
+            "just","because","if","when","where","how","what","which",
+            "who","whom","this","that","these","those",
+        ];
+        for w in former {
+            assert!(
+                knocode_core::ranking::STOP_WORDS.contains(&w),
+                "canonical STOP_WORDS lost former entry '{w}' — query-token behavior would change"
+            );
+        }
     }
 
     #[test]

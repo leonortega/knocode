@@ -914,19 +914,11 @@ fn classify_misses(
     let retrieved_set: std::collections::HashSet<&str> =
         retrieved_normalized.iter().map(|s| s.as_str()).collect();
 
-    // Extract query tokens for lexical analysis
-    let stop_words: std::collections::HashSet<&str> = [
-        "a","an","the","is","are","was","were","be","been","being",
-        "have","has","had","do","does","did","will","would","could",
-        "should","may","might","shall","can","to","of","in","for",
-        "on","with","at","by","from","as","into","through","during",
-        "before","after","above","below","between","and","but","or",
-        "nor","not","so","yet","both","either","neither","each",
-        "every","all","any","few","more","most","other","some",
-        "such","no","only","own","same","than","too","very",
-        "just","because","if","when","where","how","what","which",
-        "who","whom","this","that","these","those",
-    ].iter().copied().collect();
+    // Extract query tokens for lexical analysis — canonical stop-word list
+    // (single source of truth in knocode_core::ranking, formerly a third
+    // duplicated copy here).
+    let stop_words: std::collections::HashSet<&str> =
+        knocode_core::ranking::STOP_WORDS.iter().copied().collect();
     let query_tokens: Vec<String> = query
         .split_whitespace()
         .map(|t| t.to_lowercase().chars().filter(|c| c.is_alphanumeric() || *c == '_').collect::<String>())

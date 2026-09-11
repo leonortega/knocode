@@ -28,7 +28,7 @@ is not an autonomous SDLC orchestrator.
 |--------|---------|------------|----------------|
 | **Observability** | See what the agent + runtime are doing (traces, metrics, costs) | 🟢🟢 | `knocode-daemon` (metrics), `knocode-events`, `knocode-storage` |
 | **Intelligence** | Understand the repository and build token-efficient context | 🟢🟢 | `knocode-repo-intel`, `knocode-context`, `knocode-knowledge` |
-| **Execution Optimization** | Reduce useless tool output (token waste) | 🟢 | Delegated to RTK (external, opt-in via installers); local token accounting via `knocode-optimizer` + `tiktoken-rs` |
+| **Execution Optimization** | Reduce useless tool output (token waste) | 🟢 | Delegated to RTK (external, opt-in via installers); local token accounting via `tiktoken-rs` (`knocode-context`) |
 | **Local Runtime** | Fast, fail-open infrastructure (IPC, lifecycle, readiness) | 🟢🟢 | `knocode-daemon`, `knocode-core`, `knocode-cli` |
 
 ## 2. Ownership Boundaries

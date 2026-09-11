@@ -280,8 +280,8 @@ This enables the daemon to report structured diagnostics instead of generic "no 
 | Reranking | Removed from v1 runtime per benchmark evaluation (passthrough only) — see REMOVED_TOOLS.md | — |
 | Memory | SQLite+tantivy local (engram removed — see REMOVED_TOOLS.md) | `knocode-storage` local | |
 | Model Gateway | [REMOVED v0.8.6] LiteLLM + heuristic routing deleted — runtime is model-agnostic | see REMOVED_TOOLS.md |
-| Compression | RTK `RtkAdapter::detect()` (binary if present, `~10ms`) → built-ins + tee `~/.knocode/logs/tool-failures/` | `optimizer/src/rtk.rs` |
-| Token Counting | `tiktoken-rs` `cl100k_base` + `heuristic` fallback | `context/src/lib.rs:389`/`optimizer/src/lib.rs:303` |
+| Compression | External RTK binary only (opt-in via installers, not embedded — see REMOVED_TOOLS.md) | — |
+| Token Counting | `tiktoken-rs` `cl100k_base` + `heuristic` fallback | `context/src/lib.rs:389` |
 | Orchestration | Removed — single tokio daemon (see `REMOVED_TOOLS.md`) | — |
 | Metrics | Prometheus exposition (`GET /metrics`, histogram `knocode_build_context_duration_seconds`) | `daemon/src/metrics.rs` |
 | Rate Limit | Token-bucket 10/s burst 20 per session (`daemon/src/ratelimit.rs`) | `daemon/src/ratelimit.rs` + `core/src/secrets.rs` |

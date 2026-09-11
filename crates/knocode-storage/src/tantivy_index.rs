@@ -82,70 +82,32 @@ impl CodeIndexSchema {
 
     /// Get the file-class boost factor for scoring — generic V1 hierarchy:
     /// Documentation > Configuration > Source > Test (query-aware).
-    /// See V1 plan: `docs/code split + generic file-type weighting`.
+    /// Canonical table lives in `knocode_core::ranking` — this is a thin alias
+    /// so every BM25 hit site uses the single source of truth.
     pub fn file_class_boost(file_class: &str) -> f32 {
-        match file_class {
-            "Documentation" => 1.4,
-            "Config" => 1.2,
-            "Source" => 1.0,
-            "Test" => 0.7,
-            "Generated" => 0.5,
-            "Stylesheet" => 0.0,
-            "Binary" => 0.0,
-            "Vendor" => 0.0,
-            "Dependency" => 0.0,
-            _ => 1.0,
-        }
+        knocode_core::ranking::file_class_boost(file_class)
     }
 
     /// Query-aware adjustment for Test files: penalize unless query is about tests.
     /// `*test*` penalty: 0.6× unless query contains test-related terms, then 1.4× boost.
+    /// Delegates to the canonical implementation in `knocode_core::ranking`.
     pub fn query_aware_test_multiplier(query: &str, file_class: &str) -> f32 {
-        if file_class != "Test" {
-            return 1.0;
-        }
-        let q = query.to_lowercase();
-        let is_test_query = q.contains("test") || q.contains("spec") || q.contains("dtslint");
-        if is_test_query { 1.4 } else { 0.6 }
+        knocode_core::ranking::query_aware_test_multiplier_with(query, file_class, knocode_core::ranking::TEST_PENALTY, knocode_core::ranking::TEST_BOOST)
     }
 
     /// Get directory-based boost — generic only (V1: docs/workspace, no domain-specific eShop layers).
+    /// Delegates to the canonical implementation in `knocode_core::ranking`.
     pub fn directory_boost(path: &str) -> f32 {
-        let lower = path.to_lowercase();
-        // Documentation & contribution files — boost for how-to queries
-        if lower.ends_with("readme.md") || lower.ends_with("contributing.md") || lower.ends_with("contributing") || lower.ends_with("claude.md") || lower.ends_with("agents.md") {
-            return 1.3;
-        }
-        if lower.contains("/docs/") || lower.contains("/.github/") || lower.contains("/.knocode/") {
-            return 1.2;
-        }
-        // Workspace packages — types/foo/ pattern (DefinitelyTyped, monorepos)
-        if lower.starts_with("types/") || lower.contains("/types/") {
-            return 1.15;
-        }
-        if lower.contains("pnpm-workspace.yaml") || lower.contains("lerna.json") || lower.contains("nx.json") {
-            return 1.1;
-        }
-        1.0
+        knocode_core::ranking::directory_boost(path)
     }
 }
 
 // ── Query Sanitization ───────────────────────────────────────────────────
 
-/// Stop words to ignore when building code search queries
-const STOP_WORDS: &[&str] = &[
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "need", "dare", "ought",
-    "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
-    "as", "into", "through", "during", "before", "after", "above", "below",
-    "between", "out", "off", "over", "under", "again", "further", "then",
-    "once", "here", "there", "when", "where", "why", "how", "all", "both",
-    "each", "few", "more", "most", "other", "some", "such", "no", "nor",
-    "not", "only", "own", "same", "so", "than", "too", "very", "just",
-    "and", "but", "or", "if", "while", "that", "this", "it", "its",
-    "what", "which", "who", "whom", "implemented",
-];
+/// Stop words to ignore when building code search queries.
+/// Canonical list lives in `knocode_core::ranking::STOP_WORDS` — kept as an
+/// alias so the sanitizer (and its callers/tests) keep working unchanged.
+const STOP_WORDS: &[&str] = knocode_core::ranking::STOP_WORDS;
 
 /// Split PascalCase/camelCase identifiers into constituent words.
 /// "UserProfile" -> ["user", "profile", "userprofile"]

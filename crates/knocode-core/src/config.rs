@@ -15,7 +15,6 @@ pub struct Config {
     pub index: IndexConfig,
     pub knowledge: KnowledgeConfig,
     pub context: ContextConfig,
-    pub rtk: RtkConfig,
     pub logging: LoggingConfig,
 }
 
@@ -96,14 +95,6 @@ pub struct ContextConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct RtkConfig {
-    pub enabled: bool,
-    pub max_output_tokens: usize,
-    pub compression_level: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
 pub struct LoggingConfig {
     pub level: String,
     pub file_path: String,
@@ -160,16 +151,6 @@ impl Default for ContextConfig {
                 "code_context".to_string(),
             ],
             candidate_k: 100,
-        }
-    }
-}
-
-impl Default for RtkConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            max_output_tokens: 8000,
-            compression_level: "balanced".to_string(),
         }
     }
 }
@@ -248,7 +229,6 @@ impl Config {
         self.index = other.index;
         self.knowledge = other.knowledge;
         self.context = other.context;
-        self.rtk = other.rtk;
         self.logging = other.logging;
     }
 
@@ -327,19 +307,6 @@ impl Config {
             .into());
         }
 
-        // RTK
-        let valid_compression = ["light", "balanced", "aggressive"];
-        if !valid_compression.contains(&self.rtk.compression_level.as_str()) {
-            return Err(ConfigError::InvalidValue {
-                field: "rtk.compression_level".to_string(),
-                message: format!(
-                    "must be one of: {}",
-                    valid_compression.join(", ")
-                ),
-            }
-            .into());
-        }
-
         // Logging
         let valid_levels = ["error", "warn", "info", "debug", "trace"];
         if !valid_levels.contains(&self.logging.level.as_str()) {
@@ -408,11 +375,6 @@ max_files = 10
 max_lines_per_file = 200
 cache_order = ["code_context"]
 
-[rtk]
-enabled = false
-max_output_tokens = 4000
-compression_level = "light"
-
 [logging]
 level = "debug"
 file_path = "/tmp/test.log"
@@ -433,14 +395,6 @@ retention_days = 3
 
         base.merge(override_config);
         assert_eq!(base.context.max_tokens, 5000);
-    }
-
-    #[test]
-    fn test_validation_fails_invalid_compression() {
-        let mut config = Config::default();
-        config.rtk.compression_level = "extreme".to_string();
-        let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("rtk.compression_level"));
     }
 
     #[test]

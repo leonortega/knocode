@@ -22,6 +22,29 @@ import os
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
+# Preferred: structured `knocode preview --json` output (stable contract).
+# Fallback: legacy regex scraping of human-readable stdout (kept for older binaries).
+try:
+    import json as _json  # already imported above; alias kept for clarity
+except Exception:
+    pass
+
+
+def parse_json_output(out: str):
+    """Parse `knocode preview --json` stdout; return ordered unique file paths or None."""
+    try:
+        data = json.loads(out)
+    except Exception:
+        return None
+    if not isinstance(data, dict) or "files" not in data:
+        return None
+    paths = []
+    for f in data["files"]:
+        p = (f.get("path") or "").replace("\\", "/")
+        if p and p not in paths:
+            paths.append(p)
+    return paths
+
 
 def recall_at_k(expected, retrieved, k):
     if not expected:
@@ -153,10 +176,22 @@ def main():
             if args.binary:
                 binary = args.binary
             else:
-                binary = os.path.join("target", "release", "knocode.exe")
-                if not os.path.exists(binary):
-                    binary = os.path.join("target", "release", "knocode")
-            cmd = [binary, "preview", task_str]
+                # Probe repo-local + shared cargo target dirs, pick the NEWEST
+                # (target-dir in ~/.cargo/config.toml can redirect builds, and a
+                # stale repo-local binary must not shadow a fresh shared one).
+                home = os.path.expanduser("~")
+                candidates = [
+                    os.path.join("target", "release", "knocode.exe"),
+                    os.path.join("target", "release", "knocode"),
+                    os.path.join(home, ".cargo", "target", "release", "knocode.exe"),
+                    os.path.join(home, ".cargo", "target", "release", "knocode"),
+                ]
+                existing = [c for c in candidates if os.path.exists(c)]
+                if existing:
+                    binary = max(existing, key=os.path.getmtime)
+                else:
+                    binary = os.path.join("target", "release", "knocode.exe")
+            cmd = [binary, "preview", task_str, "--json"]
             if args.diag and expected:
                 cmd.extend(["--diag", "--expected-files", ",".join(expected)])
             proc = subprocess.run(
@@ -174,19 +209,23 @@ def main():
                     f"knocode preview failed (rc={proc.returncode}) stderr={(proc.stderr or '')[:500]}"
                 )
             out = (proc.stdout or "") + (proc.stderr or "")
-            # Only accept real file-path anchors:  // <path with separator>.<ext>[:line]
-            import re
-            path_anchor = re.compile(
-                r"^//[ ./]*([^\s:`\"]+\.(?:cs|cshtml|html|razor|json|ts|tsx|js|jsx|md|yml|yaml|cpp|h|go|rs|py))\b",
-                re.IGNORECASE,
-            )
-            for line in out.splitlines():
-                m = path_anchor.match(line.strip().lstrip("* "))
-                if not m:
-                    continue
-                p = m.group(1).strip().replace("\\", "/")
-                if p and p not in retrieved:
-                    retrieved.append(p)
+            # Preferred: structured --json contract (stable across platforms/formats)
+            retrieved = parse_json_output(proc.stdout or "") or []
+            if not retrieved:
+                # Legacy fallback: only accept real file-path anchors:
+                # // <path with separator>.<ext>[:line]
+                import re
+                path_anchor = re.compile(
+                    r"^//[ ./]*([^\s:`\"]+\.(?:cs|cshtml|html|razor|json|ts|tsx|js|jsx|md|yml|yaml|cpp|h|go|rs|py))\b",
+                    re.IGNORECASE,
+                )
+                for line in out.splitlines():
+                    m = path_anchor.match(line.strip().lstrip("* "))
+                    if not m:
+                        continue
+                    p = m.group(1).strip().replace("\\", "/")
+                    if p and p not in retrieved:
+                        retrieved.append(p)
         except subprocess.TimeoutExpired:
             print(
                 f"ERROR: knocode preview timeout ({args.timeout}s) for task '{task_str[:60]}'",

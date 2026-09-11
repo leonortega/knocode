@@ -74,6 +74,8 @@ At 7-42ms P50, Knocode is fast enough to run on every keystroke in an AI coding 
 | Candidate K (50→500) | ~0ms | +81.3% | ✅ Strongly recommended |
 | Query Expansion | ~0ms | +25.7% | ✅ Recommended |
 
+> **Re-run note (2026-09-10, v0.9.11):** re-running Benchmark 3 after the doc-prior damping + docs-slot changes, the 50→500 top-50 set delta collapsed to ~+0% (both pool sizes now resolve to the same stabilized top-50 on small repos — "same good 50", not "no value"), while Query Expansion still shows +15.6% / USE and Graph Boost stays neutral. The table above is the historical v0.9.9 run; see [BENCHMARKS_V1.md · Benchmark 3](docs/BENCHMARKS_V1.md#-benchmark-3-component-evaluation-knocode-repo).
+
 ---
 
 ## Install (end users)
@@ -212,7 +214,6 @@ knocode/
 │   ├── knocode-repo-intel/       # Repository Intelligence — tree-sitter + tantivy + graph + watcher
 │   ├── knocode-context/          # Context Engine — retrieval engine + BuildContext
 │   ├── knocode-knowledge/        # Knowledge Hub — SQLite+tantivy local BM25
-│   ├── knocode-optimizer/        # RTK adapter helpers (doctor probe; compression itself is RTK's)
 │   ├── knocode-events/           # Event Bus — in-memory broadcast + tracing
 │   ├── knocode-storage/          # Local Storage — SQLite WAL + tantivy
 │   └── knocode-bench/            # Criterion benchmarks
@@ -375,7 +376,6 @@ Tree-sitter:     ✓ OK (global 33/33 parsers ready)
 
 Tantivy:         ✓ OK (142 docs, ~/.knocode/index/<repo-id>)
 Retrieval:       ✓ OK (3/3 probe queries returned results)
-RTK:             ⚠ Not found on PATH — using built-in compressors + tee-on-failure (install rtk for 10ms binary)
 Tiktoken:        ✓ OK (cl100k_base local, no model API round-trip)
 Secrets redact:  ✓ OK (redaction before outbound calls)
 Metrics:         ○ GET /metrics on daemon (prometheus exposition) — curl localhost:9527/metrics
@@ -400,7 +400,6 @@ Configuration is loaded in order of priority (highest wins):
 | `[index]` | BM25 index path, languages, `watch_mode` (`"commit"` or `"filesystem"`) |
 | `[knowledge]` | Knowledge settings (`max_knowledge_entries`) |
 | `[context]` | Token budget, file limits, `cache_order`, `candidate_k` |
-| `[rtk]` | Enabled, max tokens, compression level |
 | `[logging]` | Level, file path, retention |
 
 ### Environment Variables
@@ -458,9 +457,9 @@ Configuration is loaded in order of priority (highest wins):
            ┌───────────────┼───────────────┐
            ▼               ▼               ▼
 ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│   Context   │  │  Execution  │  │    Event    │
-│   Engine    │  │  Optimizer  │  │     Bus     │
-│ (RwLock)    │  │ (RTK)       │  │ (in-memory) │
+│   Context   │  │ Tool-output │  │    Event    │
+│   Engine    │  │ compression │  │     Bus     │
+│ (RwLock)    │  │ (ext. RTK)  │  │ (in-memory) │
 └──────┬──────┘  └─────────────┘  └─────────────┘
         │
         ├──► Retrieval Engine (intent → expansion → BM25 + structural → graph → ranking)
@@ -530,7 +529,6 @@ On any error or timeout, the daemon returns `OriginalPassthrough` with the origi
 | Repository Intelligence | ✅ Complete | tree-sitter (42-lang registry) + tantivy + graph + watcher |
 | Context Engine | ✅ Complete | BuildContext + RwLock concurrency, fail-open |
 | Knowledge Hub | ✅ Complete | BM25 local (SQLite+tantivy) |
-| Execution Optimizer | ✅ Complete | RTK (external, opt-in) + built-in compressor fallback + tiktoken-rs |
 | Adapter Layer | ✅ Complete | HTTP `/hook` + `/mcp`, rate limiting, 30s fail-open |
 | CLI Commands | ✅ Complete | init, index, serve, preview, doctor, config |
 | Agent Adapters | ✅ Complete | OpenCode, Copilot (VS Code), Claude Code hooks |

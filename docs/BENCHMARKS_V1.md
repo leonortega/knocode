@@ -241,6 +241,8 @@ Grep       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 - **Query Expansion** (+25.7% recall): Adding synonyms ("how to" → "guide tutorial example") improves recall with negligible overhead.
 - **Graph Boost** (+0.0%): Neutral on the knocode repo — the codebase is too small for graph relationships to matter.
 
+> **Re-run note (2026-09-10, v0.9.11, 168 files indexed):** re-running this benchmark after the doc-prior damping (`score *= 0.10` for generic docs) + `docs_reserve_slots: 2` changes: Candidate K 50→500 now shows **+0.0% / NEUTRAL** (both pool sizes resolve to the same stabilized top-50 — "same good 50", not "no value"; a large pool still matters for structural-exhaustive queries), Query Expansion **+15.6% / USE**, Graph Boost **+0.0% / NEUTRAL** once the graph cache is warmed (an unwarmed run smears the one-time ~485ms cold graph build into a +24ms mean — the bench now warms the cache before timing). The table above is preserved as the historical v0.9.9 run.
+
 ---
 
 ## 🧪 Benchmark 4: Retrieval vs Grep (Knocode Repo)

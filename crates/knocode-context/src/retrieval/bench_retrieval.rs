@@ -85,7 +85,7 @@ fn bench_queries() -> Vec<BenchQuery> {
         // ── Mixed/Ambiguous (10) ──
         BenchQuery { text: "where does the session fingerprint dedup happen", grep_pattern: "session.*fingerprint|dedup|fingerprint.*hash", category: "mixed" },
         BenchQuery { text: "what is the difference between v0.4 and v1", grep_pattern: "v0\\.4|v1.*minimal|V1_MINIMAL", category: "mixed" },
-        BenchQuery { text: "how does the optimizer compress tool output", grep_pattern: "compress|optimizer|ExecutionOptimizer", category: "mixed" },
+        BenchQuery { text: "how does the daemon expose context over MCP", grep_pattern: "POST /mcp|tools/call|knocode_context", category: "mixed" },
         BenchQuery { text: "which files are excluded from indexing", grep_pattern: "Binary|Vendor|Dependency|Generated|Stylesheet|skip.*file", category: "mixed" },
         BenchQuery { text: "what is the correlation ID used for", grep_pattern: "correlation_id|CorrelationId|req_id", category: "mixed" },
         BenchQuery { text: "how does the graph boost affect retrieval ranking", grep_pattern: "graph.*boost|apply_graph_boost|DependencyGraph", category: "mixed" },

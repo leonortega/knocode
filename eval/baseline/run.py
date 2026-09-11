@@ -18,6 +18,8 @@ import pathlib
 import subprocess
 import sys
 import re
+import os
+import shutil
 import urllib.request
 import urllib.error
 
@@ -43,11 +45,53 @@ def get_metrics():
         return None
 
 
+def find_knocode_binary():
+    """Prefer the release binary — `cargo run` was measuring rustc, not retrieval
+    (avg latency read ~1000ms vs ~170ms via the release binary). Probes the
+    repo-local + shared cargo target dirs and picks the NEWEST by mtime (a stale
+    repo-local binary must not shadow a fresh shared-target-dir build), then PATH."""
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.join("target", "release", "knocode.exe"),
+        os.path.join("target", "release", "knocode"),
+        os.path.join(home, ".cargo", "target", "release", "knocode.exe"),
+        os.path.join(home, ".cargo", "target", "release", "knocode"),
+        os.path.join("target", "debug", "knocode.exe"),
+        os.path.join("target", "debug", "knocode"),
+        shutil.which("knocode"),
+    ]
+    existing = [c for c in candidates if c and os.path.exists(c)]
+    if not existing:
+        return None
+    return max(existing, key=os.path.getmtime)
+
+
+def parse_json_output(out: str):
+    """Parse `knocode preview --json` stdout; return ordered unique file paths or None."""
+    try:
+        data = json.loads(out)
+    except Exception:
+        return None
+    if not isinstance(data, dict) or "files" not in data:
+        return None
+    paths = []
+    for f in data["files"]:
+        p = (f.get("path") or "").replace("\\", "/")
+        if p and p not in paths:
+            paths.append(p)
+    return paths
+
+
 def parse_preview(task_str: str, timeout: int = 10):
     """Call `knocode preview <task>` and parse code_context paths + token usage if present."""
+    binary = find_knocode_binary()
+    if binary is None:
+        raise RuntimeError(
+            "knocode binary not found — build it first: cargo build --release -p knocode-cli"
+        )
     t0 = time.time()
     proc = subprocess.run(
-        ["cargo", "run", "-p", "knocode-cli", "--quiet", "--", "preview", task_str],
+        [binary, "preview", task_str, "--json"],
         capture_output=True,
         text=True,
         encoding="utf-8",   # Windows default (cp1252) chokes on non-ASCII preview output (e.g. "×")
@@ -56,13 +100,15 @@ def parse_preview(task_str: str, timeout: int = 10):
     )
     latency_ms = int((time.time() - t0) * 1000)
     out = proc.stdout + proc.stderr
-    retrieved = []
-    for line in out.splitlines():
-        s = line.strip()
-        if s.startswith("// ") and ":" in s:
-            p = s[3:].split(":")[0].strip().replace("\\", "/")  # normalize Windows separators to match expected_files
-            if p and p not in retrieved:
-                retrieved.append(p)
+    # Preferred: structured --json contract; fallback: legacy '// path:line' scraping
+    retrieved = parse_json_output(proc.stdout or "") or []
+    if not retrieved:
+        for line in out.splitlines():
+            s = line.strip()
+            if s.startswith("// ") and ":" in s:
+                p = s[3:].split(":")[0].strip().replace("\\", "/")  # normalize Windows separators to match expected_files
+                if p and p not in retrieved:
+                    retrieved.append(p)
     # Try to parse token counts from preview output
     m_total = re.search(r"total_tokens[:\s]+(\d+)", out, re.IGNORECASE)
     total_tokens = int(m_total.group(1)) if m_total else count_tokens_tiktoken(out)

@@ -216,8 +216,8 @@ fn merge_evidence(
         }
     }
 
-    // Re-rank and truncate
-    primary.evidence.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    // Re-rank and truncate (deterministic: score desc, path asc)
+    ranking::sort_evidence_by_score_desc(&mut primary.evidence);
     let max = plan.max_evidence(policy.max_files);
     // Docs-slot reservation: promote Documentation evidence into the kept
     // region's tail before truncation (promote-only — see policy.rs
@@ -246,6 +246,33 @@ fn merge_evidence(
 
 /// Tantivy-backed retriever — BM25 lexical + symbol search.
 pub struct TantivyRetriever;
+
+/// Panic-guarded fulltext search — single home for the catch_unwind that
+/// shields against Tantivy 0.26.1 phrase-query panics ("target should be >= doc")
+/// on large indices. Returns `Err(panic_message)` on panic so callers fall back
+/// to `search_text` (ripgrep) instead of crashing.
+fn search_fulltext_guarded(
+    repo_intel: &RepositoryIntelligence,
+    q: &str,
+    language: Option<&str>,
+    candidate_k: usize,
+    repository_id: &str,
+) -> Result<knocode_core::SearchResults, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        repo_intel.search_fulltext(q, language, candidate_k, Some(repository_id))
+    }))
+    .unwrap_or_else(|panic_info| {
+        let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        };
+        tracing::warn!(query = %q, panic = %msg, "Tantivy phrase query panicked — falling back to ripgrep");
+        Err(msg)
+    })
+}
 
 impl Retriever for TantivyRetriever {
     fn retrieve(
@@ -320,16 +347,19 @@ impl Retriever for TantivyRetriever {
 
         // Phrase query fallback: Tantivy 0.26.1 panics on phrase queries with large indices
         // ("target should be >= doc"). Catch the panic and fall back to individual term search.
-        let search_results = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            repo_intel.search_fulltext(&expanded_query, query.language.as_deref(), candidate_k, Some(&query.repository_id))
-        })) {
+        //
+        // Weighted expansion (see vocab::weighted_query_pair): the ORIGINAL
+        // query runs at full weight; the synonym-expanded query is a gap-filler
+        // branch scaled by EXPANSION_WEIGHT. Previously the expanded OR-query
+        // was the primary search, diluting original-term BM25 weights.
+        let search_results = match search_fulltext_guarded(repo_intel, &query.text, query.language.as_deref(), candidate_k, &query.repository_id) {
             // Normal success path
-            Ok(Ok(sr)) if sr.total_count > 0 => {
+            Ok(sr) if sr.total_count > 0 => {
                 status = knocode_core::RetrievalStatus::Found(sr.total_count);
                 sr
             }
             // Success but empty — try fallback
-            Ok(Ok(_)) => {
+            Ok(_) => {
                 used_fallback = true;
                 let fallback_q = if has_expansion { expanded_query.clone() } else { query.text.clone() };
                 match repo_intel.search_text(&fallback_q, query.language.as_deref(), candidate_k) {
@@ -341,34 +371,9 @@ impl Retriever for TantivyRetriever {
                     Err(e) => return RetrievalResult::empty(knocode_core::RetrievalStatus::RetrievalFailed(e)),
                 }
             }
-            // Error from search_fulltext — try fallback
-            Ok(Err(e)) => {
+            // PANIC from Tantivy phrase query — helper already logged; fall back to ripgrep
+            Err(_panic_msg) => {
                 used_fallback = true;
-                let fallback_q = if has_expansion { expanded_query.clone() } else { query.text.clone() };
-                match repo_intel.search_text(&fallback_q, query.language.as_deref(), candidate_k) {
-                    Ok(sr) if sr.total_count > 0 => {
-                        status = knocode_core::RetrievalStatus::Found(sr.total_count);
-                        sr
-                    }
-                    Ok(_) => knocode_core::SearchResults { results: vec![], total_count: 0 },
-                    Err(_) => return RetrievalResult::empty(knocode_core::RetrievalStatus::RetrievalFailed(e)),
-                }
-            }
-            // PANIC from Tantivy phrase query — log and fall back to ripgrep
-            Err(panic_info) => {
-                used_fallback = true;
-                let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = panic_info.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                tracing::warn!(
-                    query = %expanded_query,
-                    panic = %panic_msg,
-                    "Tantivy phrase query panicked — falling back to ripgrep"
-                );
                 let fallback_q = if has_expansion { expanded_query.clone() } else { query.text.clone() };
                 match repo_intel.search_text(&fallback_q, query.language.as_deref(), candidate_k) {
                     Ok(sr) if sr.total_count > 0 => {
@@ -385,6 +390,30 @@ impl Retriever for TantivyRetriever {
             status = knocode_core::RetrievalStatus::FallbackUsed("tantivy→ripgrep".to_string());
         } else if search_results.total_count == 0 {
             status = knocode_core::RetrievalStatus::NoMatch;
+        }
+
+        // ── Weighted expansion branch (max-combine) ──
+        // Only when the full-weight original query under-fills the candidate
+        // pool: add synonym-branch hits not already present, scaled by
+        // EXPANSION_WEIGHT so an original-term hit always outranks a
+        // synonym-only hit of the same base score.
+        let mut search_results = search_results;
+        if has_expansion && search_results.total_count < effective_max {
+            let expanded_run = search_fulltext_guarded(repo_intel, &expanded_query, query.language.as_deref(), candidate_k, &query.repository_id);
+            if let Ok(mut exp_sr) = expanded_run {
+                let seen: HashSet<String> = search_results.results.iter().map(|r| r.path.clone()).collect();
+                let before = search_results.results.len();
+                for r in exp_sr.results.iter_mut() {
+                    if !seen.contains(&r.path) {
+                        r.score *= vocab::EXPANSION_WEIGHT as f64;
+                        search_results.results.push(r.clone());
+                    }
+                }
+                search_results.total_count = search_results.results.len();
+                if search_results.results.len() > before && status == knocode_core::RetrievalStatus::NoMatch {
+                    status = knocode_core::RetrievalStatus::Found(search_results.total_count);
+                }
+            }
         }
 
         let tantivy_ms = t0.elapsed().as_millis() as u64;
@@ -422,7 +451,7 @@ impl Retriever for TantivyRetriever {
         if !expanded_tokens.is_empty() {
             for (path, score, _fc, _src) in bm25_scored.iter_mut() {
                 let haystack = path.to_lowercase(); // FIX #1: removed useless format!("{} {}", "", path)
-                let matched = expanded_tokens.iter().filter(|t| haystack.contains(t.as_str())).count();
+                let matched = ranking::count_path_token_matches(&haystack, &expanded_tokens);
                 if matched > 0 {
                     let boost = 1.0 + (matched as f32 / expanded_tokens.len() as f32) * policy.symbol_match_weight;
                     *score *= boost as f64;
@@ -433,7 +462,7 @@ impl Retriever for TantivyRetriever {
         // Merge BM25 + symbol
         let by_path = ranking::merge_by_path(bm25_scored, symbol_scored);
         let mut merged: Vec<(String, f64)> = by_path.iter().map(|(p, (s, _, _))| (p.clone(), *s)).collect();
-        merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranking::sort_by_score_desc(&mut merged);
 
         // Code-behind
         let _cb_signals = ranking::add_code_behind(&mut merged, policy);
@@ -456,7 +485,7 @@ impl Retriever for TantivyRetriever {
                 for (path, sig) in boosted {
                     graph_signals.insert(path, sig);
                 }
-                merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                ranking::sort_by_score_desc(&mut merged);
             }
             graph_ms = tg.elapsed().as_millis() as u64;
         }
@@ -492,7 +521,7 @@ impl Retriever for TantivyRetriever {
                 }
             }
         }
-        merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranking::sort_by_score_desc(&mut merged);
 
         // P0 eval-quality fix: damp generic meta-docs. Documentation files whose
         // PATH shares no token with the query matched via content generality and
@@ -514,7 +543,7 @@ impl Retriever for TantivyRetriever {
                     }
                 }
             }
-            merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            ranking::sort_by_score_desc(&mut merged);
             damped_paths
         };
 
@@ -560,7 +589,7 @@ impl Retriever for TantivyRetriever {
         let docs_tail_start = kept_len.saturating_sub(docs_reserve);
         for (rank_pos, (path, score)) in merged.into_iter().take(effective_max).enumerate() {
             if let Some((_, file_class, source)) = by_path.get(&path) {
-                let mut ev = Evidence::new(path.clone(), score as f32 * 1000.0, file_class.clone());
+                let mut ev = Evidence::new(path.clone(), score as f32 * knocode_core::ranking::SCORE_SCALE, file_class.clone());
                 ev.raw_score = score as f32;
                 ev.source = source.clone();
                 ev.matched_terms = expanded_tokens.clone();
@@ -577,7 +606,7 @@ impl Retriever for TantivyRetriever {
             }
         }
 
-        evidence.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        ranking::sort_evidence_by_score_desc(&mut evidence);
         let ranking_ms = t_rank.elapsed().as_millis() as u64;
         let evidence_count = evidence.len();
 

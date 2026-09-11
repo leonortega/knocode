@@ -187,11 +187,8 @@ candidate_k = 100                     # Candidate pool size before ranking
 # [model] / [routing] / [litellm] removed in v0.8.6 — the runtime is
 # model-agnostic; the agent/provider/user selects the model (V1_RUNTIME_SPEC.md §2.3)
 # [skills] removed — the runtime no longer loads or matches skills (REMOVED_TOOLS.md)
-
-[rtk]
-enabled = true                        # Optimizer crate helpers (doctor probe, tee-on-failure)
-max_output_tokens = 8000              # Budget used by the compressor fallback
-compression_level = "balanced"        # Tool-output compression itself is RTK's (external binary)
+# [rtk] removed — tool-output compression is the external RTK binary's job
+# (opt-in via installers); no in-repo adapter, config, or fallback remains
 
 [logging]
 level = "info"                        # Log level: error, warn, info, debug, trace. Verbose = debug/trace: every inbound MCP call (debug) + /health polls (trace) appear in the log

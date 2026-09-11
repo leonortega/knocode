@@ -1,5 +1,10 @@
 //! Deterministic ranking — all scoring logic lives here.
-//! Mirrors the ad-hoc steps in `lib.rs:268-393` + `tantivy_index.rs:86-130` + `647-652`.
+//!
+//! Canonical boost tables and stop words live in `knocode_core::ranking`
+//! (single source of truth shared with `knocode-storage`'s BM25 hit scoring);
+//! this module holds the query-tokenization and evidence-assembly steps that
+//! are context-specific. Parity tests in `policy.rs` fail the build if the
+//! configurable weight structs drift from the canonical tables.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
@@ -7,22 +12,35 @@ use std::sync::LazyLock;
 use crate::retrieval::evidence::{Evidence, EvidenceSource, RetrievalSignal};
 use crate::retrieval::policy::RetrievalPolicy;
 
-/// Stop words for symbol-match boosting — same list as `lib.rs:12-23`.
-/// FIX #8: Use HashSet for O(1) lookup instead of O(n) slice scan.
+/// Stop words for symbol-match boosting — canonical list from
+/// `knocode_core::ranking::STOP_WORDS` (formerly a duplicated copy).
 static STOP_WORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
-    [
-        "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "could",
-        "should", "may", "might", "shall", "can", "to", "of", "in", "for",
-        "on", "with", "at", "by", "from", "as", "into", "through", "during",
-        "before", "after", "above", "below", "between", "and", "but", "or",
-        "nor", "not", "so", "yet", "both", "either", "neither", "each",
-        "every", "all", "any", "few", "more", "most", "other", "some",
-        "such", "no", "only", "own", "same", "than", "too", "very",
-        "just", "because", "if", "when", "where", "how", "what", "which",
-        "who", "whom", "this", "that", "these", "those",
-    ].into_iter().collect()
+    knocode_core::ranking::STOP_WORDS.iter().copied().collect()
 });
+
+/// Deterministic descending-score ordering for `(path, score)` pairs:
+/// score desc, then path asc for ties.
+///
+/// Candidate lists are assembled from `HashMap` iteration, whose order varies
+/// per process — without the path tie-break, equal scores resolve in
+/// nondeterministic order run-to-run, breaking the engine's
+/// "deterministic, independently testable" contract and making eval diffs noisy.
+pub fn sort_by_score_desc(merged: &mut [(String, f64)]) {
+    merged.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+}
+
+/// Same deterministic ordering for `Evidence` lists (score desc, path asc).
+pub fn sort_evidence_by_score_desc(evidence: &mut [Evidence]) {
+    evidence.sort_by(|a, b| {
+        b.score.partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.path.cmp(&b.path))
+    });
+}
 
 /// Extract query tokens for symbol-match boosting — mirrors `lib.rs:269-296`.
 /// FIX #5: Reduced allocations by reusing buffers and avoiding unnecessary clones.
@@ -64,14 +82,41 @@ pub fn query_tokens(query: &str) -> Vec<String> {
     result
 }
 
+/// ASCII case-insensitive substring search — zero allocation.
+///
+/// The former implementation built `format!("{} {}", content, path).to_lowercase()`
+/// per candidate (a full copy of every file's content per query — megabytes of
+/// allocation across a 500-candidate pool). Query tokens are lowercase
+/// alphanumeric, so `eq_ignore_ascii_case` on byte windows is equivalent for
+/// code search (non-ASCII case folding is not needed for identifiers).
+pub fn ascii_contains_case_insensitive(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.len() > h.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
 /// Apply symbol-match boost to a candidate (content+path haystack).
 /// Returns `(boost_factor, matched_count)` — mirrors `lib.rs:298-315`.
+/// Path tokens match per segment (see `path_contains_token`); content tokens
+/// match via allocation-free ASCII case-insensitive search.
 pub fn symbol_boost(query_tokens: &[String], path: &str, content: &str, policy: &RetrievalPolicy) -> (f32, usize) {
     if query_tokens.is_empty() {
         return (1.0, 0);
     }
-    let haystack = format!("{} {}", content, path).to_lowercase();
-    let matched = query_tokens.iter().filter(|t| haystack.contains(t.as_str())).count();
+    let path_lower = path.to_lowercase();
+    let matched = query_tokens
+        .iter()
+        .filter(|t| {
+            path_contains_token(&path_lower, t.as_str())
+                || ascii_contains_case_insensitive(content, t.as_str())
+        })
+        .count();
     if matched == 0 {
         return (1.0, 0);
     }
@@ -113,6 +158,29 @@ pub fn apply_class_and_dir_boost(
 /// files are never damped; a path-token match (query "indexing" vs
 /// INDEXING_PERF_PLAN.md) keeps the full score — topical docs still win.
 
+/// Path-token matching over path SEGMENTS instead of the raw path string.
+///
+/// The old sites did `path_lower.contains(token)`, which matches across
+/// separator boundaries (e.g. token "cin" matching "src/\u{2026}") and treats the
+/// whole path as one blob. Matching per segment (separators `/ . -` and any
+/// non-alphanumeric) keeps token containment within a single path component.
+/// Tokens stay containment-matched ("index" still matches "indexing") so
+/// partial-stem behavior is unchanged — only separator-crossing artifacts are
+/// eliminated.
+pub fn path_contains_token(path_lower: &str, token: &str) -> bool {
+    path_lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|seg| seg.contains(token))
+}
+
+/// Count how many query tokens match the (already lowercased) path by segment.
+pub fn count_path_token_matches(path_lower: &str, tokens: &[String]) -> usize {
+    tokens
+        .iter()
+        .filter(|t| path_contains_token(path_lower, t.as_str()))
+        .count()
+}
+
 /// True when this file is documentation-class AND its path contains none of
 /// the query tokens (i.e. it is a generic meta-doc for this query).
 pub fn is_generic_doc(path: &str, file_class: &str, query_tokens: &[String]) -> bool {
@@ -120,7 +188,7 @@ pub fn is_generic_doc(path: &str, file_class: &str, query_tokens: &[String]) -> 
         return false;
     }
     let path_lower = path.to_lowercase();
-    !query_tokens.iter().any(|t| path_lower.contains(t.as_str()))
+    !query_tokens.iter().any(|t| path_contains_token(&path_lower, t.as_str()))
 }
 
 pub fn apply_class_and_dir_boost_with_query_tokens(
@@ -275,7 +343,7 @@ pub fn build_evidence_from_merged(
     let mut out = Vec::new();
     for (path, score) in merged {
         if let Some((_, file_class, source)) = by_path.get(&path) {
-            let mut ev = Evidence::new(path.clone(), score as f32 * 1000.0, file_class.clone());
+            let mut ev = Evidence::new(path.clone(), score as f32 * knocode_core::ranking::SCORE_SCALE, file_class.clone());
             ev.raw_score = score as f32;
             ev.source = source.clone();
             if let Some(sigs) = signals_by_path.get(&path) {

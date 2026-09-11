@@ -41,7 +41,6 @@ knocode/
 │   ├── knocode-repo-intel/  # Repository Intelligence — tree-sitter + tantivy + graph + watcher
 │   ├── knocode-context/     # Context Engine — retrieval engine + BuildContext
 │   ├── knocode-knowledge/   # Knowledge Hub — SQLite+tantivy local BM25
-│   ├── knocode-optimizer/   # RTK adapter helpers (doctor probe)
 │   ├── knocode-events/      # Event Bus — in-memory broadcast + tracing
 │   ├── knocode-storage/     # Local Storage — SQLite WAL + tantivy
 │   └── knocode-bench/       # Criterion benchmarks

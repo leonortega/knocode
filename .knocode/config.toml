@@ -40,8 +40,3 @@ file_path = "~/.knocode/logs/knocode.log"
 level = "info"
 max_size_mb = 100
 retention_days = 7
-
-[rtk]
-compression_level = "balanced"
-enabled = true
-max_output_tokens = 8000

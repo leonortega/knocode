@@ -23,9 +23,6 @@ pub enum KnocodeError {
     #[error("context build failed: {0}")]
     ContextBuildFailed(String),
 
-    #[error("RTK compression failed: {0}")]
-    RtkCompressionFailed(String),
-
     #[error("knowledge retrieval failed: {0}")]
     KnowledgeRetrievalFailed(String),
 

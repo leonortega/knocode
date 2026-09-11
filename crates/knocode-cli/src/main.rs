@@ -72,6 +72,10 @@ enum Commands {
         /// Max files in final Context Pack (20 default, use 50 for large-repo eval to match rg K=50). Env KNOCODE_MAX_FILES overrides.
         #[arg(long)]
         max_files: Option<usize>,
+        /// Emit machine-readable JSON (paths, provenance, token usage, retrieval stats) instead of human-readable text.
+        /// Stable contract for eval harnesses and tooling — replaces regex scraping of stdout.
+        #[arg(long)]
+        json: bool,
     },
     
     /// Show daemon status and metrics
@@ -132,7 +136,7 @@ fn main() {
         Commands::Serve { port, socket } => cmd_serve(port, socket),
         Commands::Init { wizard, no_anim } => cmd_init(wizard, no_anim),
         Commands::Index { watch, watch_mode } => cmd_index(watch, watch_mode.as_deref()),
-        Commands::Preview { prompt, session, no_cache, diag, expected_files, candidate_k, max_files } => cmd_preview(&prompt, &session, no_cache, diag, expected_files.as_deref(), candidate_k, max_files),
+        Commands::Preview { prompt, session, no_cache, diag, expected_files, candidate_k, max_files, json } => cmd_preview(&prompt, &session, no_cache, diag, expected_files.as_deref(), candidate_k, max_files, json),
         Commands::Status => cmd_status(),
         Commands::Config { action } => cmd_config(action),
         Commands::Doctor => cmd_doctor(),
@@ -1189,12 +1193,14 @@ fn cmd_index(watch: bool, watch_mode: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected_files: Option<&[String]>, candidate_k: Option<usize>, max_files: Option<usize>) -> Result<(), String> {
+fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected_files: Option<&[String]>, candidate_k: Option<usize>, max_files: Option<usize>, json: bool) -> Result<(), String> {
     // Try daemon first (UDS then HTTP), fallback to local BuildContext
     // For v0.3.0 we implement real preview: build context locally if daemon not running.
     let effective_session = if no_cache { String::new() } else { session.to_string() };
-    println!("Previewing BuildContext for: \"{}\" (session: {}, no_cache: {})", prompt, effective_session, no_cache);
-    println!();
+    if !json {
+        println!("Previewing BuildContext for: \"{}\" (session: {}, no_cache: {})", prompt, effective_session, no_cache);
+        println!();
+    }
 
     // Attempt HTTP daemon preview (UDS preview requires MessagePack client — HTTP is fallback)
     let daemon_url = std::env::var("KNOCODE_DAEMON_URL").unwrap_or_else(|_| "http://127.0.0.1:9527".to_string());
@@ -1240,6 +1246,37 @@ fn cmd_preview(prompt: &str, session: &str, no_cache: bool, diag: bool, expected
         let _t3 = Instant::now();
         let pack = rt.block_on(ctx.build_context(&task)).map_err(|e| e.to_string())?;
         if std::env::var("KNOCODE_PROFILE").is_ok() { eprintln!("[profile] cli.build_context: {}ms", _t3.elapsed().as_millis()); }
+
+        // ── JSON output mode: structured, regex-free contract for tooling ──
+        if json {
+            use serde_json::json;
+            let mut paths: Vec<serde_json::Value> = Vec::new();
+            for p in &pack.provenance {
+                paths.push(json!({
+                    "path": p.path.replace('\\', "/"),
+                    "source": p.source,
+                    "retriever": p.retriever,
+                    "score": p.score,
+                    "reason": p.reason,
+                }));
+            }
+            let out = json!({
+                "prompt": prompt,
+                "status": pack.code_retrieval_status,
+                "files": paths,
+                "token_usage": {
+                    "total": pack.token_usage.total_tokens,
+                    "budget_remaining": pack.token_usage.budget_remaining,
+                    "by_source": pack.token_usage.by_source,
+                },
+                "retrieval_ms": pack.retrieval_stats.as_ref().map(|s| s.retrieval_ms),
+                "candidates": pack.retrieval_stats.as_ref().map(|s| s.candidates),
+                "repository_state": pack.repository_state,
+            });
+            println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
+            return Ok(());
+        }
+
         println!("Knowledge entries (docs_context):");
         if pack.docs_context.is_empty() { println!("  (none)"); } else { for line in pack.docs_context.lines().take(20) { println!("  {}", line); } }
         println!();
@@ -2008,17 +2045,6 @@ fn cmd_doctor() -> Result<(), String> {
     }
 
     // LiteLLM removed — see docs/01-architecture/LLM_ROUTING_REMOVAL.md
-    
-    // Check RTK
-    print!("RTK:             ");
-    {
-        let rtk = knocode_optimizer::rtk::RtkAdapter::detect();
-        if rtk.is_available() {
-            println!("✓ OK (binary at {:?}, 10ms overhead)", rtk.binary_path);
-        } else {
-            println!("⚠ Not found on PATH — using built-in compressors + tee-on-failure (install rtk for 10ms binary)");
-        }
-    }
 
     // Check tiktoken
     print!("Tiktoken:        ");
@@ -2165,7 +2191,7 @@ mod tests {
         let p = dir.join("config.toml");
         std::fs::write(
             &p,
-            "[logging]\nfile_path = \"~/.knocode/logs/knocode.log\"\nlevel = \"info\"\nretention_days = 7\n\n[rtk]\nenabled = true\n",
+            "[logging]\nfile_path = \"~/.knocode/logs/knocode.log\"\nlevel = \"info\"\nretention_days = 7\n",
         )
         .unwrap();
         upsert_logging_level(&p, "debug").unwrap();
@@ -2174,7 +2200,6 @@ mod tests {
         assert!(t.contains("level = \"debug\""));
         assert!(!t.contains("level = \"info\""));
         assert!(t.contains("file_path = \"~/.knocode/logs/knocode.log\""));
-        assert!(t.contains("[rtk]"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2183,14 +2208,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("knocode_cfg_test_insert_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("config.toml");
-        std::fs::write(&p, "[logging]\nfile_path = \"x\"\n\n[rtk]\nenabled = true\n").unwrap();
+        std::fs::write(&p, "[logging]\nfile_path = \"x\"\n").unwrap();
         upsert_logging_level(&p, "error").unwrap();
         let t = std::fs::read_to_string(&p).unwrap();
         // Assert semantics, not byte order: level lands inside [logging], the rest survives.
         let v: toml::Value = toml::from_str(&t).unwrap();
         assert_eq!(v["logging"]["level"].as_str(), Some("error"));
         assert_eq!(v["logging"]["file_path"].as_str(), Some("x"));
-        assert_eq!(v["rtk"]["enabled"].as_bool(), Some(true));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2302,12 +2326,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("knocode_cfg_test_sections_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("config.toml");
-        // `level` under [rtk] must NOT be touched; [logging] has no level → insert one.
-        std::fs::write(&p, "[rtk]\nlevel = \"keepme\"\n\n[logging]\nfile_path = \"x\"\n").unwrap();
+        // `level` under [index] must NOT be touched; [logging] has no level → insert one.
+        std::fs::write(&p, "[index]\nlevel = \"keepme\"\n\n[logging]\nfile_path = \"x\"\n").unwrap();
         upsert_logging_level(&p, "info").unwrap();
         let t = std::fs::read_to_string(&p).unwrap();
         let v: toml::Value = toml::from_str(&t).unwrap();
-        assert_eq!(v["rtk"]["level"].as_str(), Some("keepme"));
+        assert_eq!(v["index"]["level"].as_str(), Some("keepme"));
         assert_eq!(v["logging"]["level"].as_str(), Some("info"));
         assert_eq!(v["logging"]["file_path"].as_str(), Some("x"));
         let _ = std::fs::remove_dir_all(&dir);

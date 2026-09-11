@@ -111,6 +111,13 @@ fn eval_graph(
         ..Default::default()
     };
 
+    // Warm up the dependency-graph cache (mem + disk) before timing.
+    // The first-ever build walks the whole repo (~hundreds of ms one-time
+    // cost); without warmup it lands on query 1 and smears the mean.
+    if let Err(e) = repo_intel.build_dependency_graph() {
+        eprintln!("WARNING: graph warmup failed: {} — with-graph timings include cold build", e);
+    }
+
     for q in &queries {
         let repository_id = repo_intel.repository_id().to_string();
         let query_obj = RetrievalQuery::new(q.text, &repository_id);
@@ -170,6 +177,14 @@ fn eval_graph(
 }
 
 /// Evaluate candidate_k impact (how many candidates to consider before ranking)
+///
+/// NOTE on interpreting ~0% deltas: this metric diffs the truncated top-50
+/// file SETS (50 vs 500), not recall against golden relevance. Since the
+/// doc-prior damping + docs-slot reservation stabilize the top-50, both pool
+/// sizes can resolve to the identical set on small repos — that reads as
+/// "+0.0% NEUTRAL" but means "same good 50", not "pool size is worthless".
+/// A large pool still matters for structural-exhaustive queries (500 vs 500
+/// by construction there) and for recall measured against grep/golden sets.
 fn eval_candidate_k(
     repo_intel: &RepositoryIntelligence,
     retriever: &CombinedRetriever,

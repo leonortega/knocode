@@ -7,7 +7,6 @@ members = [
     "crates/knocode-repo-intel",
     "crates/knocode-knowledge",
     "crates/knocode-context",
-    "crates/knocode-optimizer",
     "crates/knocode-events",
     "crates/knocode-storage",
     "crates/knocode-bench",
@@ -81,7 +80,6 @@ knocode-storage = { path = "crates/knocode-storage" }
 knocode-repo-intel = { path = "crates/knocode-repo-intel" }
 knocode-knowledge = { path = "crates/knocode-knowledge" }
 knocode-context = { path = "crates/knocode-context" }
-knocode-optimizer = { path = "crates/knocode-optimizer" }
 knocode-daemon = { path = "crates/knocode-daemon" }
 knocode-cli = { path = "crates/knocode-cli" }
 
