@@ -12,6 +12,6 @@ Installers:
   - Architecture: x64
     InstallerLocale: en-US
     InstallerUrl: https://github.com/leonortega/knocode/releases/download/v0.9.12/knocode-0.9.12-x86_64-pc-windows-msvc.zip
-    InstallerSha256: 7E0E11882C834042A26F515AAEB8811D5549EF550370ADDE66ECBACAB5472BD8
+    InstallerSha256: 3EFEABFF78577D94C16073721B586669765DB72F7EF2AB0E4C81DFFA851A15D9
 ManifestType: installer
 ManifestVersion: 1.6.0
