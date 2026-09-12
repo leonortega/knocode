@@ -142,19 +142,27 @@ function Select-Agents {
   }
   if ($AllAgents) { return @($AgentCatalog) }
 
-  # Interactive multi-select when stdin is a console; default to ALL otherwise
+  # Interactive checkbox: numbered list, single answer (e.g. 1,3 - 'all' - Enter for none).
+  # Default when stdin is not a console: ALL agents.
   $interactive = $true
   try { if ([Console]::IsInputRedirected) { $interactive = $false } } catch { $interactive = $false }
   if (-not $interactive) {
     Info "non-interactive run - installing agent integrations for ALL agents (use -Agents opencode or -NoAgents to change)"
     return @($AgentCatalog)
   }
-  Info "Which agent integrations should be installed? (default Yes for each)"
+  Info "Which agent integrations should be installed? (checkbox)"
+  for ($i = 0; $i -lt $AgentCatalog.Count; $i++) { Write-Host "  [$($i + 1)] $($AgentCatalog[$i])" }
+  $r = (Read-Host "  Enter numbers separated by commas (e.g. 1,3), 'all', or press Enter for none").Trim().ToLower()
+  if ($r -eq "" -or $r -eq "none") { Info "no agent integrations selected"; return @() }
+  if ($r -eq "all") { return @($AgentCatalog) }
   $sel = @()
-  foreach ($a in $AgentCatalog) {
-    $r = Read-Host "  Wire up $a ? [Y/n]"
-    if ($r -eq "" -or $r -match "^(y|yes)$") { $sel += $a } else { Skip "$a skipped" }
+  foreach ($tok in ($r -split "[,\s]+")) {
+    if ($tok -eq "") { continue }
+    $n = 0
+    if ([int]::TryParse($tok, [ref]$n) -and $n -ge 1 -and $n -le $AgentCatalog.Count) { $sel += $AgentCatalog[$n - 1] }
+    else { Warn "ignoring invalid selection '$tok'" }
   }
+  $sel = @($sel | Select-Object -Unique)
   if ($sel.Count -eq 0) { Info "no agent integrations selected" }
   return $sel
 }
@@ -356,9 +364,64 @@ try {
   }
 } catch { Warn "could not persist KNOCODE_LOG_LEVEL: $_" }
 
+# Merge our plugin URL into opencode.jsonc, preserving any other entries
+# (e.g. RTK's plugin). Never overwrites user config: writes fresh only when the
+# file is missing, merges when parseable, warns + skips when unparseable.
+function Merge-OpencodePlugin($configPath, $pluginUrl) {
+  $fresh = "{`n  `"`$schema`": `"https://opencode.ai/config.json`",`n  `"plugin`": [`"$pluginUrl`"]`n}`n"
+  if (-not (Test-Path $configPath)) {
+    try { Set-Utf8NoBom $configPath $fresh; Ok "opencode config written at $configPath" } catch { Warn "failed to write $configPath : $_" }
+    return
+  }
+  try {
+    $raw = Get-Content -LiteralPath $configPath -Raw
+    if ($raw -match [regex]::Escape($pluginUrl)) { Ok "opencode plugin already registered in $configPath"; return }
+    $clean = ($raw -replace '(?m)^\s*//.*$','' -replace '/\*.*?\*/','') -replace ',\s*([\}\]])', '$1'
+    $obj = $clean | ConvertFrom-Json -ErrorAction Stop
+    $plugins = @()
+    if ($obj.PSObject.Properties['plugin'] -and $obj.plugin) {
+      if ($obj.plugin -is [System.Array]) { $plugins = @($obj.plugin) } else { $plugins = @($obj.plugin) }
+    }
+    if ($plugins -contains $pluginUrl) { Ok "opencode plugin already registered in $configPath"; return }
+    $plugins += $pluginUrl
+    $obj | Add-Member -NotePropertyName 'plugin' -NotePropertyValue $plugins -Force
+    Set-Utf8NoBom $configPath ($obj | ConvertTo-Json -Depth 10)
+    Ok "opencode plugin merged into $configPath (existing entries kept)"
+  } catch { Warn "could not merge opencode plugin into $configPath (leaving user config untouched): $_" }
+}
+
 # =====================================================================================
 # 3. Agent integrations (OpenCode / Copilot) - selected above
 # =====================================================================================
+# Shared MCP stdio bridge (packages/knocode-mcp: zero-dep single file). Deployed
+# ALWAYS - even with no agents selected - so the manual-MCP hint below points at
+# a real file; every agent MCP entry points at it.
+$mcpSrc = Join-Path $Root "packages\knocode-mcp\dist\index.js"
+if ((-not (Test-Path $mcpSrc)) -and (Test-Cmd npm)) {
+  try { Push-Location (Join-Path $Root "packages\knocode-mcp"); & npm install --silent 2>&1 | Out-Null; & npm run build --silent 2>&1 | Out-Null; Pop-Location } catch { try { Pop-Location } catch {} }
+}
+$mcpDstDir = Join-Path $env:USERPROFILE ".knocode\mcp-server"
+$mcpDst = Join-Path $mcpDstDir "knocode-mcp.mjs"
+$haveBridge = $false
+if (Test-Path $mcpSrc) {
+  try { New-Item -ItemType Directory -Force -Path $mcpDstDir | Out-Null; Copy-Item -LiteralPath $mcpSrc -Destination $mcpDst -Force; $haveBridge = $true; Ok "shared MCP bridge at $mcpDst" }
+  catch { Warn "MCP bridge deploy failed: $_" }
+} else { Warn "packages/knocode-mcp dist not built - run: cd packages/knocode-mcp; npm install; npm run build (MCP entries skipped, skills still install)" }
+$mcpScript = ($mcpDst -replace '\\','/')
+
+# Manual-MCP hint: printed when no agent integrations were selected.
+function Show-McpHint {
+  if ($haveBridge) {
+    Info "No agent integrations selected - use knocode as a plain MCP server instead:"
+    Write-Host "  1. Keep the daemon running: open a new terminal, run 'knocode init' inside a project"
+    Write-Host "     (MCP at http://127.0.0.1:9527/mcp, tool: knocode_context)"
+    Write-Host "  2. Add this to your MCP client's config file, then restart the client:"
+    Write-Host "     { `"mcpServers`": { `"knocode`": { `"command`": `"node`", `"args`": [`"$mcpScript`"] } } }"
+    Write-Host "  3. Requires Node.js. Re-run this installer and pick agents to wire one automatically."
+  }
+  else { Warn "No agent integrations selected - and the MCP bridge is unavailable (see warning above). Re-run with -Agents to wire an agent." }
+}
+if ($agentSel.Count -eq 0) { Show-McpHint }
 if ($agentSel.Count -gt 0) {
   $ocGlobalDir = Join-Path $env:USERPROFILE ".config\opencode"
 
@@ -373,13 +436,7 @@ if ($agentSel.Count -gt 0) {
     # file:// URL loads the local build directly (self-contained esbuild
     # bundle at packages/opencode-knocode/dist/index.js - no npm step needed).
     $pluginFileUrl = "file://" + ((Join-Path $Root "packages\opencode-knocode") -replace '\\','/')
-    $opencodeJsonc = @"
-{
-    "`$schema": "https://opencode.ai/config.json",
-    "plugin": ["$pluginFileUrl"]
-}
-"@
-    try { Set-Utf8NoBom $ocGlobalCfg $opencodeJsonc; Ok "opencode plugin at $ocGlobalCfg" } catch { Warn "failed to write $ocGlobalCfg : $_" }
+    Merge-OpencodePlugin $ocGlobalCfg $pluginFileUrl
     # Remove legacy paths
     $globalPlugin = "$env:USERPROFILE\.config\opencode\plugins\knocode.ts"
     if (Test-Path $globalPlugin) { try { Remove-Item -LiteralPath $globalPlugin -Force } catch {} }
@@ -522,20 +579,7 @@ if ($agentSel.Count -gt 0) {
   $uniSel = @($agentSel | Where-Object { $UniversalAgents -contains $_ })
   if ($uniSel.Count -gt 0) {
     Info "Configuring universal agents (MCP + skill: $($uniSel -join ', '))..."
-    # Shared stdio bridge (packages/knocode-mcp: zero-dep single file). Deployed
-    # once to a repo-independent home; every agent MCP entry points at it.
-    $mcpSrc = Join-Path $Root "packages\knocode-mcp\dist\index.js"
-    if ((-not (Test-Path $mcpSrc)) -and (Test-Cmd npm)) {
-      try { Push-Location (Join-Path $Root "packages\knocode-mcp"); & npm install --silent 2>&1 | Out-Null; & npm run build --silent 2>&1 | Out-Null; Pop-Location } catch { try { Pop-Location } catch {} }
-    }
-    $mcpDstDir = Join-Path $env:USERPROFILE ".knocode\mcp-server"
-    $mcpDst = Join-Path $mcpDstDir "knocode-mcp.mjs"
-    $haveBridge = $false
-    if (Test-Path $mcpSrc) {
-      try { New-Item -ItemType Directory -Force -Path $mcpDstDir | Out-Null; Copy-Item -LiteralPath $mcpSrc -Destination $mcpDst -Force; $haveBridge = $true; Ok "shared MCP bridge at $mcpDst" }
-      catch { Warn "MCP bridge deploy failed: $_" }
-    } else { Warn "packages/knocode-mcp dist not built - run: cd packages/knocode-mcp; npm install; npm run build (MCP entries skipped, skills still install)" }
-    $mcpScript = ($mcpDst -replace '\\','/')
+    # Bridge is pre-deployed above (section 3 header) - $mcpDst/$haveBridge/$mcpScript.
 
     function Install-UniversalSkill($agent, $destDir) {
       $src = Join-Path $Root ".knocode\skills-universal\knocode"
@@ -621,7 +665,7 @@ if ($NoRtk) {
 }
 elseif ($agentSel.Count -eq 0) {
   $rtkStatus = "skipped (no agent integrations selected)"
-  if ($WithRtk) { Warn "-WithRtk was set but no agent integrations were selected - RTK not installed (re-run with -Agents opencode,copilot)" }
+  if ($WithRtk) { Warn "-WithRtk was set but no agent integrations were selected - RTK not installed (re-run with -Agents opencode,copilot,claude,cursor,gemini,codex,cline)" }
 }
 else {
   $wantRtk = [bool]$WithRtk

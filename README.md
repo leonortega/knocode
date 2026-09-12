@@ -112,13 +112,44 @@ scoop install knocode
 
 Or grab `knocode-<ver>-x86_64-pc-windows-msvc.zip` directly from the [Releases page](https://github.com/leonortega/knocode/releases). Prebuilt binaries — no Rust toolchain needed for end users.
 
-The installer asks which agents to wire up (**OpenCode**, **Copilot for VS Code**, **Claude Code**) and configures them automatically. It also installs Git and Node.js if missing.
+The installer shows a checkbox with the supported agents and configures the ones you pick. It also installs Git and Node.js if missing. End-user installs default to quiet logging (level 0, errors only) with no prompt.
 
-**Uninstall:**
+### Supported agents
+
+| Agent | How the installer wires it |
+|---|---|
+| OpenCode | Plugin (`opencode-knocode` bundle registered in `opencode.jsonc`, merged with existing entries) |
+| Copilot (VS Code) | Agent Plugin (prompt/tool-use hooks + internal MCP; `@knocode` chat extension via dev installer only) |
+| Claude Code | Skill + MCP server entry (`mcpServers.knocode`) |
+| Cursor | Skill + MCP server entry (`mcpServers.knocode`) |
+| Gemini CLI | Skill + MCP server entry (`mcpServers.knocode`) |
+| Codex | Skill + `[mcp_servers.knocode]` entry in `config.toml` |
+| Cline | Skill + MCP server entry (`mcpServers.knocode`) — no global RTK integration (run `rtk init --agent cline` inside each project; writes `.clinerules`) |
+
+The MCP entries all point at the same shared stdio bridge (`~/.knocode/mcp-server/knocode-mcp.mjs`), which forwards to the daemon's canonical `knocode_context` tool. Skills land in each agent's global skills folder.
+
+### Adding knocode to another MCP client manually
+
+Pick **none** at the installer's agent checkbox (just press Enter) — the installer still deploys the shared MCP bridge and prints these steps. They work with any MCP-capable client:
+
+1. Keep the daemon running: open a new terminal, run `knocode init` inside a project. The daemon serves MCP at `http://127.0.0.1:9527/mcp` (tool: `knocode_context`).
+2. Add this to your client's MCP config file, then restart the client (requires Node.js):
+   ```json
+   { "mcpServers": { "knocode": { "command": "node", "args": ["~/.knocode/mcp-server/knocode-mcp.mjs"] } } }
+   ```
+   Use the full home path (`/home/you/...` or `C:/Users/you/...`) — most clients don't expand `~`.
+3. Copy the skill: unpack the `skills/knocode` folder from the release archive (the same `.zip` linked under Install above) into your client's skills directory, so the agent discovers knocode's usage instructions.
+
+**Uninstall (Windows):**
 
 ```powershell
-powershell -ExecutionPolicy Bypass -c 'irm https://github.com/leonortega/knocode/releases/latest/download/uninstall.ps1 -OutFile "$env:TEMP\knocode-uninstall.ps1"; if ($?) { & "$env:TEMP\knocode-uninstall.ps1" }'   # Windows
-curl -fsSL https://github.com/leonortega/knocode/releases/latest/download/uninstall.sh | bash -s -- --force                       # Linux/macOS
+irm https://raw.githubusercontent.com/leonortega/knocode/main/uninstall.ps1 | iex
+```
+
+**Uninstall (Linux / macOS):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/leonortega/knocode/main/uninstall.sh | bash
 ```
 
 ---

@@ -10,6 +10,9 @@
   Default (no flags): stops daemon, removes project build artifacts (target/release/knocode*.exe),
   opencode plugins (project-local + global), RTK, and ALL user/project data
   (%USERPROFILE%\.knocode, .knocode/, sockets). Idempotent - safe to re-run.
+  Also removes installer residue: ~/.knocode/integrations bundles, the
+  KNOCODE_LOG_LEVEL user env var, and installer-written logging config
+  (~/.config/knocode/config.toml is deleted only when it holds nothing else).
 
   This is strict mode: no fallbacks. Default uninstalls everything. Use -KeepExternal / -KeepData
   to preserve tools or data. -KeepBuild preserves target/.
@@ -156,6 +159,15 @@ if ((Test-Path $knocodeBinDir) -and -not (Get-ChildItem -LiteralPath $knocodeBin
     try { Remove-Item -LiteralPath $knocodeBinDir -Force -ErrorAction SilentlyContinue; Ok "removed empty $knocodeBinDir" } catch {}
   }
 }
+# Installed integration bundles (release zip payload: opencode-knocode,
+# knocode-mcp, copilot-plugin sources, staged skill). Installed artifact like
+# binaries - always remove, independent of -KeepData/-RemoveRepo.
+$intsDir = Join-Path $env:USERPROFILE ".knocode\integrations"
+if (Test-Path $intsDir) {
+  if ($PSCmdlet.ShouldProcess($intsDir, "Remove-Item")) {
+    try { Remove-Item -LiteralPath $intsDir -Recurse -Force -ErrorAction Stop; Ok "removed $intsDir (integration bundles)" } catch { Warn "failed to remove $intsDir : $_" }
+  } else { Skip "would remove $intsDir" }
+} else { Skip "not found $intsDir" }
 # Revert USER PATH (HKCU Environment) — only our exact entry, idempotent
 try {
   $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -171,6 +183,17 @@ try {
     if (($env:Path -split ';') -contains $knocodeBinDir) { $env:Path = (($env:Path -split ';') | Where-Object { $_ -ne $knocodeBinDir }) -join ';' }
   }
 } catch { Warn "could not revert USER PATH: $_" }
+# Revert KNOCODE_LOG_LEVEL (HKCU Environment) - set by the installer, machine
+# state like PATH. Reinstall re-sets it.
+try {
+  if ([Environment]::GetEnvironmentVariable('KNOCODE_LOG_LEVEL', 'User')) {
+    if ($PSCmdlet.ShouldProcess("KNOCODE_LOG_LEVEL (User)", "Remove environment variable")) {
+      [Environment]::SetEnvironmentVariable('KNOCODE_LOG_LEVEL', $null, 'User')
+      Ok "removed KNOCODE_LOG_LEVEL from user environment"
+    } else { Skip "would remove KNOCODE_LOG_LEVEL from user environment" }
+  } else { Skip "KNOCODE_LOG_LEVEL not set in user environment" }
+  if ($env:KNOCODE_LOG_LEVEL) { Remove-Item Env:KNOCODE_LOG_LEVEL -ErrorAction SilentlyContinue }
+} catch { Warn "could not revert KNOCODE_LOG_LEVEL: $_" }
 
 # 2. Remove build artifacts - repository folders are NEVER deleted by default (use -RemoveRepo)
 if ($KeepBuild -or -not $doRemoveRepo) {
@@ -649,6 +672,37 @@ if (-not $doRemoveData) {
       } else { Skip "would remove .knocode/" }
     } else { Skip "keeping repository .knocode/ (use -RemoveRepo to delete)" }
   } else { Skip "not found .knocode/" }
+
+  # Installer-written user config (~/.config/knocode/config.toml): delete when it
+  # holds nothing but our [logging] block, else strip just the managed level line
+  # (error/info/debug - the only values the installer writes). Anything else stays.
+  $userCfg = Join-Path $env:USERPROFILE ".config\knocode\config.toml"
+  if (Test-Path $userCfg) {
+    try {
+      $cfgLines = @(Get-Content -LiteralPath $userCfg)
+      $meaningful = @($cfgLines | Where-Object { $_.Trim() -ne '' -and $_.Trim() -notmatch '^#' })
+      $ours = @($meaningful | Where-Object { $_.Trim().ToLower() -match '^\[logging\]$' -or $_.Trim() -match '^(level|file_path|max_size_mb|retention_days)\s*=' })
+      if ($meaningful.Count -gt 0 -and $ours.Count -eq $meaningful.Count) {
+        if ($PSCmdlet.ShouldProcess($userCfg, "Remove-Item")) {
+          Remove-Item -LiteralPath $userCfg -Force -ErrorAction Stop
+          Ok "removed installer-only user config ($userCfg)"
+          $cfgDir = Split-Path $userCfg
+          if (-not (Get-ChildItem -LiteralPath $cfgDir -Force -ErrorAction SilentlyContinue)) {
+            Remove-Item -LiteralPath $cfgDir -Force -ErrorAction SilentlyContinue
+          }
+        } else { Skip "would remove installer-only user config ($userCfg)" }
+      }
+      else {
+        $managed = @($cfgLines | Where-Object { $_ -match '^\s*level\s*=\s*"(error|info|debug)"' })
+        if ($managed.Count -gt 0) {
+          if ($PSCmdlet.ShouldProcess($userCfg, "Remove managed [logging] level")) {
+            Set-Utf8NoBom $userCfg (($cfgLines | Where-Object { $_ -notmatch '^\s*level\s*=\s*"(error|info|debug)"' }) -join "`r`n")
+            Ok "removed managed [logging] level from $userCfg (user settings kept)"
+          } else { Skip "would remove managed [logging] level from $userCfg" }
+        } else { Skip "no managed [logging] level in $userCfg" }
+      }
+    } catch { Warn "user config cleanup failed ($userCfg): $_" }
+  } else { Skip "not found $userCfg" }
 }
 
 # 6. Final status

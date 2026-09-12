@@ -5,6 +5,9 @@
 # repository steps are skipped when no source checkout is present.
 # Idempotent. Usage: bash scripts/uninstall.sh [--keep-external] [--keep-data] [--keep-build] [--remove-repo] [--force] [--dry-run]
 # Default: remove binaries, plugins, ALL external tools and ALL data (prompts unless --force).
+# Also removes installer residue: ~/.knocode/integrations bundles, KNOCODE_LOG_LEVEL
+# shell exports, and installer-written logging config (~/.config/knocode/config.toml
+# is deleted only when it holds nothing else).
 # Repository files (.opencode/plugins/, target/, .knocode/) are NEVER deleted unless --remove-repo.
 # Use --keep-* to preserve. Legacy --remove-external/--remove-data still accepted (now default).
 set -euo pipefail
@@ -71,8 +74,11 @@ done
 if [ -d "$HOME/.knocode/bin" ] && [ -z "$(ls -A "$HOME/.knocode/bin" 2>/dev/null)" ]; then
   if $DRY_RUN; then skip "would rmdir ~/.knocode/bin"; else rmdir "$HOME/.knocode/bin" 2>/dev/null && ok "removed empty ~/.knocode/bin/"; fi
 fi
-# Revert PATH: drop our marker block from ~/.profile and ~/.bashrc (idempotent)
-for rc in "$HOME/.profile" "$HOME/.bashrc"; do
+# Installed integration bundles (release zip payload). Installed artifact like
+# binaries - always remove, independent of --keep-data.
+if [ -d "$HOME/.knocode/integrations" ]; then if $DRY_RUN; then skip "would rm -rf ~/.knocode/integrations (integration bundles)"; else rm -rf "$HOME/.knocode/integrations" && ok "removed ~/.knocode/integrations (integration bundles)"; fi; else skip "not found ~/.knocode/integrations"; fi
+# Revert PATH: drop our marker block from shell rc files (idempotent)
+for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
   if [ -f "$rc" ] && grep -qs "KNOCODE_BIN_PATH" "$rc"; then
     if $DRY_RUN; then skip "would remove knocode PATH lines from $rc"
     else
@@ -80,6 +86,17 @@ for rc in "$HOME/.profile" "$HOME/.bashrc"; do
     fi
   else skip "no knocode PATH entry in $rc"; fi
 done
+# Revert KNOCODE_LOG_LEVEL (export lines written by the installer) - machine
+# state like PATH. Only our marker comment + plain export lines are removed.
+for rc in "$HOME/.profile" "$HOME/.bashrc" "$HOME/.zshrc"; do
+  if [ -f "$rc" ] && grep -qs "KNOCODE_LOG_LEVEL" "$rc"; then
+    if $DRY_RUN; then skip "would remove KNOCODE_LOG_LEVEL lines from $rc"
+    else
+      sed -i.bak '/# KNOCODE_LOG_LEVEL: knocode log verbosity/d; /^export KNOCODE_LOG_LEVEL=/d' "$rc" 2>/dev/null && rm -f "$rc.bak" 2>/dev/null && ok "removed KNOCODE_LOG_LEVEL entry from $rc" || warn "failed to edit $rc"
+    fi
+  else skip "no KNOCODE_LOG_LEVEL entry in $rc"; fi
+done
+unset KNOCODE_LOG_LEVEL 2>/dev/null || true
 
 # 2. Build artifacts (use .opencode/.knocode relative, not absolute repo)
 if $KEEP_BUILD; then info "Skipping build artifact removal (--keep-build)";
@@ -353,6 +370,30 @@ else
     [ "$d" = "$ROOT/.knocode" ] && disp=".knocode/"
     if [ -d "$d" ] || [ -f "$d" ]; then if $DRY_RUN; then skip "would rm -rf $disp"; else rm -rf "$d" && ok "removed $disp"; fi; else skip "not found $disp"; fi
   done
+  # Installer-written user config (~/.config/knocode/config.toml): delete when it
+  # holds nothing but our [logging] block, else strip just the managed level line
+  # (error/info/debug - the only values the installer writes). Anything else stays.
+  USER_CFG="$HOME/.config/knocode/config.toml"
+  if [ -f "$USER_CFG" ]; then
+    if $DRY_RUN; then skip "would clean knocode logging config from $USER_CFG"
+    elif command -v node >/dev/null 2>&1; then
+      USER_CFG_PATH="$USER_CFG" node -e '
+const fs=require("fs");
+const p=process.env.USER_CFG_PATH;
+const lines=fs.readFileSync(p,"utf8").split(/\r?\n/);
+const meaningful=lines.filter(l=>l.trim()!==""&&!/^\s*#/.test(l));
+const ours=meaningful.filter(l=>/^\[logging\]$/i.test(l.trim())||/^(level|file_path|max_size_mb|retention_days)\s*=/.test(l.trim()));
+if(meaningful.length>0&&ours.length===meaningful.length){
+  fs.unlinkSync(p);console.log("removed");
+}else{
+  const kept=lines.filter(l=>!/^\s*level\s*=\s*"(error|info|debug)"/.test(l));
+  if(kept.length!==lines.length){fs.writeFileSync(p,kept.join("\n"));console.log("stripped");}
+  else{console.error("absent");process.exit(1);}
+}' 2>/dev/null && ok "cleaned knocode logging config ($USER_CFG)" || skip "no installer-only logging config at $USER_CFG"
+      _cfgdir="$(dirname "$USER_CFG")"
+      if [ -d "$_cfgdir" ] && [ -z "$(ls -A "$_cfgdir" 2>/dev/null)" ]; then rmdir "$_cfgdir" 2>/dev/null || true; fi
+    else skip "node not available - cannot clean $USER_CFG"; fi
+  else skip "not found $USER_CFG"; fi
 fi
 
 info "Uninstall complete."

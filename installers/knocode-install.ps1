@@ -22,10 +22,12 @@
       integrations are wired via `rtk init -g` for each selected agent, plus the
       global compression hook (`rtk init -g --auto-patch`).
 
-  Agent integrations (OpenCode / Copilot) are optional and
-  selected interactively. They use the integration bundles shipped inside the
-  release zip (integrations/opencode-knocode, integrations/knocode-mcp,
-  integrations/knocode-copilot-plugin) - no npm registry needed.
+  Agent integrations (OpenCode, Copilot, Claude, Cursor, Gemini, Codex, Cline)
+  are optional and selected interactively (checkbox). Bespoke wiring for
+  OpenCode / Copilot plus universal MCP+skill wiring for the rest - all from
+  the integration bundles shipped inside the release zip
+  (integrations/opencode-knocode, integrations/knocode-mcp,
+  integrations/knocode-copilot-plugin, skills/knocode) - no npm registry needed.
   Use -SkipPrereqs to disable auto-installs.
 
   Latest release (one-liner):
@@ -40,7 +42,7 @@
 
 .PARAMETER Agents
   Comma-separated agents to wire after install, e.g. "-Agents opencode".
-  Valid: opencode, copilot.
+  Valid: opencode, copilot, claude, cursor, gemini, codex, cline.
 
 .PARAMETER AllAgents
   Wire all supported agents without prompting.
@@ -73,12 +75,44 @@ try {
   $OutputEncoding = [System.Text.Encoding]::UTF8
 } catch {}
 $Repo = "leonortega/knocode"
-$AgentCatalog = @("opencode", "copilot")
+$AgentCatalog = @("opencode", "copilot", "claude", "cursor", "gemini", "codex", "cline")
+$UniversalAgents = @("claude", "cursor", "gemini", "codex", "cline")
 
 function Write-Step($m) { Write-Host "[knocode] $m" -ForegroundColor Cyan }
 function Write-Ok($m) { Write-Host "  [OK] $m" -ForegroundColor Green }
 function Write-Warn($m) { Write-Host "  [WARN] $m" -ForegroundColor Yellow }
 function Fail($m) { Write-Host "  [FAIL] $m" -ForegroundColor Red; throw $m }
+
+# UTF-8 WITHOUT BOM: PowerShell 5.1 `Set-Content -Encoding UTF8` writes a BOM,
+# which breaks strict JSON/TOML parsers. All machine-written configs go through
+# this helper.
+function Set-Utf8NoBom($path, $content) { [IO.File]::WriteAllText($path, [string]$content, (New-Object System.Text.UTF8Encoding($false))) }
+
+# Merge our plugin URL into opencode.jsonc, preserving any other entries
+# (e.g. RTK's plugin). Never overwrites user config: writes fresh only when the
+# file is missing, merges when parseable, warns + skips when unparseable.
+function Merge-OpencodePlugin($configPath, $pluginUrl) {
+  $fresh = "{`n  `"`$schema`": `"https://opencode.ai/config.json`",`n  `"plugin`": [`"$pluginUrl`"]`n}`n"
+  if (-not (Test-Path $configPath)) {
+    try { Set-Utf8NoBom $configPath $fresh; Write-Ok "opencode config written at $configPath" } catch { Write-Warn "failed to write $configPath : $($_.Exception.Message)" }
+    return
+  }
+  try {
+    $raw = Get-Content -LiteralPath $configPath -Raw
+    if ($raw -match [regex]::Escape($pluginUrl)) { Write-Ok "opencode plugin already registered in $configPath"; return }
+    $clean = ($raw -replace '(?m)^\s*//.*$','' -replace '/\*.*?\*/','') -replace ',\s*([\}\]])', '$1'
+    $obj = $clean | ConvertFrom-Json -ErrorAction Stop
+    $plugins = @()
+    if ($obj.PSObject.Properties['plugin'] -and $obj.plugin) {
+      if ($obj.plugin -is [System.Array]) { $plugins = @($obj.plugin) } else { $plugins = @($obj.plugin) }
+    }
+    if ($plugins -contains $pluginUrl) { Write-Ok "opencode plugin already registered in $configPath"; return }
+    $plugins += $pluginUrl
+    $obj | Add-Member -NotePropertyName 'plugin' -NotePropertyValue $plugins -Force
+    Set-Utf8NoBom $configPath ($obj | ConvertTo-Json -Depth 10)
+    Write-Ok "opencode plugin merged into $configPath (existing entries kept)"
+  } catch { Write-Warn "could not merge opencode plugin into $configPath (leaving user config untouched): $($_.Exception.Message)" }
+}
 
 function Add-ToUserPath($dir) {
   try {
@@ -175,20 +209,27 @@ function Select-Agents {
   }
   if ($AllAgents) { return @($AgentCatalog) }
 
-  # Interactive prompt: each agent defaults to No - pick the ones you want
+  # Interactive checkbox: numbered list, single answer (e.g. 1,3 - 'all' - Enter for none).
+  # Default when stdin is not a console: NO agent integrations.
   $interactive = $true
   try { if ([Console]::IsInputRedirected) { $interactive = $false } } catch { $interactive = $false }
   if (-not $interactive) {
     Write-Step "non-interactive run - no agent integrations installed (pass -Agents opencode or -AllAgents)"
     return @()
   }
-  Write-Step "Which agent integrations should be installed?"
+  Write-Step "Which agent integrations should be installed? (checkbox)"
+  for ($i = 0; $i -lt $AgentCatalog.Count; $i++) { Write-Host "  [$($i + 1)] $($AgentCatalog[$i])" }
+  $r = (Read-Host "  Enter numbers separated by commas (e.g. 1,3), 'all', or press Enter for none").Trim().ToLower()
+  if ($r -eq "" -or $r -eq "none") { return @() }
+  if ($r -eq "all") { return @($AgentCatalog) }
   $sel = @()
-  foreach ($a in $AgentCatalog) {
-    $r = Read-Host "  Wire up $a ? [y/N]"
-    if ($r -match "^(y|yes)$") { $sel += $a } else { Write-Host "  [SKIP] $a" -ForegroundColor DarkGray }
+  foreach ($tok in ($r -split "[,\s]+")) {
+    if ($tok -eq "") { continue }
+    $n = 0
+    if ([int]::TryParse($tok, [ref]$n) -and $n -ge 1 -and $n -le $AgentCatalog.Count) { $sel += $AgentCatalog[$n - 1] }
+    else { Write-Warn "ignoring invalid selection '$tok'" }
   }
-  return $sel
+  return @($sel | Select-Object -Unique)
 }
 
 Write-Step "Knocode installer (prebuilt release)"
@@ -281,16 +322,21 @@ try {
   }
   else { Write-Warn "no bundled integrations in $asset - agent wiring will be unavailable" }
 
-  # 5c. Install the knocode agent skill (opencode — agent-native discovery)
+  # 5c. Stage the knocode agent skill for section 9 (universal agents only):
+  # $extract is deleted in the finally block below, but wiring runs after it.
+  # NOTE: no skill install for opencode/Copilot — the plugin (opencode) and the
+  # hooks (Copilot) inject context transparently (dev installer is source of
+  # truth; legacy skill dirs are removed by the uninstaller).
   $skillSrc = Join-Path $extract "skills\knocode"
+  $skillStaged = ""
   if (Test-Path (Join-Path $skillSrc "SKILL.md")) {
-    $ocDir = Join-Path $env:USERPROFILE ".config\opencode"
-    $skillDst = Join-Path $ocDir "skills\knocode"
-    New-Item -ItemType Directory -Force -Path (Join-Path $ocDir "skills") | Out-Null
-    Copy-Item -LiteralPath $skillSrc -Destination $skillDst -Recurse -Force
-    Write-Ok "knocode skill installed to $skillDst (opencode agent-native)"
+    if ($intsDst -ne "" -and (Test-Path $intsDst)) {
+      $skillStaged = Join-Path $intsDst "skills\knocode"
+      New-Item -ItemType Directory -Force -Path (Join-Path $intsDst "skills") | Out-Null
+      Copy-Item -LiteralPath $skillSrc -Destination $skillStaged -Recurse -Force
+    }
   }
-  else { Write-Warn "knocode skill not found in $asset - skipping skill install" }
+  else { Write-Warn "knocode skill not found in $asset - universal agent skills will be skipped" }
 }
 finally {
   Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
@@ -331,12 +377,38 @@ else {
 }
 
 # =============================================================================
-# 9. Agent integrations (OpenCode / Copilot) - optional
+# 9. Agent integrations (7 agents) - optional
 # =============================================================================
+# Shared MCP stdio bridge (bundled knocode-mcp: zero-dep single file, prebuilt
+# at release time). Deployed ALWAYS - even with no agents selected - so the
+# manual-MCP hint below points at a real file; every agent MCP entry points at it.
+$mcpSrc = Join-Path $intsDst "knocode-mcp\dist\index.js"
+$mcpDstDir = Join-Path $env:USERPROFILE ".knocode\mcp-server"
+$mcpDst = Join-Path $mcpDstDir "knocode-mcp.mjs"
+$haveBridge = $false
+if (($intsDst -ne "") -and ($mcpSrc -ne "") -and (Test-Path $mcpSrc)) {
+  try { New-Item -ItemType Directory -Force -Path $mcpDstDir | Out-Null; Copy-Item -LiteralPath $mcpSrc -Destination $mcpDst -Force; $haveBridge = $true; Write-Ok "shared MCP bridge at $mcpDst" }
+  catch { Write-Warn "MCP bridge deploy failed: $($_.Exception.Message)" }
+} elseif ($intsDst -ne "" -and (Test-Path $intsDst)) { Write-Warn "bundled knocode-mcp dist not found - skipping MCP entries (skills still install)" }
+$mcpScript = ($mcpDst -replace '\\','/')
+
+# Manual-MCP hint: printed when no agent integrations were selected.
+function Show-McpHint {
+  if ($haveBridge) {
+    Write-Step "No agent integrations selected - use knocode as a plain MCP server instead:"
+    Write-Host "  1. Keep the daemon running: open a new terminal, run 'knocode init' inside a project"
+    Write-Host "     (MCP at http://127.0.0.1:9527/mcp, tool: knocode_context)"
+    Write-Host "  2. Add this to your MCP client's config file, then restart the client:"
+    Write-Host "     { `"mcpServers`": { `"knocode`": { `"command`": `"node`", `"args`": [`"$mcpScript`"] } } }"
+    Write-Host "  3. Requires Node.js. Re-run this installer and pick agents to wire one automatically."
+  }
+  else { Write-Warn "No agent integrations selected - and the MCP bridge is unavailable (see warning above). Re-run with -Agents to wire an agent." }
+}
 $agentSel = @(Select-Agents)
 if ($agentSel.Count -eq 0) {
   Write-Step "No agent integrations selected."
-  Write-Step "Re-run with -Agents opencode,copilot (or -AllAgents) to wire agent integrations later."
+  Write-Step "Re-run with -Agents opencode,copilot,claude,cursor,gemini,codex,cline (or -AllAgents) to wire agent integrations later."
+  Show-McpHint
 }
 else {
   Write-Step "Wiring agent integrations: $($agentSel -join ', ')"
@@ -367,14 +439,14 @@ else {
         $ocDir = Join-Path $env:USERPROFILE ".config\opencode"
         New-Item -ItemType Directory -Force -Path (Join-Path $ocDir "node_modules") | Out-Null
         Copy-Item -Path $pluginSrc -Destination (Join-Path $ocDir "node_modules\opencode-knocode") -Recurse -Force
-        $ocCfg = Join-Path $ocDir "opencode.jsonc"
-        if (-not (Test-Path $ocCfg) -or -not ((Get-Content -LiteralPath $ocCfg -Raw -ErrorAction SilentlyContinue) -match "opencode-knocode")) {
-          # NOTE: file:// spec (not the bare npm name) — opencode-knocode is not
-          # published to the npm registry, and a bare spec makes the opencode
-          # loader fail at the install stage so the plugin never loads.
-          $bundleFileUrl = "file://" + ((Join-Path $ocDir "node_modules\opencode-knocode") -replace '\\','/')
-          Set-Content -LiteralPath $ocCfg -Value "{`n  `"`$schema`": `"https://opencode.ai/config.json`",`n  `"plugin`": [`"$bundleFileUrl`"]`n}`n" -Encoding UTF8
-        }
+        # NOTE: file:// spec (not the bare npm name) — opencode-knocode is not
+        # published to the npm registry, and a bare spec makes the opencode
+        # loader fail at the install stage so the plugin never loads.
+        $bundleFileUrl = "file://" + ((Join-Path $ocDir "node_modules\opencode-knocode") -replace '\\','/')
+        Merge-OpencodePlugin (Join-Path $ocDir "opencode.jsonc") $bundleFileUrl
+        # Remove legacy global path plugin (now bundled)
+        $legacyPlugin = Join-Path $env:USERPROFILE ".config\opencode\plugins\knocode.ts"
+        if (Test-Path $legacyPlugin) { try { Remove-Item -LiteralPath $legacyPlugin -Force; Write-Ok "removed legacy global plugin knocode.ts" } catch {} }
         Write-Ok "opencode plugin installed (bundled opencode-knocode)"
         Write-Step "Restart opencode to load the plugin (daemon http://127.0.0.1:9527)"
       }
@@ -401,7 +473,7 @@ else {
     }
     catch { Write-Warn "Copilot MCP cleanup failed: $($_.Exception.Message)" }
 
-    # --- Copilot Agent Plugin (hooks: SessionStart/PreToolUse/PostToolUse) ---
+    # --- Copilot Agent Plugin (hooks: UserPromptSubmit/PreToolUse) ---
     # Deploy bundled plugin to %USERPROFILE%\.knocode\copilot-plugin (repo-independent,
     # survives repo moves). The knocode MCP inside it (servers/knocode-mcp.mjs via the
     # plugin's own mcp.json) is internal to the plugin and never exposed globally.
@@ -412,7 +484,7 @@ else {
         # Fresh copy (idempotent update): clear destination first
         if (Test-Path $cpPluginDst) { Remove-Item -LiteralPath $cpPluginDst -Recurse -Force -ErrorAction SilentlyContinue }
         New-Item -ItemType Directory -Force -Path $cpPluginDst | Out-Null
-        Copy-Item -Path (Join-Path $cpPluginSrc "*") -Destination $cpPluginDst -Recurse -Force
+        Copy-Item -Path (Join-Path $cpPluginSrc "*") -Destination $cpPluginDst -Recurse -Force -Exclude "node_modules"
         Write-Ok "Copilot Agent Plugin deployed to $cpPluginDst (hooks + MCP)"
       } catch { Write-Warn "failed to deploy Copilot Agent Plugin: $($_.Exception.Message)" }
     } else { Write-Warn "bundled knocode-copilot-plugin not found - skipping Agent Plugin deploy" }
@@ -422,6 +494,8 @@ else {
     # deployed to $cpPluginDst is only the hook-script home. Registration happens by
     # writing a hooks file into ~/.copilot/hooks/ (the same mechanism RTK uses for
     # rtk-rewrite.json), with an absolute script path (forward slashes: JSON-safe).
+    # UserPromptSubmit injects the context (fires every turn, incl. tool-less
+    # answers); PreToolUse is the consume-once retry when submit failed.
     if (Test-Path (Join-Path $cpPluginDst "scripts\knocode-hook.mjs")) {
       try {
         $hookScript = (Join-Path $cpPluginDst "scripts\knocode-hook.mjs") -replace '\\', '/'
@@ -429,18 +503,18 @@ else {
 {
   "version": 1,
   "hooks": {
-    "SessionStart": [
-      {
-        "type": "command",
-        "command": "node \"$hookScript\" session-start",
-        "timeout": 15
-      }
-    ],
     "UserPromptSubmit": [
       {
         "type": "command",
         "command": "node \"$hookScript\" user-prompt-submit",
-        "timeout": 10
+        "timeout": 5
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "node \"$hookScript\" pre-tool-use",
+        "timeout": 15
       }
     ]
   }
@@ -450,20 +524,93 @@ else {
         New-Item -ItemType Directory -Force -Path $copilotHooksDir | Out-Null
         $knocodeHooksFile = Join-Path $copilotHooksDir "knocode-context.json"
         [IO.File]::WriteAllText($knocodeHooksFile, $knocodeHooksJson, (New-Object System.Text.UTF8Encoding($false)))
-        Write-Ok "Copilot hooks registered at $knocodeHooksFile (SessionStart + UserPromptSubmit)"
+        Write-Ok "Copilot hooks registered at $knocodeHooksFile (UserPromptSubmit + PreToolUse)"
       } catch { Write-Warn "failed to write Copilot hooks file: $($_.Exception.Message)" }
     } else { Write-Warn "knocode-hook.mjs not deployed - skipping Copilot hooks registration" }
 
-    # --- Knocode agent skill (Copilot global skills folder: ~/.copilot/skills) ---
-    $cpSkillSrc = Join-Path $extract "skills\knocode"
-    if (Test-Path (Join-Path $cpSkillSrc "SKILL.md")) {
+    # NOTE: no skill install for Copilot — context flows through the hooks,
+    # so a skill is unnecessary (dev installer is source of truth; legacy
+    # ~/.copilot/skills/knocode is removed by the uninstaller).
+
+    # NOTE: the @knocode VS Code extension (VSIX via `code` CLI) is dev-installer
+    # only for now - the release zip does not ship it yet.
+  }
+
+  # --- Universal agents (MCP + skill): claude, cursor, gemini, codex, cline ---
+  # Skill copy per agent global folder + `knocode` MCP server entry in the agent's
+  # global config. Sources are the staged release bundles (no repo checkout here).
+  # Fail-open per agent: one agent's failure never blocks others.
+  $uniSel = @($agentSel | Where-Object { $UniversalAgents -contains $_ })
+  if ($uniSel.Count -gt 0) {
+    Write-Step "Configuring universal agents (MCP + skill: $($uniSel -join ', '))..."
+    # Bridge is pre-deployed above (section 9 header) - $mcpDst/$haveBridge/$mcpScript.
+
+    function Install-UniversalSkill($agent, $destDir) {
+      if (-not ($skillStaged -ne "" -and (Test-Path (Join-Path $skillStaged "SKILL.md")))) { Write-Warn "staged knocode skill not found - skipping $agent skill"; return }
+      try { New-Item -ItemType Directory -Force -Path (Split-Path $destDir) | Out-Null; if (Test-Path $destDir) { Remove-Item -LiteralPath $destDir -Recurse -Force }; Copy-Item -LiteralPath $skillStaged -Destination $destDir -Recurse -Force; Write-Ok "$agent skill at $destDir" }
+      catch { Write-Warn "$agent skill copy failed: $($_.Exception.Message)" }
+    }
+    function Merge-KnocodeMcpJson($agent, $configPath, $displayPath) {
+      if (-not $script:haveBridge) { Write-Step "  [SKIP] $agent MCP skipped (no bridge)"; return }
       try {
-        $cpSkillDst = Join-Path $env:USERPROFILE ".copilot\skills"
-        New-Item -ItemType Directory -Force -Path $cpSkillDst | Out-Null
-        Copy-Item -LiteralPath $cpSkillSrc -Destination (Join-Path $cpSkillDst "knocode") -Recurse -Force
-        Write-Ok "knocode skill installed to $cpSkillDst\knocode (Copilot global skills)"
-      } catch { Write-Warn "knocode skill copy (Copilot) failed: $($_.Exception.Message)" }
-    } else { Write-Warn "knocode skill not found in release archive - skipping Copilot agent skill install" }
+        $obj = $null
+        if (Test-Path $configPath) {
+          $raw = Get-Content -LiteralPath $configPath -Raw
+          if ($raw -and $raw.Trim()) {
+            try { $obj = $raw | ConvertFrom-Json -ErrorAction Stop }
+            catch {
+              $clean = ($raw -replace '(?m)^\s*//.*$','' -replace '/\*.*?\*/','') -replace ',\s*([\}\]])', '$1'
+              $obj = $clean | ConvertFrom-Json -ErrorAction Stop
+            }
+          }
+        }
+        if (-not $obj) { $obj = [PSCustomObject]@{} }
+        if (-not $obj.PSObject.Properties['mcpServers']) { $obj | Add-Member -NotePropertyName 'mcpServers' -NotePropertyValue ([PSCustomObject]@{}) }
+        elseif ($obj.mcpServers -isnot [PSCustomObject]) { Write-Warn "$agent MCP: existing mcpServers is not an object - skipping $displayPath"; return }
+        $entry = [PSCustomObject]@{ command = "node"; args = @($script:mcpScript) }
+        $obj.mcpServers | Add-Member -NotePropertyName 'knocode' -NotePropertyValue $entry -Force
+        New-Item -ItemType Directory -Force -Path (Split-Path $configPath) | Out-Null
+        Set-Utf8NoBom $configPath ($obj | ConvertTo-Json -Depth 10)
+        Write-Ok "$agent MCP registered in $displayPath"
+      } catch { Write-Warn "$agent MCP config failed ($displayPath): $($_.Exception.Message)" }
+    }
+
+    if ($uniSel -contains "claude") {
+      Install-UniversalSkill "claude" (Join-Path $env:USERPROFILE ".claude\skills\knocode")
+      Merge-KnocodeMcpJson "claude" (Join-Path $env:USERPROFILE ".claude.json") "~\.claude.json (user scope)"
+    }
+    if ($uniSel -contains "cursor") {
+      Install-UniversalSkill "cursor" (Join-Path $env:USERPROFILE ".cursor\skills\knocode")
+      Merge-KnocodeMcpJson "cursor" (Join-Path $env:USERPROFILE ".cursor\mcp.json") "~\.cursor\mcp.json"
+    }
+    if ($uniSel -contains "gemini") {
+      Install-UniversalSkill "gemini" (Join-Path $env:USERPROFILE ".gemini\skills\knocode")
+      Merge-KnocodeMcpJson "gemini" (Join-Path $env:USERPROFILE ".gemini\settings.json") "~\.gemini\settings.json"
+    }
+    if ($uniSel -contains "codex") {
+      $codexSkill = Join-Path $env:USERPROFILE ".knocode\skills\knocode"
+      Install-UniversalSkill "codex" $codexSkill
+      if ($haveBridge) {
+        try {
+          $codexCfg = Join-Path $env:USERPROFILE ".codex\config.toml"
+          New-Item -ItemType Directory -Force -Path (Split-Path $codexCfg) | Out-Null
+          $text = ""; if (Test-Path $codexCfg) { $text = Get-Content -LiteralPath $codexCfg -Raw }
+          $skillPath = ($codexSkill -replace '\\','/')
+          if ($text -notmatch '\[mcp_servers\.knocode\]') {
+            $text += "`n[mcp_servers.knocode]`ncommand = `"node`"`nargs = [`"$mcpScript`"]`n"
+          }
+          if ($text -notmatch [regex]::Escape($skillPath)) {
+            $text += "`n[[skills.config]]`npath = `"$skillPath`"`nenabled = true`n"
+          }
+          Set-Utf8NoBom $codexCfg $text
+          Write-Ok "codex MCP + skill registered in ~\.codex\config.toml"
+        } catch { Write-Warn "codex config failed: $($_.Exception.Message)" }
+      } else { Write-Step "  [SKIP] codex MCP skipped (no bridge)" }
+    }
+    if ($uniSel -contains "cline") {
+      Install-UniversalSkill "cline" (Join-Path $env:USERPROFILE ".cline\skills\knocode")
+      Merge-KnocodeMcpJson "cline" (Join-Path $env:USERPROFILE ".cline\data\settings\cline_mcp_settings.json") "~\.cline\data\settings\cline_mcp_settings.json"
+    }
   }
 
   if ($agentSel.Count -gt 0) { Write-Step "Agent integrations wired: $($agentSel -join ', ')" }
@@ -485,7 +632,7 @@ if ($NoRtk) {
 }
 elseif ($agentSel.Count -eq 0) {
   $rtkStatus = "skipped (no agent integrations selected)"
-  if ($WithRtk) { Write-Warn "-WithRtk was set but no agent integrations were selected - RTK not installed (re-run with -Agents opencode,copilot)" }
+  if ($WithRtk) { Write-Warn "-WithRtk was set but no agent integrations were selected - RTK not installed (re-run with -Agents opencode,copilot,claude,cursor,gemini,codex,cline)" }
 }
 else {
   $wantRtk = [bool]$WithRtk
@@ -548,30 +695,50 @@ else {
 }
 
 # =============================================================================
-# 9b. RTK agent wiring - RTK ships its own OpenCode (--opencode) and Copilot
-#     (--copilot) integrations. For every agent the user selected, hand off to
-#     RTK's own `rtk init -g`. Fail-open: never blocks the knocode install.
+# 9b. RTK agent wiring - RTK ships its own per-agent integrations (global hooks
+#     for claude/cursor/gemini/codex/copilot, plugin for opencode; cline is
+#     project-scoped .clinerules only). Hand off to RTK's own `rtk init` with the
+#     documented per-agent flags. Fail-open: never blocks the knocode install.
 # =============================================================================
 if ($agentSel.Count -gt 0 -and $rtkCmd) {
   Write-Step "Wiring RTK integrations for selected agents (external tool)..."
   if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
     Write-Warn "ripgrep (rg) not on PATH - some rtk filters need it (winget install BurntSushi.ripgrep.MSVC)"
   }
-  foreach ($a in $agentSel) {
-    Write-Step "  [$($agentSel.IndexOf($a) + 1)/$($agentSel.Count)] wiring rtk for $a (runs: rtk init -g --$a --auto-patch - usually takes a few seconds)..."
+  # Per-agent RTK flags (rtk-ai/rtk): claude is the default global hook,
+  # cursor/gemini/codex/copilot/opencode take their own global flags. Cline has
+  # NO global integration (prompt-level `.clinerules`, project-scoped) — skipped
+  # with guidance below. --auto-patch keeps every variant non-interactive.
+  $rtkAgentArgs = @{
+    "opencode" = @("init", "-g", "--opencode", "--auto-patch")
+    "copilot"  = @("init", "-g", "--copilot", "--auto-patch")
+    "claude"   = @("init", "-g", "--auto-patch")
+    "cursor"   = @("init", "-g", "--agent", "cursor", "--auto-patch")
+    "gemini"   = @("init", "-g", "--gemini", "--auto-patch")
+    "codex"    = @("init", "-g", "--codex", "--auto-patch")
+  }
+  if ($agentSel -contains "cline") {
+    Write-Step "  [SKIP] cline has no global RTK integration - run 'rtk init --agent cline' inside each project you open with Cline (writes .clinerules)"
+  }
+  $rtkAgents = @($agentSel | Where-Object { $rtkAgentArgs.ContainsKey($_) })
+  $n = 0
+  foreach ($a in $rtkAgents) {
+    $n++
+    $rtkArgs = $rtkAgentArgs[$a]
+    Write-Step "  [$n/$($rtkAgents.Count)] wiring rtk for $a (runs: rtk $($rtkArgs -join ' ') - usually takes a few seconds)..."
     $prevEA = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     try {
       # stdin closed + output shown: rtk never waits silently on the installer's stdin,
       # and the user sees progress instead of a frozen prompt if it needs time.
-      $out = & $rtkCmd init -g --$a --auto-patch 2>&1
+      $out = & $rtkCmd @rtkArgs 2>&1
       if ($LASTEXITCODE -eq 0) {
-        Write-Ok "rtk integration wired for $a (rtk init -g --$a)"
+        Write-Ok "rtk integration wired for $a (rtk $($rtkArgs -join ' '))"
         # Relay rtk output minus its "/!\ No hook installed" upsell: the global hook
         # is installed right after this loop; the filter stays in case rtk still
         # prints the warning (e.g. the hook install failed).
         $out | Where-Object { $_ -and $_.ToString().Trim() -and $_.ToString() -notmatch 'No hook installed' } | Select-Object -First 3 | ForEach-Object { Write-Step "    $_" }
       }
-      else { Write-Warn "rtk init failed for $a (exit $LASTEXITCODE) - run manually: rtk init -g --$a"; $out | Select-Object -First 5 | ForEach-Object { Write-Step "    $_" } }
+      else { Write-Warn "rtk init failed for $a (exit $LASTEXITCODE) - run manually: rtk $($rtkArgs -join ' ')"; $out | Select-Object -First 5 | ForEach-Object { Write-Step "    $_" } }
     } catch { Write-Warn "rtk init failed for $a : $($_.Exception.Message)" }
     $ErrorActionPreference = $prevEA
   }
@@ -614,6 +781,49 @@ if ($agentSel.Count -gt 0 -and $rtkCmd) {
 }
 
 # =============================================================================
+# 9c. Log verbosity - silent default: quiet (0, errors only). No prompt in the
+#     end-user installer. Shared knob: KNOCODE_LOG_LEVEL feeds BOTH the daemon
+#     ([logging] level fallback / env override) and the agent plugins.
+# =============================================================================
+$verbosity = "0"
+$logLevelStr = "error"
+Write-Step "Log verbosity: 0 (quiet, errors only)"
+$userCfgDir = Join-Path $env:USERPROFILE ".config\knocode"
+$userCfg = Join-Path $userCfgDir "config.toml"
+try {
+  New-Item -ItemType Directory -Force -Path $userCfgDir | Out-Null
+  if (Test-Path $userCfg) {
+    $cfgText = Get-Content -LiteralPath $userCfg -Raw
+    $line = 'level = "' + $logLevelStr + '"'
+    if ($cfgText -match '(?m)^\s*level\s*=') {
+      $cfgText = [regex]::Replace($cfgText, '(?m)^\s*level\s*=.*$', $line)
+    } elseif ($cfgText -match '(?m)^\[logging\]') {
+      $cfgText = [regex]::Replace($cfgText, '(?m)^(\[logging\]\r?\n)', ('${1}' + $line + "`n"))
+    } else {
+      if (-not $cfgText.EndsWith("`n")) { $cfgText += "`n" }
+      $cfgText += "`n[logging]`n$line`n"
+    }
+    Set-Utf8NoBom $userCfg $cfgText
+    Write-Ok "user config [logging] level = $logLevelStr ($userCfg)"
+  } else {
+    $newCfg = @"
+[logging]
+level = "$logLevelStr"
+file_path = "~/.knocode/logs/knocode.log"
+max_size_mb = 100
+retention_days = 7
+"@
+    Set-Utf8NoBom $userCfg $newCfg
+    Write-Ok "user config written ($userCfg, logging.level = $logLevelStr)"
+  }
+} catch { Write-Warn "could not update $userCfg : $($_.Exception.Message)" }
+try {
+  [Environment]::SetEnvironmentVariable('KNOCODE_LOG_LEVEL', 'error', 'User')
+  $env:KNOCODE_LOG_LEVEL = 'error'
+  Write-Ok "KNOCODE_LOG_LEVEL=error persisted in user environment (HKCU)"
+} catch { Write-Warn "could not persist KNOCODE_LOG_LEVEL: $($_.Exception.Message)" }
+
+# =============================================================================
 # 10. Start daemon - knocode must be in RUNNING state after installation
 # =============================================================================
 $binDir = Join-Path $env:USERPROFILE ".knocode\bin"
@@ -650,7 +860,7 @@ if ($daemonUp) {
   $ErrorActionPreference = $prevEA
 }
 
-Write-Step "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | agents: $(if ($agentSel.Count -gt 0) { $agentSel -join ', ' } else { 'none' }) | rtk: $rtkStatus"
+Write-Step "Done - daemon: $(if ($daemonUp) { 'RUNNING at http://127.0.0.1:9527' } else { 'NOT running (start: ' + $installedDaemon + ')' }) | agents: $(if ($agentSel.Count -gt 0) { $agentSel -join ', ' } else { 'none' }) | rtk: $rtkStatus | log: quiet (0, errors only)"
 Write-Step "Next steps: open a new terminal, run 'knocode init' inside a project."
-Write-Step "To uninstall later: powershell -ExecutionPolicy Bypass -c 'irm https://github.com/$Repo/releases/latest/download/uninstall.ps1 -OutFile `"`$env:TEMP\knocode-uninstall.ps1`"; if (`$?) { & `"`$env:TEMP\knocode-uninstall.ps1`" }'"
+Write-Step "To uninstall later: irm https://raw.githubusercontent.com/$Repo/main/uninstall.ps1 | iex"
 Write-Step "Docs: https://github.com/$Repo#readme"

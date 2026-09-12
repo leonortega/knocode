@@ -15,9 +15,11 @@
 #     integrations are wired via `rtk init -g` for each selected agent, plus the
 #     global compression hook (`rtk init -g --auto-patch`).
 #
-# Agent integrations (OpenCode / Copilot) are optional and
-# selected interactively. They use the integration bundles shipped inside the
-# release archive - no npm registry needed.
+# Agent integrations (OpenCode, Copilot, Claude, Cursor, Gemini, Codex, Cline)
+# are optional and selected interactively (checkbox). Bespoke wiring for
+# OpenCode / Copilot plus universal MCP+skill wiring for the rest - all from
+# the integration bundles shipped inside the release archive - no npm registry
+# needed.
 #
 # One-liner:
 #   curl -fsSL https://raw.githubusercontent.com/leonortega/knocode/main/install.sh | bash
@@ -56,7 +58,7 @@ skip() { echo -e "  \033[90m[SKIP]\033[0m $*"; }
 fail() { echo -e "  \033[31m[FAIL]\033[0m $*" >&2; exit 1; }
 
 # ── Agent catalog & selection ─────────────────────────────────────────────
-AGENT_CATALOG="opencode copilot"
+AGENT_CATALOG="opencode copilot claude cursor gemini codex cline"
 select_agents() {
   if [ "$NO_AGENTS" = true ]; then echo ""; return; fi
   if [ -n "$AGENTS" ]; then
@@ -64,23 +66,42 @@ select_agents() {
     IFS=',' read -ra parts <<< "$AGENTS"
     for a in "${parts[@]}"; do
       a="$(echo "$a" | tr '[:upper:]' '[:lower:]' | xargs)"
-      case " $AGENT_CATALOG " in *" $a "*) sel="$sel $a";; *) warn "unknown agent '$a' - valid: opencode, copilot";; esac
+      case " $AGENT_CATALOG " in *" $a "*) sel="$sel $a";; *) warn "unknown agent '$a' - valid: $AGENT_CATALOG";; esac
     done
     if [ -z "$sel" ]; then fail "no valid agents in --agents ('$AGENTS')"; fi
     echo "$sel"; return
   fi
   if [ "$ALL_AGENTS" = true ]; then echo "$AGENT_CATALOG"; return; fi
-  # Interactive multi-select when stdin is a terminal; default to NONE otherwise
+  # Interactive checkbox when stdin is a terminal; default to NONE otherwise
   if [ ! -t 0 ]; then
-    info "non-interactive run - no agent integrations installed (use --agents opencode,copilot or --all-agents to change)"
+    info "non-interactive run - no agent integrations installed (use --agents opencode or --all-agents to change)"
     echo ""; return
   fi
+  info "Which agent integrations should be installed? (checkbox)"
+  i=0
+  for a in $AGENT_CATALOG; do i=$((i + 1)); echo "  [$i] $a"; done
+  printf "  Enter numbers separated by commas (e.g. 1,3), 'all', or press Enter for none: "
+  read -r r || true
+  r="$(echo "$r" | tr '[:upper:]' '[:lower:]' | xargs)"
+  case "$r" in
+    ""|none) echo ""; return;;
+    all) echo "$AGENT_CATALOG"; return;;
+  esac
   local sel=""
-  for a in $AGENT_CATALOG; do
-    printf "  Wire up %s? [y/N] " "$a"
-    read -r r
-    case "$r" in y|Y|yes|YES) sel="$sel $a";; *) skip "$a skipped";; esac
+  for tok in $(echo "$r" | tr ',' ' '); do
+    case "$tok" in
+      ''|*[!0-9]*) warn "ignoring invalid selection '$tok'";;
+      *)
+        n=$((10#$tok)); count=0; found=0
+        for a in $AGENT_CATALOG; do
+          count=$((count + 1))
+          if [ "$count" -eq "$n" ]; then sel="$sel $a"; found=1; fi
+        done
+        if [ "$found" -eq 0 ]; then warn "ignoring invalid selection '$tok'"; fi
+        ;;
+    esac
   done
+  sel="$(echo $sel)"
   echo "$sel"
 }
 
@@ -99,7 +120,7 @@ if [ "$NO_RTK" = true ]; then
 elif [ -z "$AGENT_SEL" ]; then
   RTK_STATUS="skipped (no agent integrations selected)"
   if [ "$WITH_RTK" = true ]; then
-    warn "--with-rtk was set but no agent integrations were selected - RTK not installed (re-run with --agents opencode,copilot)"
+    warn "--with-rtk was set but no agent integrations were selected - RTK not installed (re-run with --agents opencode,copilot,claude,cursor,gemini,codex,cline)"
   fi
 fi
 
@@ -198,16 +219,11 @@ else
   warn "no bundled integrations in $ASSET - agent wiring will be unavailable"
 fi
 
-# Install the knocode agent skill (opencode — agent-native discovery)
-SKILL_SRC="$TMP/extract/skills/knocode"
-if [ -f "$SKILL_SRC/SKILL.md" ]; then
-  OC_SKILL_DST="$HOME/.config/opencode/skills/knocode"
-  mkdir -p "$(dirname "$OC_SKILL_DST")"
-  cp -rf "$SKILL_SRC" "$OC_SKILL_DST"
-  ok "knocode skill installed to $OC_SKILL_DST (opencode agent-native)"
-else
-  warn "knocode skill not found in $ASSET - skipping skill install"
-fi
+# NOTE: no skill install for opencode/Copilot — the plugin (opencode) and the
+# hooks (Copilot) inject context transparently (dev installer is source of
+# truth; legacy skill dirs are removed by the uninstaller). The release
+# `skills/knocode` dir is consumed only by the universal agents below, straight
+# from the extract ($TMP is cleaned only on EXIT).
 
 # ── Persist on PATH ───────────────────────────────────────────────────────
 case ":$PATH:" in *":$BIN_DIR:"*) ;; *) export PATH="$BIN_DIR:$PATH" ;; esac
@@ -266,7 +282,59 @@ else
   else ok "node $(node --version)"; fi
 fi
 
+# Merge our plugin URL into opencode.jsonc, preserving any other entries
+# (e.g. RTK's plugin). Never overwrites user config: writes fresh only when the
+# file is missing, merges when node is available to parse it, warns + skips
+# otherwise (leaving user config untouched).
+merge_opencode_plugin() { # $1=config path $2=plugin url
+  if [ ! -f "$1" ]; then
+    printf '{\n    "$schema": "https://opencode.ai/config.json",\n    "plugin": ["%s"]\n}\n' "$2" > "$1" 2>/dev/null && ok "opencode config written at $1" || warn "failed to write $1"
+    return
+  fi
+  if grep -qF "$2" "$1" 2>/dev/null; then ok "opencode plugin already registered in $1"; return; fi
+  if command -v node >/dev/null 2>&1; then
+    OC_CFG="$1" OC_URL="$2" node -e '
+const fs=require("fs");
+const p=process.env.OC_CFG, url=process.env.OC_URL;
+const raw=fs.readFileSync(p,"utf8");
+let stripped=raw.replace(/\/\/.*$/gm,"").replace(/\/\*[\s\S]*?\*\//g,"");
+stripped=stripped.replace(/,\s*([\}\]])/g,"$1");
+const j=JSON.parse(stripped);
+let plugins=[];
+if(Array.isArray(j.plugin))plugins=j.plugin.slice();
+else if(typeof j.plugin==="string")plugins=[j.plugin];
+if(!plugins.includes(url))plugins.push(url);
+j.plugin=plugins;
+fs.writeFileSync(p,JSON.stringify(j,null,2));console.log("merged");' 2>/dev/null && ok "opencode plugin merged into $1 (existing entries kept)" || warn "could not merge opencode plugin into $1 (leaving user config untouched)"
+  else
+    warn "cannot merge opencode plugin into $1 without node (leaving user config untouched) - add manually: $2"
+  fi
+}
+
 # ── Agent integrations ────────────────────────────────────────────────────
+# Shared MCP stdio bridge (bundled knocode-mcp: zero-dep single file, prebuilt
+# at release time). Deployed ALWAYS - even with no agents selected - so the
+# manual-MCP hint below points at a real file; every agent MCP entry points at it.
+MCP_SRC="$intsDst/knocode-mcp/dist/index.js"
+MCP_DST_DIR="$HOME/.knocode/mcp-server"; MCP_DST="$MCP_DST_DIR/knocode-mcp.mjs"
+HAVE_BRIDGE=false
+if [ -n "$intsDst" ] && [ -f "$MCP_SRC" ]; then
+  mkdir -p "$MCP_DST_DIR" && cp -f "$MCP_SRC" "$MCP_DST" 2>/dev/null && HAVE_BRIDGE=true && ok "shared MCP bridge at $MCP_DST" || warn "MCP bridge deploy failed"
+elif [ -n "$intsDst" ] && [ -d "$intsDst" ]; then warn "bundled knocode-mcp dist not found - skipping MCP entries (skills still install)"; fi
+
+# Manual-MCP hint: printed when no agent integrations were selected.
+show_mcp_hint() {
+  if $HAVE_BRIDGE; then
+    info "No agent integrations selected - use knocode as a plain MCP server instead:"
+    echo "  1. Keep the daemon running: open a new terminal, run 'knocode init' inside a project"
+    echo "     (MCP at http://127.0.0.1:9527/mcp, tool: knocode_context)"
+    echo "  2. Add this to your MCP client's config file, then restart the client:"
+    echo "     { \"mcpServers\": { \"knocode\": { \"command\": \"node\", \"args\": [\"$MCP_DST\"] } } }"
+    echo "  3. Requires Node.js. Re-run this installer and pick agents to wire one automatically."
+  else
+    warn "No agent integrations selected - and the MCP bridge is unavailable (see warning above). Re-run with --agents to wire an agent."
+  fi
+}
 if [ -n "$AGENT_SEL" ]; then
   info "Wiring agent integrations:$AGENT_SEL"
 
@@ -291,18 +359,12 @@ if [ -n "$AGENT_SEL" ]; then
       if [ -f "$PLUGIN_SRC/dist/index.js" ]; then
         mkdir -p "$OC_GLOBAL/node_modules"
         cp -rf "$PLUGIN_SRC" "$OC_GLOBAL/node_modules/"
-        OC_CFG="$OC_GLOBAL/opencode.jsonc"
-        if [ ! -f "$OC_CFG" ] || ! grep -q "opencode-knocode" "$OC_CFG" 2>/dev/null; then
-          # NOTE: file:// spec (not the bare npm name) — opencode-knocode is not
-          # published to the npm registry, and a bare spec makes the opencode
-          # loader fail at the install stage so the plugin never loads.
-          cat > "$OC_CFG" <<EOF
-{
-    "\$schema": "https://opencode.ai/config.json",
-    "plugin": ["file://$OC_GLOBAL/node_modules/opencode-knocode"]
-}
-EOF
-        fi
+        # NOTE: file:// spec (not the bare npm name) — opencode-knocode is not
+        # published to the npm registry, and a bare spec makes the opencode
+        # loader fail at the install stage so the plugin never loads.
+        merge_opencode_plugin "$OC_GLOBAL/opencode.jsonc" "file://$OC_GLOBAL/node_modules/opencode-knocode"
+        # Remove legacy global path plugin (now bundled)
+        if [ -f "$OC_GLOBAL/plugins/knocode.ts" ]; then rm -f "$OC_GLOBAL/plugins/knocode.ts" 2>/dev/null && ok "removed legacy global plugin knocode.ts" || true; fi
         ok "opencode plugin installed (bundled opencode-knocode)"
         info "Restart opencode to load the plugin (daemon http://127.0.0.1:9527)"
       else
@@ -320,7 +382,7 @@ EOF
         VSCODE_MCP_PATH="$VSCODE_MCP" node -e "const fs=require('fs');const p=process.env.VSCODE_MCP_PATH;let j={};try{j=JSON.parse(fs.readFileSync(p,'utf8'))}catch(e){};if(j.servers&&j.servers.knocode){delete j.servers.knocode;fs.writeFileSync(p,JSON.stringify(j,null,2));console.log('removed')}" 2>/dev/null | grep -q removed && ok "removed legacy knocode MCP entry from $VSCODE_MCP (MCP is plugin-internal only)" || true
       fi
 
-      # --- Copilot Agent Plugin (hooks: SessionStart/PreToolUse/PostToolUse) ---
+      # --- Copilot Agent Plugin (hooks: UserPromptSubmit/PreToolUse) ---
       # Deploy bundled plugin to ~/.knocode/copilot-plugin (repo-independent, survives
       # repo moves). The knocode MCP inside it (servers/knocode-mcp.mjs via the plugin's
       # own mcp.json) is internal to the plugin and never exposed globally.
@@ -338,7 +400,8 @@ EOF
       # VS Code/Copilot does NOT discover agent plugins from ~/.knocode — the bundle
       # at $CP_PLUGIN_DST is only the hook-script home. Registration happens by writing
       # a hooks file into ~/.copilot/hooks/ (the same mechanism RTK uses), with an
-      # absolute script path.
+      # absolute script path. UserPromptSubmit injects the context (fires every turn,
+      # incl. tool-less answers); PreToolUse is the consume-once retry when submit failed.
       if [ -f "$CP_PLUGIN_DST/scripts/knocode-hook.mjs" ]; then
         HOOK_SCRIPT="$CP_PLUGIN_DST/scripts/knocode-hook.mjs"
         mkdir -p "$HOME/.copilot/hooks"
@@ -346,39 +409,107 @@ EOF
 {
   "version": 1,
   "hooks": {
-    "SessionStart": [
-      {
-        "type": "command",
-        "command": "node \"$HOOK_SCRIPT\" session-start",
-        "timeout": 15
-      }
-    ],
     "UserPromptSubmit": [
       {
         "type": "command",
         "command": "node \"$HOOK_SCRIPT\" user-prompt-submit",
-        "timeout": 10
+        "timeout": 5
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "node \"$HOOK_SCRIPT\" pre-tool-use",
+        "timeout": 15
       }
     ]
   }
 }
 EOF
-        ok "Copilot hooks registered at ~/.copilot/hooks/knocode-context.json (SessionStart + UserPromptSubmit)"
+        ok "Copilot hooks registered at ~/.copilot/hooks/knocode-context.json (UserPromptSubmit + PreToolUse)"
       else
         warn "knocode-hook.mjs not deployed - skipping Copilot hooks registration"
       fi
 
-      # --- Knocode agent skill (Copilot global skills folder: ~/.copilot/skills) ---
-      CP_SKILL_SRC="$TMP/extract/skills/knocode"
-      if [ -f "$CP_SKILL_SRC/SKILL.md" ]; then
-        mkdir -p "$HOME/.copilot/skills" && cp -rf "$CP_SKILL_SRC" "$HOME/.copilot/skills/" 2>/dev/null && ok "knocode skill installed to $HOME/.copilot/skills/knocode (Copilot global skills)" || warn "knocode skill copy (Copilot) failed (source: $CP_SKILL_SRC)"
-      else warn "knocode skill not found in release archive - skipping Copilot agent skill install"; fi
+      # NOTE: no skill install for Copilot — context flows through the hooks,
+      # so a skill is unnecessary (dev installer is source of truth; legacy
+      # ~/.copilot/skills/knocode is removed by the uninstaller).
+
+      # NOTE: the @knocode VS Code extension (VSIX via `code` CLI) is dev-installer
+      # only for now - the release zip does not ship it yet.
+    fi
+
+    # --- Universal agents (MCP + skill): claude, cursor, gemini, codex, cline ---
+    # Skill copy per agent global folder + `knocode` MCP server entry in the
+    # agent's global config. Sources are the release bundles (no repo checkout
+    # here; $TMP is cleaned only on EXIT so the extract is still available).
+    # Fail-open per agent: one agent's failure never blocks others.
+    if echo "$AGENT_SEL" | grep -qwE "claude|cursor|gemini|codex|cline"; then
+      info "Configuring universal agents (MCP + skill)..."
+      # Bridge is pre-deployed above (agent-integrations header) - MCP_DST/HAVE_BRIDGE.
+      SKILL_SRC="$TMP/extract/skills/knocode"
+
+      uni_skill() { # $1=agent $2=destdir
+        if [ -f "$SKILL_SRC/SKILL.md" ]; then
+          mkdir -p "$(dirname "$2")" && rm -rf "$2" 2>/dev/null; cp -rf "$SKILL_SRC" "$2" 2>/dev/null && ok "$1 skill at $2" || warn "$1 skill copy failed"
+        else warn "knocode skill not found in release archive - skipping $1 skill"; fi
+      }
+      uni_mcp_json() { # $1=agent $2=config path (mcpServers.knocode merge, keys preserved)
+        if ! $HAVE_BRIDGE; then skip "$1 MCP skipped (no bridge)"; return; fi
+        if ! command -v node >/dev/null 2>&1; then warn "$1 MCP: node needed to write $2"; return; fi
+        MCP_CFG="$2" MCP_JS="$MCP_DST" node -e "
+const fs=require('fs');const p=process.env.MCP_CFG;
+try{
+  let j={};
+  if(fs.existsSync(p)){const raw=fs.readFileSync(p,'utf8');
+    if(raw.trim()){try{j=JSON.parse(raw);}catch{j=JSON.parse(raw.replace(/\/\/.*$/gm,'').replace(/\/\*[\s\S]*?\*\//g,'').replace(/,\s*([\}\]])/g,'\$1'));}}}
+  if(!j.mcpServers||typeof j.mcpServers!=='object')j.mcpServers={};
+  j.mcpServers.knocode={command:'node',args:[process.env.MCP_JS]};
+  fs.mkdirSync(require('path').dirname(p),{recursive:true});
+  fs.writeFileSync(p,JSON.stringify(j,null,2));console.log('merged');
+}catch(e){console.error(e.message);process.exit(1);}
+" 2>/dev/null && ok "$1 MCP registered in $2" || warn "$1 MCP config failed ($2)"
+      }
+
+      if echo "$AGENT_SEL" | grep -qw claude; then
+        uni_skill claude "$HOME/.claude/skills/knocode"
+        uni_mcp_json claude "$HOME/.claude.json"
+        info "note: if 'claude mcp list' shows no servers, run: claude mcp add --scope user knocode -- node $MCP_DST"
+      fi
+      if echo "$AGENT_SEL" | grep -qw cursor; then
+        uni_skill cursor "$HOME/.cursor/skills/knocode"
+        uni_mcp_json cursor "$HOME/.cursor/mcp.json"
+      fi
+      if echo "$AGENT_SEL" | grep -qw gemini; then
+        uni_skill gemini "$HOME/.gemini/skills/knocode"
+        uni_mcp_json gemini "$HOME/.gemini/settings.json"
+      fi
+      if echo "$AGENT_SEL" | grep -qw codex; then
+        uni_skill codex "$HOME/.knocode/skills/knocode"
+        if $HAVE_BRIDGE; then
+          CODEX_CFG="$HOME/.codex/config.toml"; mkdir -p "$(dirname "$CODEX_CFG")"
+          touch "$CODEX_CFG" 2>/dev/null || true
+          if ! grep -q "mcp_servers.knocode" "$CODEX_CFG" 2>/dev/null; then
+            printf '\n[mcp_servers.knocode]\ncommand = "node"\nargs = ["%s"]\n' "$MCP_DST" >> "$CODEX_CFG" && ok "codex MCP registered in ~/.codex/config.toml" || warn "codex MCP config failed"
+          else ok "codex MCP already present in ~/.codex/config.toml"; fi
+          if ! grep -qF "$HOME/.knocode/skills/knocode" "$CODEX_CFG" 2>/dev/null; then
+            printf '\n[[skills.config]]\npath = "%s"\nenabled = true\n' "$HOME/.knocode/skills/knocode" >> "$CODEX_CFG" && ok "codex skill registered in ~/.codex/config.toml" || warn "codex skill config failed"
+          fi
+        else skip "codex MCP skipped (no bridge)"; fi
+      fi
+      if echo "$AGENT_SEL" | grep -qw cline; then
+        uni_skill cline "$HOME/.cline/skills/knocode"
+        uni_mcp_json cline "$HOME/.cline/data/settings/cline_mcp_settings.json"
+      fi
     fi
 
     if [ -n "$AGENT_SEL" ]; then
       info "Agent integrations wired:$AGENT_SEL"
     fi
   fi
+else
+  info "No agent integrations selected."
+  show_mcp_hint
 fi
 
 # ── RTK (optional external tool) - DEPENDS ON AGENT SELECTION ─────────────
@@ -462,9 +593,10 @@ if [ -z "$RTK_STATUS" ]; then
 fi
 
 # ── RTK agent wiring (external tool) ─────────────────────────────────────
-# RTK ships its own OpenCode (--opencode) and Copilot (--copilot) integrations.
-# For every agent the user selected, hand off to RTK's own `rtk init -g`.
-# Fail-open: never blocks the knocode install.
+# RTK ships its own per-agent integrations (global hooks for
+# claude/cursor/gemini/codex/copilot, plugin for opencode; cline is
+# project-scoped .clinerules only). Hand off to RTK's own `rtk init` with the
+# documented per-agent flags. Fail-open: never blocks the knocode install.
 if [ -n "$AGENT_SEL" ] && [ -n "$RTK_CMD" ]; then
   info "Wiring RTK integrations for selected agents (external tool)..."
   if ! command -v rg >/dev/null 2>&1; then
@@ -472,14 +604,34 @@ if [ -n "$AGENT_SEL" ] && [ -n "$RTK_CMD" ]; then
   fi
   n=0
   total=$(echo $AGENT_SEL | wc -w | tr -d ' ')
+  # Per-agent RTK flags (rtk-ai/rtk): claude is the default global hook,
+  # cursor/gemini/codex/copilot/opencode take their own global flags. Cline has
+  # NO global integration (prompt-level `.clinerules`, project-scoped) — skipped
+  # with guidance. --auto-patch keeps every variant non-interactive.
+  rtk_args_for() { # $1=agent -> prints rtk args, exits 1 when N/A
+    case "$1" in
+      opencode) echo "init -g --opencode --auto-patch" ;;
+      copilot)  echo "init -g --copilot --auto-patch" ;;
+      claude)   echo "init -g --auto-patch" ;;
+      cursor)   echo "init -g --agent cursor --auto-patch" ;;
+      gemini)   echo "init -g --gemini --auto-patch" ;;
+      codex)    echo "init -g --codex --auto-patch" ;;
+      *) return 1 ;;
+    esac
+  }
+  if echo "$AGENT_SEL" | grep -qw cline; then
+    skip "cline has no global RTK integration - run 'rtk init --agent cline' inside each project you open with Cline (writes .clinerules)"
+  fi
   for a in $AGENT_SEL; do
+    if ! _rtk_args="$(rtk_args_for "$a")"; then continue; fi
     n=$((n + 1))
-    info "  [$n/$total] wiring rtk for $a (runs: rtk init -g --$a --auto-patch - usually takes a few seconds)..."
+    info "  [$n/$total] wiring rtk for $a (runs: rtk $_rtk_args - usually takes a few seconds)..."
     # stdin closed + output shown: rtk never waits silently on the installer's stdin,
     # and the user sees progress instead of a frozen prompt if it needs time.
-    rtk_out=$("$RTK_CMD" init -g "--$a" --auto-patch </dev/null 2>&1)
+    # shellcheck disable=SC2086
+    rtk_out=$("$RTK_CMD" $_rtk_args </dev/null 2>&1)
     if [ $? -eq 0 ]; then
-      ok "rtk integration wired for $a (rtk init -g --$a)"
+      ok "rtk integration wired for $a (rtk $_rtk_args)"
       # Relay rtk output minus its "/!\ No hook installed" upsell: the global hook
       # is installed right after this loop; the filter stays in case rtk still
       # prints the warning (e.g. the hook install failed). (awk, not grep -v | head:
@@ -496,7 +648,7 @@ if [ -n "$AGENT_SEL" ] && [ -n "$RTK_CMD" ]; then
         fi
       fi
     else
-      warn "rtk init failed for $a (exit $?) - run manually: rtk init -g --$a"
+      warn "rtk init failed for $a - run manually: rtk $_rtk_args"
       echo "$rtk_out" | head -5 | sed 's/^/    /'
     fi
   done
@@ -523,6 +675,44 @@ if [ -n "$AGENT_SEL" ] && [ -n "$RTK_CMD" ]; then
   fi
   info "RTK wiring done."
 fi
+
+# ── Log verbosity - silent default: quiet (0, errors only). No prompt in the
+# end-user installer. Shared knob: KNOCODE_LOG_LEVEL feeds BOTH the daemon
+# ([logging] level fallback / env override) and the agent plugins.
+VERBOSITY=0
+LOG_LEVEL_STR="error"
+info "Log verbosity: 0 (quiet, errors only)"
+USER_CFG="$HOME/.config/knocode/config.toml"
+if [ -f "$USER_CFG" ] && command -v node >/dev/null 2>&1; then
+  USER_CFG_PATH="$USER_CFG" LOG_LEVEL_STR="$LOG_LEVEL_STR" node -e '
+    const fs = require("fs");
+    const p = process.env.USER_CFG_PATH;
+    let t = fs.readFileSync(p, "utf8");
+    if (/^\s*level\s*=/m.test(t)) t = t.replace(/^(\s*level\s*=).*/m, "$1 \"" + process.env.LOG_LEVEL_STR + "\"");
+    else if (/^\[logging\]/m.test(t)) t = t.replace(/^(\[logging\]\n)/m, "$1level = \"" + process.env.LOG_LEVEL_STR + "\"\n");
+    else t += (t.endsWith("\n") ? "" : "\n") + "\n[logging]\nlevel = \"" + process.env.LOG_LEVEL_STR + "\"\n";
+    fs.writeFileSync(p, t);
+  ' && ok "user config [logging] level = $LOG_LEVEL_STR ($USER_CFG)" || warn "failed to update [logging] level in $USER_CFG"
+else
+  mkdir -p "$(dirname "$USER_CFG")"
+  printf '[logging]
+level = "%s"
+file_path = "~/.knocode/logs/knocode.log"
+max_size_mb = 100
+retention_days = 7
+' "$LOG_LEVEL_STR" > "$USER_CFG" && ok "user config written ($USER_CFG, logging.level = $LOG_LEVEL_STR)" || warn "failed to write $USER_CFG"
+fi
+export KNOCODE_LOG_LEVEL="error"
+# Persist the env var for future shells (profile exports).
+for rc in "$HOME/.profile" "$HOME/.bashrc"; do
+  if [ -f "$rc" ]; then
+    if grep -qs "KNOCODE_LOG_LEVEL" "$rc"; then
+      ok "KNOCODE_LOG_LEVEL already set in $rc"
+    else
+      printf '\n# KNOCODE_LOG_LEVEL: knocode log verbosity (0 quiet / 1 normal / 2 verbose = every daemon call)\nexport KNOCODE_LOG_LEVEL="%s"\n' "$KNOCODE_LOG_LEVEL" >> "$rc" && ok "KNOCODE_LOG_LEVEL=$KNOCODE_LOG_LEVEL added to $rc"
+    fi
+  fi
+done
 
 # ── Start daemon ──────────────────────────────────────────────────────────
 daemon_health() { curl -s -o /dev/null -m 2 http://127.0.0.1:9527/health; }
@@ -554,7 +744,7 @@ else
   fi
 fi
 
-info "Done - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | agents: $(if [ -n "$AGENT_SEL" ]; then echo "$AGENT_SEL"; else echo none; fi) | rtk: ${RTK_STATUS:-unknown}"
+info "Done - daemon: $(if [ "$DAEMON_UP" = yes ]; then echo 'RUNNING at http://127.0.0.1:9527'; else echo "NOT running (start: $INSTALLED_DAEMON)"; fi) | agents: $(if [ -n "$AGENT_SEL" ]; then echo "$AGENT_SEL"; else echo none; fi) | rtk: ${RTK_STATUS:-unknown} | log: quiet (0, errors only)"
 info "Next steps: open a new terminal, run 'knocode init' inside a project."
-info "To uninstall later: curl -fsSL https://github.com/$REPO/releases/latest/download/uninstall.sh | bash -s -- --force"
+info "To uninstall later: curl -fsSL https://raw.githubusercontent.com/$REPO/main/uninstall.sh | bash"
 info "Docs: https://github.com/$REPO#readme"

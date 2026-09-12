@@ -39,17 +39,36 @@ select_agents() {
     echo "$sel"; return
   fi
   if [ "$ALL_AGENTS" = true ]; then echo "$AGENT_CATALOG"; return; fi
-  # Interactive multi-select when stdin is a terminal; default to ALL otherwise
+  # Interactive checkbox when stdin is a terminal; default to ALL otherwise
   if [ ! -t 0 ]; then
     info "non-interactive run - installing agent integrations for ALL agents (use --agents opencode or --no-agents to change)"
     echo "$AGENT_CATALOG"; return
   fi
+  info "Which agent integrations should be installed? (checkbox)"
+  i=0
+  for a in $AGENT_CATALOG; do i=$((i + 1)); echo "  [$i] $a"; done
+  printf "  Enter numbers separated by commas (e.g. 1,3), 'all', or press Enter for none: "
+  read -r r || true
+  r="$(echo "$r" | tr '[:upper:]' '[:lower:]' | xargs)"
+  case "$r" in
+    ""|none) info "no agent integrations selected"; echo ""; return;;
+    all) echo "$AGENT_CATALOG"; return;;
+  esac
   local sel=""
-  for a in $AGENT_CATALOG; do
-    printf "  Wire up %s? [Y/n] " "$a"
-    read -r r
-    case "$r" in ""|y|Y|yes|YES) sel="$sel $a";; *) skip "$a skipped";; esac
+  for tok in $(echo "$r" | tr ',' ' '); do    case "$tok" in
+      ''|*[!0-9]*) warn "ignoring invalid selection '$tok'";;
+      *)
+        n=$((10#$tok)); count=0; found=0
+        for a in $AGENT_CATALOG; do
+          count=$((count + 1))
+          if [ "$count" -eq "$n" ]; then sel="$sel $a"; found=1; fi
+        done
+        if [ "$found" -eq 0 ]; then warn "ignoring invalid selection '$tok'"; fi
+        ;;
+    esac
   done
+  sel="$(echo $sel)"
+  if [ -z "$sel" ]; then info "no agent integrations selected"; fi
   echo "$sel"
 }
 
@@ -220,9 +239,65 @@ fi
 info "Verifying installation (doctor)..."
 "$INSTALLED_CLI" doctor
 
+# Merge our plugin URL into opencode.jsonc, preserving any other entries
+# (e.g. RTK's plugin). Never overwrites user config: writes fresh only when the
+# file is missing, merges when node is available to parse it, warns + skips
+# otherwise (leaving user config untouched).
+merge_opencode_plugin() { # $1=config path $2=plugin url
+  if [ ! -f "$1" ]; then
+    printf '{\n    "$schema": "https://opencode.ai/config.json",\n    "plugin": ["%s"]\n}\n' "$2" > "$1" 2>/dev/null && ok "opencode config written at $1" || warn "failed to write $1"
+    return
+  fi
+  if grep -qF "$2" "$1" 2>/dev/null; then ok "opencode plugin already registered in $1"; return; fi
+  if command -v node >/dev/null 2>&1; then
+    OC_CFG="$1" OC_URL="$2" node -e '
+const fs=require("fs");
+const p=process.env.OC_CFG, url=process.env.OC_URL;
+const raw=fs.readFileSync(p,"utf8");
+let stripped=raw.replace(/\/\/.*$/gm,"").replace(/\/\*[\s\S]*?\*\//g,"");
+stripped=stripped.replace(/,\s*([\}\]])/g,"$1");
+const j=JSON.parse(stripped);
+let plugins=[];
+if(Array.isArray(j.plugin))plugins=j.plugin.slice();
+else if(typeof j.plugin==="string")plugins=[j.plugin];
+if(!plugins.includes(url))plugins.push(url);
+j.plugin=plugins;
+fs.writeFileSync(p,JSON.stringify(j,null,2));console.log("merged");' 2>/dev/null && ok "opencode plugin merged into $1 (existing entries kept)" || warn "could not merge opencode plugin into $1 (leaving user config untouched)"
+  else
+    warn "cannot merge opencode plugin into $1 without node (leaving user config untouched) - add manually: $2"
+  fi
+}
+
 # =====================================================================================
 # 3. Agent integrations (OpenCode / Copilot) - selected above
 # =====================================================================================
+# Shared MCP stdio bridge (packages/knocode-mcp: zero-dep single file). Deployed
+# ALWAYS - even with no agents selected - so the manual-MCP hint below points at
+# a real file; every agent MCP entry points at it.
+MCP_SRC="$ROOT/packages/knocode-mcp/dist/index.js"
+if [ ! -f "$MCP_SRC" ] && command -v npm >/dev/null 2>&1 && [ -d "$ROOT/packages/knocode-mcp" ]; then
+  (cd "$ROOT/packages/knocode-mcp" && npm install --silent 2>/dev/null && npm run build --silent 2>/dev/null) || true
+fi
+MCP_DST_DIR="$HOME/.knocode/mcp-server"; MCP_DST="$MCP_DST_DIR/knocode-mcp.mjs"
+HAVE_BRIDGE=false
+if [ -f "$MCP_SRC" ]; then
+  mkdir -p "$MCP_DST_DIR" && cp -f "$MCP_SRC" "$MCP_DST" 2>/dev/null && HAVE_BRIDGE=true && ok "shared MCP bridge at $MCP_DST" || warn "MCP bridge deploy failed"
+else warn "packages/knocode-mcp dist not built - run: cd packages/knocode-mcp && npm install && npm run build (MCP entries skipped, skills still install)"; fi
+
+# Manual-MCP hint: printed when no agent integrations were selected.
+show_mcp_hint() {
+  if $HAVE_BRIDGE; then
+    info "No agent integrations selected - use knocode as a plain MCP server instead:"
+    echo "  1. Keep the daemon running: open a new terminal, run 'knocode init' inside a project"
+    echo "     (MCP at http://127.0.0.1:9527/mcp, tool: knocode_context)"
+    echo "  2. Add this to your MCP client's config file, then restart the client:"
+    echo "     { \"mcpServers\": { \"knocode\": { \"command\": \"node\", \"args\": [\"$MCP_DST\"] } } }"
+    echo "  3. Requires Node.js. Re-run this installer and pick agents to wire one automatically."
+  else
+    warn "No agent integrations selected - and the MCP bridge is unavailable (see warning above). Re-run with --agents to wire an agent."
+  fi
+}
+if [ -z "$AGENT_SEL" ]; then show_mcp_hint; fi
 if [ -n "$AGENT_SEL" ]; then
   OC_GLOBAL="$HOME/.config/opencode"
 
@@ -236,12 +311,7 @@ if [ -n "$AGENT_SEL" ]; then
     # loader fail at the install stage so the plugin never loads. The
     # file:// URL loads the local build directly (self-contained esbuild
     # bundle at packages/opencode-knocode/dist/index.js - no npm step needed).
-    cat > "$OC_GLOBAL_CFG" <<EOF
-{
-    "\$schema": "https://opencode.ai/config.json",
-    "plugin": ["file://$ROOT/packages/opencode-knocode"]
-}
-EOF
+    merge_opencode_plugin "$OC_GLOBAL_CFG" "file://$ROOT/packages/opencode-knocode"
     ok "opencode plugin GLOBAL at $OC_GLOBAL_CFG (plugin: file:// local build, MCPs used internally by daemon)"
     # Remove legacy global path plugin (now npm)
     GLOBAL_PLUGIN="$HOME/.config/opencode/plugins/knocode.ts"
@@ -367,17 +437,7 @@ EOF
   # global config. Fail-open per agent: one agent's failure never blocks others.
   if echo "$AGENT_SEL" | grep -qwE "claude|cursor|gemini|codex|cline"; then
     info "Configuring universal agents (MCP + skill)..."
-    # Shared stdio bridge (packages/knocode-mcp: zero-dep single file). Deployed
-    # once to a repo-independent home; every agent MCP entry points at it.
-    MCP_SRC="$ROOT/packages/knocode-mcp/dist/index.js"
-    if [ ! -f "$MCP_SRC" ] && command -v npm >/dev/null 2>&1 && [ -d "$ROOT/packages/knocode-mcp" ]; then
-      (cd "$ROOT/packages/knocode-mcp" && npm install --silent 2>/dev/null && npm run build --silent 2>/dev/null) || true
-    fi
-    MCP_DST_DIR="$HOME/.knocode/mcp-server"; MCP_DST="$MCP_DST_DIR/knocode-mcp.mjs"
-    HAVE_BRIDGE=false
-    if [ -f "$MCP_SRC" ]; then
-      mkdir -p "$MCP_DST_DIR" && cp -f "$MCP_SRC" "$MCP_DST" 2>/dev/null && HAVE_BRIDGE=true && ok "shared MCP bridge at $MCP_DST" || warn "MCP bridge deploy failed"
-    else warn "packages/knocode-mcp dist not built - run: cd packages/knocode-mcp && npm install && npm run build (MCP entries skipped, skills still install)"; fi
+    # Bridge is pre-deployed above (section 3 header) - MCP_DST/HAVE_BRIDGE.
 
     uni_skill() { # $1=agent $2=destdir
       if [ -f "$ROOT/.knocode/skills-universal/knocode/SKILL.md" ]; then
@@ -448,7 +508,7 @@ if [ "$NO_RTK" = true ]; then
 elif [ -z "$AGENT_SEL" ]; then
   RTK_STATUS="skipped (no agent integrations selected)"
   if [ "$WITH_RTK" = true ]; then
-    warn "--with-rtk was set but no agent integrations were selected - RTK not installed (re-run with --agents opencode,copilot)"
+    warn "--with-rtk was set but no agent integrations were selected - RTK not installed (re-run with --agents opencode,copilot,claude,cursor,gemini,codex,cline)"
   fi
 else
   WANT_RTK=false
